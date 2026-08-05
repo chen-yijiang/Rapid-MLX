@@ -1802,3 +1802,96 @@ def test_registry_engine_mismatch_fails_closed(monkeypatch):
         selected_engine, cfg, "deepseek-agent", True, kwargs
     )
     assert "suppressed_tokens_logits_processor" not in kwargs
+
+
+@pytest.mark.parametrize(
+    ("codex_surface", "has_tools", "is_deepseek", "expected"),
+    [
+        (True, True, True, True),
+        (False, True, True, False),
+        (True, False, True, False),
+        (True, True, False, False),
+    ],
+)
+def test_deepseek_codex_reasoning_budget_is_narrowly_attached(
+    monkeypatch, codex_surface, has_tools, is_deepseek, expected
+):
+    from vllm_mlx.routes.responses import _attach_deepseek_codex_reasoning_budget
+
+    processor = object()
+    calls = []
+
+    def build(*args, **kwargs):
+        calls.append((args, kwargs))
+        return processor
+
+    monkeypatch.setattr(
+        "vllm_mlx.routes.responses._uses_deepseek_v4_reasoning",
+        lambda _cfg: is_deepseek,
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.api.reasoning_budget.ReasoningBudgetLogitsProcessor", build
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.routes.chat._engine_output_vocab_size", lambda _engine: 256
+    )
+    request = SimpleNamespace(
+        tools=[object()] if has_tools else [], reasoning_max_tokens=2048
+    )
+    engine = SimpleNamespace(
+        tokenizer=SimpleNamespace(get_vocab=lambda: {"</think>": 18})
+    )
+    cfg = SimpleNamespace(
+        model_path="DeepSeek-V4-Flash-0731",
+        model_name="deepseek-v4-flash-0731",
+        reasoning_parser_name="deepseek_v4",
+    )
+    kwargs = {}
+
+    _attach_deepseek_codex_reasoning_budget(
+        engine, cfg, request, True, codex_surface, kwargs
+    )
+
+    assert (kwargs.get("reasoning_budget_logits_processor") is processor) is expected
+    assert bool(calls) is expected
+    if expected:
+        assert calls[0][0] == (18, 2048)
+        assert calls[0][1] == {"seeded_thinking": True}
+
+
+@pytest.mark.parametrize(
+    ("vocab", "vocab_size", "resolved_thinking", "budget"),
+    [
+        ({}, 256, True, 2048),
+        ({"</think>": 256}, 256, True, 2048),
+        ({"</think>": 18}, None, True, 2048),
+        ({"</think>": 18}, 256, False, 2048),
+        ({"</think>": 18}, 256, True, None),
+    ],
+)
+def test_deepseek_codex_reasoning_budget_fails_closed(
+    monkeypatch, vocab, vocab_size, resolved_thinking, budget
+):
+    from vllm_mlx.routes.responses import _attach_deepseek_codex_reasoning_budget
+
+    monkeypatch.setattr(
+        "vllm_mlx.routes.responses._uses_deepseek_v4_reasoning", lambda _cfg: True
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.routes.chat._engine_output_vocab_size",
+        lambda _engine: vocab_size,
+    )
+    engine = SimpleNamespace(tokenizer=SimpleNamespace(get_vocab=lambda: vocab))
+    cfg = SimpleNamespace(
+        model_path="DeepSeek-V4-Flash-0731",
+        model_name="deepseek-v4-flash-0731",
+        reasoning_parser_name="deepseek_v4",
+    )
+    request = SimpleNamespace(tools=[object()], reasoning_max_tokens=budget)
+    kwargs = {}
+
+    _attach_deepseek_codex_reasoning_budget(
+        engine, cfg, request, resolved_thinking, True, kwargs
+    )
+
+    assert "reasoning_budget_logits_processor" not in kwargs
