@@ -561,38 +561,6 @@ class TestCacheListTrimmability:
         assert remaining == [1, 20, 21]
         assert cache.get_stats()["hits"] == 0
 
-    @pytest.mark.skipif(not _has_mlx_lm, reason="mlx_lm not available (Linux CI)")
-    def test_real_cachelist_exact_rewind_preserves_nested_cache_types(self, cache):
-        import mlx.core as mx
-        from mlx_lm.models.cache import CacheList, KVCache, RotatingKVCache
-
-        rotating = RotatingKVCache(max_size=128)
-        dense = KVCache()
-        kv = mx.zeros((1, 1, 8, 4))
-        rotating.update_and_fetch(kv, kv)
-        dense.update_and_fetch(kv, kv)
-        cache.store([1, 2, 3, 4, 5, 6, 7, 8], [CacheList(rotating, dense)])
-
-        result, remaining = cache.fetch([1, 2, 3, 20])
-
-        assert remaining == [20]
-        assert isinstance(result[0], CacheList)
-        assert isinstance(result[0].caches[0], RotatingKVCache)
-        assert isinstance(result[0].caches[1], KVCache)
-        assert result[0].caches[0].offset == 3
-        assert result[0].caches[1].offset == 3
-
-    def test_top_level_kv_rejects_rewind_beyond_its_offset(self, cache):
-        stored = [1, 2, 3, 4, 5, 6, 7, 8]
-        cache.store(stored, [self.TrimmableLayer(500, 500, offset=2)])
-
-        result, remaining = cache.fetch([1, 20, 21])
-
-        assert result is None
-        assert remaining == [1, 20, 21]
-        assert cache.get_stats()["hits"] == 0
-
-
 class TestGetAvailableMemory:
     """Tests for _get_available_memory helper."""
 

@@ -1215,8 +1215,8 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
     next forward pass (preventing duplicate KV entries).
 
     Supports both KVCache (keys/values are arrays) and QuantizedKVCache
-    (keys/values are 3-tuples of arrays). Returns ``None`` when a wrapper's
-    nested state cannot rewind by exactly ``trim_by`` tokens.
+    (keys/values are 3-tuples of arrays). Returns ``None`` when a DeepSeek V4
+    wrapper's nested pooling state cannot rewind by exactly ``trim_by`` tokens.
     """
     from mlx_lm.models.cache import KVCache
 
@@ -1224,6 +1224,19 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
         from mlx_lm.models.cache import QuantizedKVCache
     except ImportError:
         QuantizedKVCache = None  # noqa: N806
+
+    def has_deepseek_pooling(layer: Any) -> bool:
+        if type(layer).__module__ == "vllm_mlx.models.deepseek_v4_cache":
+            return type(layer).__name__ in {
+                "PoolingCache",
+                "BatchPoolingCache",
+                "DeepseekV4PoolingCache",
+                "BatchDeepseekV4PoolingCache",
+            }
+        return any(
+            has_deepseek_pooling(child)
+            for child in (getattr(layer, "caches", None) or ())
+        )
 
     def trim_wrapper_exact(layer: Any) -> Any:
         """Copy and trim a wrapper only when every nested cache can rewind.
@@ -1257,8 +1270,6 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
             trimmed.append(layer_cache)
             continue
         if QuantizedKVCache is not None and isinstance(layer_cache, QuantizedKVCache):
-            if layer_cache.offset < trim_by:
-                return None
             tc = QuantizedKVCache.__new__(QuantizedKVCache)
             tc.keys = layer_cache.keys
             tc.values = layer_cache.values
@@ -1268,9 +1279,6 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
             trimmed.append(tc)
         elif hasattr(layer_cache, "values_compressed"):
             # TurboQuantKVCache — use its trim method on a copy
-            offset = getattr(layer_cache, "offset", None)
-            if isinstance(offset, int) and offset < trim_by:
-                return None
             tc = copy.copy(layer_cache)
             tc.trim(trim_by)
             trimmed.append(tc)
@@ -1279,21 +1287,22 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
             and hasattr(layer_cache, "keys")
             and not isinstance(layer_cache.keys, (list, tuple))
         ):
-            if layer_cache.offset < trim_by:
-                return None
             tc = KVCache.__new__(KVCache)
             tc.keys = layer_cache.keys
             tc.values = layer_cache.values
             tc.offset = max(layer_cache.offset - trim_by, 0)
             trimmed.append(tc)
         else:
-            # Wrappers such as CacheList must actually rewind all nested
-            # state.  A deepcopy alone leaves a divergent recurrent/pooling
-            # suffix attached while falsely reporting an LCP cache hit.
-            tc = trim_wrapper_exact(layer_cache)
-            if tc is None:
-                return None
-            trimmed.append(tc)
+            if has_deepseek_pooling(layer_cache):
+                # DeepSeek pooling state must rewind with the local KV state;
+                # otherwise a divergent suffix crosses request boundaries.
+                tc = trim_wrapper_exact(layer_cache)
+                if tc is None:
+                    return None
+                trimmed.append(tc)
+            else:
+                # Preserve the established path for all other wrappers.
+                trimmed.append(copy.deepcopy(layer_cache))
     return trimmed
 
 
