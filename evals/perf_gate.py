@@ -24,17 +24,23 @@ Baseline is a reviewed human decision, never automatic
 ------------------------------------------------------
 This gate NEVER invents a baseline. With no floor it runs ADVISORY: it prints the
 measured tokens/sec and exits 0, so the first Studio run yields the number to
-review. Enforcement turns on only when a floor is supplied via ``--min-tps`` or
-``$RAPID_MLX_PERF_MIN_TPS`` (set it to the reviewed number, e.g. ~85% of the
-observed warm rate to absorb run-to-run variance).
+review. Enforcement turns on only when a floor is supplied, most-specific first:
+``--min-tps`` > ``$RAPID_MLX_PERF_MIN_TPS`` > the committed per-alias floor in
+``--floors-file`` (``harness/perf_floors.json``). Set the reviewed number to
+~85% of the observed warm rate to absorb run-to-run variance.
 
 Usage
 -----
     # advisory (prints tokens/sec, always exits 0):
     python evals/perf_gate.py --base-url http://127.0.0.1:8000/v1
 
-    # enforcing (fails if below the reviewed floor):
+    # enforcing via a one-off override:
     RAPID_MLX_PERF_MIN_TPS=19.5 python evals/perf_gate.py
+
+    # enforcing via the committed reviewed floor for a served alias
+    # (how release-check-m3's G8b gate calls it):
+    python evals/perf_gate.py --alias qwen3.5-9b-4bit \
+        --floors-file harness/perf_floors.json
 
 Exit codes:
     0 — measured tokens/sec >= floor, OR advisory mode (no floor set)
@@ -84,6 +90,84 @@ def _env_float(name: str) -> float | None:
         raise SystemExit(
             f"ERROR: {name}={raw!r} is not a number; refusing to guess a floor."
         )
+
+
+class FloorsFileError(RuntimeError):
+    """A committed floors file could not be read or is malformed."""
+
+
+def _load_floor_from_file(path: str, alias: str) -> float | None:
+    """Look up the reviewed decode-tok/s floor for ``alias`` in a committed
+    floors file (``harness/perf_floors.json``).
+
+    Shape::
+
+        {"schema": 1, "floors": {"qwen3.5-9b-4bit": 29.5, ...}}
+
+    Returns the floor for ``alias`` if present, else ``None`` (advisory — the
+    alias simply has no reviewed floor yet). A committed config that cannot be
+    parsed is an operator error, not a missing-floor: it raises
+    ``FloorsFileError`` so the caller can fail loudly rather than silently drop
+    enforcement. A present-but-non-numeric floor value is likewise a config
+    error (not silently ignored). The numeric VALUE is not range-checked here;
+    the shared finite/``> 0`` guard in :func:`main` validates whatever floor
+    ultimately wins, so a bogus ``0`` / ``NaN`` is rejected the same way for
+    the file, the env var, and ``--min-tps``.
+    """
+    if not alias:
+        # No alias to look up — a floors file is useless without one. Treat as
+        # "no file floor" rather than erroring, so callers can always pass the
+        # file and let the alias decide whether it matters.
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise FloorsFileError(f"cannot read floors file {path!r}: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise FloorsFileError(f"floors file {path!r} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise FloorsFileError(f"floors file {path!r} must be a JSON object")
+    floors = data.get("floors", {})
+    if not isinstance(floors, dict):
+        raise FloorsFileError(f"floors file {path!r}: 'floors' must be an object")
+    if alias not in floors:
+        return None
+    value = floors[alias]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        # ``bool`` is an ``int`` subclass — reject True/False explicitly so a
+        # stray ``true`` isn't read as the floor 1.0.
+        raise FloorsFileError(
+            f"floors file {path!r}: floor for {alias!r} must be a number, got {value!r}"
+        )
+    return float(value)
+
+
+def resolve_floor(
+    *,
+    cli_min_tps: float | None,
+    env_min_tps: float | None,
+    floors_file: str | None,
+    alias: str | None,
+) -> float | None:
+    """Resolve the effective decode-tok/s floor from all sources, most-specific
+    first: an explicit ``--min-tps`` beats ``RAPID_MLX_PERF_MIN_TPS`` beats the
+    committed ``floors_file[alias]``; if none supplies one, the gate runs
+    advisory (``None``).
+
+    An operator override (CLI/env) intentionally wins over the committed file so
+    a one-off run can tighten or relax the reviewed floor without editing repo
+    config. Validation of the winning value is left to :func:`main`.
+    """
+    if cli_min_tps is not None:
+        return cli_min_tps
+    if env_min_tps is not None:
+        return env_min_tps
+    if floors_file is not None:
+        return _load_floor_from_file(floors_file, alias or "")
+    return None
 
 
 def _server_reachable(base_url: str) -> bool:
@@ -235,9 +319,26 @@ def main() -> int:
     ap.add_argument(
         "--min-tps",
         type=float,
-        default=_env_float("RAPID_MLX_PERF_MIN_TPS"),
+        default=None,
         help="reviewed decode tokens/sec floor; below it the gate fails. "
-        "Default: $RAPID_MLX_PERF_MIN_TPS, else advisory-only.",
+        "An explicit value here overrides both $RAPID_MLX_PERF_MIN_TPS and the "
+        "--floors-file entry. Default: resolve from env / floors file, else "
+        "advisory-only.",
+    )
+    ap.add_argument(
+        "--floors-file",
+        default=None,
+        help="path to a committed reviewed-floors JSON "
+        '(harness/perf_floors.json): {"floors": {"<alias>": <tok/s>}}. '
+        "When --alias has an entry the gate ENFORCES that floor; when it "
+        "doesn't, the gate runs advisory. Lower precedence than --min-tps and "
+        "$RAPID_MLX_PERF_MIN_TPS.",
+    )
+    ap.add_argument(
+        "--alias",
+        default=None,
+        help="the served model alias, used to look up its reviewed floor in "
+        "--floors-file.",
     )
     ap.add_argument(
         "--max-tokens",
@@ -254,15 +355,33 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # Resolve the effective floor from all sources (CLI > env > floors file).
+    # A broken COMMITTED floors file is an operator error that must fail loudly
+    # rather than silently dropping enforcement — the whole point of wiring
+    # this gate is that a regression can't slip through unnoticed.
+    try:
+        min_tps = resolve_floor(
+            cli_min_tps=args.min_tps,
+            env_min_tps=_env_float("RAPID_MLX_PERF_MIN_TPS"),
+            floors_file=args.floors_file,
+            alias=args.alias,
+        )
+    except FloorsFileError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    args.min_tps = min_tps
+
     # A floor of NaN silently disables enforcement: every `tps < nan` is False,
     # so a 1 tok/s model would PASS. Same for inf (always fails) and <= 0
     # (meaningless). A malformed floor means the operator INTENDED to enforce
-    # and the value is broken — refuse rather than quietly run advisory.
+    # and the value is broken — refuse rather than quietly run advisory. This
+    # guards the resolved floor regardless of which source supplied it.
     if args.min_tps is not None and not (
         math.isfinite(args.min_tps) and args.min_tps > 0
     ):
         print(
-            f"ERROR: --min-tps/RAPID_MLX_PERF_MIN_TPS is {args.min_tps!r}; "
+            f"ERROR: resolved perf floor is {args.min_tps!r} "
+            "(--min-tps / $RAPID_MLX_PERF_MIN_TPS / --floors-file); "
             "expected a finite number > 0. Refusing to run with a floor that "
             "cannot enforce anything.",
             file=sys.stderr,
