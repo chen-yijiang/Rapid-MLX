@@ -580,13 +580,20 @@ class TestCacheListTrimmability:
         )
         pooling.update_and_fetch(pooled_kv)
         cache.store([1, 2, 3, 4, 5, 6, 7, 8], [CacheList(rotating, pooling)])
-        stored_pooling = next(iter(cache._entries.values())).cache[0].caches[1]
+        stored_wrapper = next(iter(cache._entries.values())).cache[0]
+        stored_wrapper.caches = list(stored_wrapper.caches)
+        stored_rotating = stored_wrapper.caches[0]
+        stored_pooling = stored_wrapper.caches[1]
+        stored_rotating_offset = stored_rotating.offset
         stored_buf = stored_pooling.buf_kv
 
         result, remaining = cache.fetch([1, 2, 3, 4, 5, 6, 20])
 
         assert remaining == [20]
+        assert isinstance(result[0].caches, list)
+        assert result[0].caches[0].offset == 6
         assert result[0].caches[1].remainder == 1
+        assert stored_rotating.offset == stored_rotating_offset
         assert stored_pooling.remainder == 3
         assert stored_pooling.buf_kv is stored_buf
 

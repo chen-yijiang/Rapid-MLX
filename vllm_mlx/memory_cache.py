@@ -1256,7 +1256,7 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
                 if trimmed_child is None:
                     return None
                 trimmed_children.append(trimmed_child)
-            tc.caches = tuple(trimmed_children)
+            tc.caches = type(children)(trimmed_children)
             return tc
 
         tc = copy.deepcopy(layer)
