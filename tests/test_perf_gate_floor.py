@@ -132,6 +132,23 @@ def test_load_wrong_schema_raises(tmp_path: Path) -> None:
         _load_floor_from_file(str(p), "a")
 
 
+def test_load_bool_schema_raises(tmp_path: Path) -> None:
+    # `true` == 1 in Python, so a naive `!= 1` check would accept it. The
+    # strict `type(schema) is int` guard must reject the bool.
+    p = tmp_path / "boolschema.json"
+    p.write_text(json.dumps({"schema": True, "floors": {"a": 10.0}}))
+    with pytest.raises(FloorsFileError, match="unsupported schema"):
+        _load_floor_from_file(str(p), "a")
+
+
+def test_load_float_schema_raises(tmp_path: Path) -> None:
+    # `1.0 == 1` too — the strict integer-type guard must reject a float schema.
+    p = tmp_path / "floatschema.json"
+    p.write_text(json.dumps({"schema": 1.0, "floors": {"a": 10.0}}))
+    with pytest.raises(FloorsFileError, match="unsupported schema"):
+        _load_floor_from_file(str(p), "a")
+
+
 def test_load_missing_floors_key_raises(tmp_path: Path) -> None:
     # Missing 'floors' key is a broken file (not an empty registry); an empty
     # {} object is separately valid — see test_load_empty_floors_object.
@@ -205,6 +222,10 @@ def test_committed_perf_floors_is_valid() -> None:
     path = REPO_ROOT / "harness" / "perf_floors.json"
     data = json.loads(path.read_text())
     assert isinstance(data, dict)
+    # Schema must be exactly the integer the loader accepts — assert it here so
+    # a registry schema bump can't silently leave this test green while every
+    # release fails at G8b. (bool is an int subclass; exclude it explicitly.)
+    assert type(data.get("schema")) is int and data["schema"] == 1
     assert isinstance(data.get("floors"), dict)
     # Every committed floor must be a real, enforceable number (finite > 0) so
     # the gate never trips its own "floor that cannot enforce anything" guard.
@@ -215,7 +236,12 @@ def test_committed_perf_floors_is_valid() -> None:
         # pass ``> 0`` alone yet be rejected by the loader at release time.
         assert math.isfinite(floor)
         assert floor > 0
-    # And the loader agrees with a straight parse for any committed alias.
+    # Drive the loader through its FULL validation path (schema + floors-shape
+    # checks) even when the registry is empty — a lookup of an absent alias
+    # still runs every guard and must return None, not raise. This is what
+    # catches a schema/shape regression regardless of how many floors exist.
+    assert _load_floor_from_file(str(path), "definitely-not-a-real-alias") is None
+    # And for any committed alias the loader agrees with a straight parse.
     for alias in data["floors"]:
         assert _load_floor_from_file(str(path), alias) == float(data["floors"][alias])
 
@@ -234,10 +260,12 @@ def test_main_rejects_floors_file_without_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A --floors-file with no --alias and no CLI/env floor silently defeats the
-    # gate — main() must reject it (exit 2) BEFORE any server contact, so this
-    # needs no running server.
+    # gate — main() must reject it (exit 2) BEFORE any server contact. Force
+    # server-reachability False so that even if the guard regressed, the test
+    # can't accidentally reach a real endpoint.
     floors_file = _write_floors(tmp_path, {"a": 10.0})
     monkeypatch.delenv("RAPID_MLX_PERF_MIN_TPS", raising=False)
+    monkeypatch.setattr(perf_gate, "_server_reachable", lambda _url: False)
     monkeypatch.setattr("sys.argv", ["perf_gate.py", "--floors-file", floors_file])
     assert perf_gate.main() == 2
 
@@ -249,18 +277,12 @@ def test_main_allows_floors_file_without_alias_when_env_floor_set(
     # missing-alias guard must NOT fire. Both that guard and the downstream
     # "no server" path return 2, so distinguish them by stderr: the arg-guard
     # message must be ABSENT (the run reached the measurement path instead).
+    # Hermetic: stub server-reachability to a deterministic False rather than
+    # relying on a real localhost port being closed.
     floors_file = _write_floors(tmp_path, {"a": 10.0})
     monkeypatch.setenv("RAPID_MLX_PERF_MIN_TPS", "12.5")
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "perf_gate.py",
-            "--floors-file",
-            floors_file,
-            "--base-url",
-            "http://127.0.0.1:59999/v1",
-        ],
-    )
+    monkeypatch.setattr(perf_gate, "_server_reachable", lambda _url: False)
+    monkeypatch.setattr("sys.argv", ["perf_gate.py", "--floors-file", floors_file])
     rc = perf_gate.main()
     err = capsys.readouterr().err
     assert "--floors-file was given without --alias" not in err

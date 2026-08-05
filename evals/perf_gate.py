@@ -135,10 +135,13 @@ def _load_floor_from_file(path: str, alias: str) -> float | None:
     # A committed config with the wrong/absent schema is malformed, not empty:
     # a future breaking format change must fail loudly here, never be read as
     # "no floors" (which would silently disable enforcement for every alias).
-    if data.get("schema") != 1:
+    # Strict identity check: ``schema`` must be the INTEGER 1. ``!= 1`` alone
+    # would accept ``true`` (bool is an int subclass, ``True == 1``) and
+    # ``1.0`` (``1.0 == 1``) — both malformed JSON that must not pass.
+    schema = data.get("schema")
+    if type(schema) is not int or schema != 1:
         raise FloorsFileError(
-            f"floors file {path!r}: unsupported schema {data.get('schema')!r} "
-            "(expected 1)"
+            f"floors file {path!r}: unsupported schema {schema!r} (expected integer 1)"
         )
     # ``floors`` must be PRESENT — a missing key is a broken file, not an empty
     # registry. An empty ``{}`` object IS valid (the seeded state: advisory for
