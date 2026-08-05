@@ -196,6 +196,8 @@ _engine: BaseEngine | None = None
 # so shutdown can await a still-running load to completion before the shutdown
 # save and engine teardown.
 _prefix_cache_load_task = None  # asyncio.Task | None
+_prefix_cache_checkpoint_task = None  # asyncio.Task | None
+_prefix_cache_checkpoint_stop = None  # asyncio.Event | None
 _model_name: str | None = None
 _model_alias: str | None = None  # Short alias used to start the model (if any)
 # Task #292 (Bo R13/R14): operator opt-in for ``/v1/audio/*`` routes on a
@@ -309,8 +311,12 @@ _pinned_system_prompt_hash: str | None = None  # Hash of pinned system prompt
 
 
 from .runtime.cache import (
+    checkpoint_prefix_cache_to_disk as _checkpoint_prefix_cache_to_disk,
+)
+from .runtime.cache import (
     load_prefix_cache_from_disk as _load_prefix_cache_from_disk,
 )
+from .runtime.cache import prefix_cache_snapshot_exists as _prefix_cache_snapshot_exists
 from .runtime.cache import (
     save_prefix_cache_to_disk as _save_prefix_cache_to_disk,
 )
@@ -385,6 +391,66 @@ async def _drain_deferred_prefix_cache_load() -> None:
         await task
     except Exception as _e:  # noqa: BLE001
         logger.debug(f"[lifespan] deferred prefix-cache load cleanup: {_e}")
+
+
+def _prefix_cache_checkpoint_interval() -> float:
+    """Return idle-checkpoint cadence; zero disables the background task."""
+    raw = os.environ.get("RAPID_MLX_PREFIX_CACHE_CHECKPOINT_SECONDS", "300")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid RAPID_MLX_PREFIX_CACHE_CHECKPOINT_SECONDS=%r; using 300s",
+            raw,
+        )
+        return 300.0
+
+
+async def _idle_prefix_cache_checkpoint_loop(
+    stop: asyncio.Event, interval_sec: float
+) -> None:
+    """Persist one dirty message boundary during a naturally idle window."""
+    await _drain_deferred_prefix_cache_load()
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_sec)
+            continue
+        except TimeoutError:
+            pass
+
+        engine = _engine
+        if engine is None:
+            continue
+        try:
+            stats = engine.get_stats()
+            cache_stats = engine.get_cache_stats() or {}
+            if stats.get("num_running", 0) or stats.get("num_waiting", 0):
+                continue
+            if (
+                "content_generation" not in cache_stats
+                or int(cache_stats.get("entry_count", 0)) <= 0
+            ):
+                continue
+            generation = int(cache_stats.get("content_generation", 0))
+            persisted = int(cache_stats.get("persisted_generation", 0))
+            if generation <= persisted and _prefix_cache_snapshot_exists():
+                continue
+            await asyncio.to_thread(_checkpoint_prefix_cache_to_disk)
+        except Exception as exc:  # noqa: BLE001 — best-effort optimization
+            logger.warning("Idle prefix-cache checkpoint failed: %s", exc)
+
+
+async def _stop_idle_prefix_cache_checkpoint() -> None:
+    """Wake and drain the idle checkpoint worker before engine teardown."""
+    global _prefix_cache_checkpoint_stop, _prefix_cache_checkpoint_task
+    task = _prefix_cache_checkpoint_task
+    stop = _prefix_cache_checkpoint_stop
+    if stop is not None:
+        stop.set()
+    if task is not None:
+        await task
+    _prefix_cache_checkpoint_task = None
+    _prefix_cache_checkpoint_stop = None
 
 
 def _do_tool_grammar_warmup(tokenizer, parser_cls) -> bool:
@@ -492,6 +558,8 @@ async def _warmup_tool_grammar(engine) -> None:
 async def lifespan(app: FastAPI):
     """FastAPI lifespan for startup/shutdown events."""
     global _engine, _mcp_manager
+    global _prefix_cache_checkpoint_stop, _prefix_cache_checkpoint_task
+    global _prefix_cache_load_task
 
     # Install process-death observability BEFORE any executor is created.
     # Two complementary mechanisms (codex r3 NIT clarification):
@@ -716,8 +784,15 @@ async def lifespan(app: FastAPI):
     # fully-installed cache, never a partially-populated one. Worst case a few
     # early requests recompute their prefix; they never see a wedged server.
     if _engine is not None and hasattr(_engine, "load_cache_from_disk"):
-        global _prefix_cache_load_task
         _prefix_cache_load_task = asyncio.create_task(_deferred_load_prefix_cache())
+        checkpoint_interval = _prefix_cache_checkpoint_interval()
+        if checkpoint_interval > 0:
+            _prefix_cache_checkpoint_stop = asyncio.Event()
+            _prefix_cache_checkpoint_task = asyncio.create_task(
+                _idle_prefix_cache_checkpoint_loop(
+                    _prefix_cache_checkpoint_stop, checkpoint_interval
+                )
+            )
 
     # Print the real "Ready:" banner now — only here is the port truly
     # accepting connections AND the engine warmed up. The CLI's earlier
@@ -770,6 +845,11 @@ async def lifespan(app: FastAPI):
         from .routes.video import shutdown_video_jobs
 
         await shutdown_video_jobs()
+
+        # Stop the pre-SIGTERM checkpoint loop before the final deadline-bound
+        # save. If a one-entry checkpoint is already in flight, drain it before
+        # touching the same staging directory or tearing down the MLX engine.
+        await _stop_idle_prefix_cache_checkpoint()
 
         # Let the deferred prefix-cache load (#1350) finish before we save or
         # tear down the engine — see the helper's docstring for why we await

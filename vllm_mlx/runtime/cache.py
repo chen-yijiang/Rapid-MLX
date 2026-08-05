@@ -216,6 +216,59 @@ def save_prefix_cache_to_disk(budget_sec: float | None = None) -> None:
         logger.warning(f"[lifespan] Failed to save cache to disk: {e}", exc_info=True)
 
 
+def checkpoint_prefix_cache_to_disk() -> bool:
+    """Persist one reusable frontier while the server is idle.
+
+    Unlike the shutdown flush, this runs before any SIGTERM deadline exists.
+    Limiting the snapshot to the first persistence-priority candidate keeps the
+    pause bounded and prevents a periodic checkpoint from rewriting every
+    multi-GB LRU entry.  ``save_to_disk`` orders an explicit message boundary
+    first for DeepSeek's non-trimmable cache, so one entry is sufficient to
+    preserve the latest resumable conversation frontier.
+    """
+    cfg = get_config()
+    if cfg.engine is None:
+        return False
+
+    # The one-entry bound depends on the deadline-predicate contract. Legacy
+    # third-party engines without that kwarg would otherwise take the fallback
+    # path and rewrite their entire cache from this periodic task.
+    import inspect
+
+    try:
+        save_sig = inspect.signature(cfg.engine.save_cache_to_disk)
+    except (TypeError, ValueError):
+        logger.info("[lifespan] Idle prefix checkpoint skipped: unknown engine API")
+        return False
+    if "should_abort" not in save_sig.parameters and not any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in save_sig.parameters.values()
+    ):
+        logger.info("[lifespan] Idle prefix checkpoint skipped: legacy engine API")
+        return False
+
+    calls = 0
+
+    def stop_after_first(_predicted_sec: float = 0.0) -> bool:
+        nonlocal calls
+        calls += 1
+        return calls > 1
+
+    try:
+        d = get_cache_dir()
+        logger.info(f"[lifespan] Idle-checkpointing one prefix boundary to {d}")
+        saved = bool(_call_save_cache_to_disk(cfg.engine, d, stop_after_first))
+        if saved:
+            # Do not serialize the live radix here: the one-entry snapshot is
+            # intentionally a subset of the in-memory cache. A missing radix
+            # is rebuilt from the committed entry at startup; saving the live
+            # multi-entry radix would publish terminal keys with no KV files.
+            logger.info(f"[lifespan] Idle prefix checkpoint saved to {d}")
+        return saved
+    except Exception as e:
+        logger.warning(f"[lifespan] Idle prefix checkpoint failed: {e}", exc_info=True)
+        return False
+
+
 def _save_radix_index_after_cache(engine, cache_dir: str) -> None:
     """Best-effort radix-index persistence."""
     cache = _resolve_memory_aware_cache(engine)
@@ -336,3 +389,8 @@ def get_cache_dir() -> str:
     return os.path.join(
         os.path.expanduser("~"), ".cache", "rapid-mlx", "prefix_cache", leaf
     )
+
+
+def prefix_cache_snapshot_exists() -> bool:
+    """Return whether the current model has a committed disk snapshot."""
+    return os.path.isfile(os.path.join(get_cache_dir(), "index.json"))

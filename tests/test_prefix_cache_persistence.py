@@ -1362,6 +1362,7 @@ def test_save_to_disk_partial_commit_on_abort(tmp_path):
     index = json.loads((cache_dir / "index.json").read_text())
     assert index["num_entries"] == 1
     assert len(index["entries"]) == 1
+    assert index["total_memory_bytes"] == index["entries"][0]["memory_bytes"]
     assert (cache_dir / "entry_0.safetensors").exists()
     assert (cache_dir / "entry_0_tokens.bin").exists()
 
@@ -1371,6 +1372,22 @@ def test_save_to_disk_partial_commit_on_abort(tmp_path):
     assert loaded == 1
     entry = next(iter(cache2._entries.values()))
     assert entry.tokens == tuple(range(11))
+
+
+def test_persistence_generation_stays_dirty_after_later_remove(tmp_path):
+    cache = fresh_cache()
+    tokens = list(range(11))
+    cache.store(tokens, make_kvcache(num_tokens=11))
+    before = cache.get_stats()
+    assert before["content_generation"] > before["persisted_generation"]
+
+    assert cache.save_to_disk(str(tmp_path / "snap")) is True
+    saved = cache.get_stats()
+    assert saved["content_generation"] == saved["persisted_generation"]
+
+    assert cache.remove(tokens) is True
+    removed = cache.get_stats()
+    assert removed["content_generation"] > removed["persisted_generation"]
 
 
 def test_shutdown_partial_commit_prioritizes_longest_prefix(tmp_path):

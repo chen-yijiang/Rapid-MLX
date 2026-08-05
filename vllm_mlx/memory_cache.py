@@ -1743,6 +1743,12 @@ class MemoryAwarePrefixCache:
         #     (0 on an aborted replace / empty load), computed under _lock.
         self._last_save_outcome: str = "empty"
         self._last_load_bytes: int = 0
+        # Monotonic content revision used by the server's idle checkpoint
+        # loop.  A checkpoint records the exact revision it serialized on the
+        # MLX step thread; a later store therefore remains visibly dirty even
+        # if it races immediately after the atomic disk commit.
+        self._content_generation: int = 0
+        self._persisted_generation: int = 0
 
         # Guards _entries / _sorted_keys mutations against concurrent
         # fetch/store/evict from multiple threads (asyncio loop + mlx-step).
@@ -2111,6 +2117,7 @@ class MemoryAwarePrefixCache:
                     existing = self._entries[tokens_key]
                     existing.message_boundary = True
                     existing.message_boundary_sequence = self._message_boundary_sequence
+                    self._content_generation += 1
                 self._entries.move_to_end(tokens_key)
                 return True
 
@@ -2158,6 +2165,7 @@ class MemoryAwarePrefixCache:
                     existing = self._entries[tokens_key]
                     existing.message_boundary = True
                     existing.message_boundary_sequence = self._message_boundary_sequence
+                    self._content_generation += 1
                 self._entries.move_to_end(tokens_key)
                 return True
 
@@ -2238,6 +2246,7 @@ class MemoryAwarePrefixCache:
             # re-open the #1025 leak. Only the hybrid store path pays the scan.
             if entry.non_trimmable:
                 self._enforce_hybrid_bound_locked()
+            self._content_generation += 1
 
         logger.debug(
             f"Stored cache: {len(tokens)} tokens, "
@@ -2285,6 +2294,7 @@ class MemoryAwarePrefixCache:
         self._stats.evictions += 1
         self._stats.entry_count = len(self._entries)
         self._stats.current_memory_bytes = self._current_memory
+        self._content_generation += 1
 
         logger.debug(
             f"[{reason}] removed {len(tokens_key)} tokens, "
@@ -2377,6 +2387,7 @@ class MemoryAwarePrefixCache:
             self._current_memory -= entry.memory_bytes
             self._stats.entry_count = len(self._entries)
             self._stats.current_memory_bytes = self._current_memory
+            self._content_generation += 1
         return True
 
     def clear(self) -> None:
@@ -2414,6 +2425,7 @@ class MemoryAwarePrefixCache:
                 save_drift_drops=carried_save_drift_drops,
                 non_trimmable_skips=carried_non_trimmable_skips,
             )
+            self._content_generation += 1
         logger.debug("Cache cleared")
 
     def get_stats(self) -> dict[str, Any]:
@@ -2435,6 +2447,8 @@ class MemoryAwarePrefixCache:
             out["non_trimmable_entries"] = sum(
                 1 for e in self._entries.values() if e.non_trimmable
             )
+            out["content_generation"] = self._content_generation
+            out["persisted_generation"] = self._persisted_generation
         if self._radix_index is not None:
             try:
                 out["radix"] = self._radix_index.stats()
@@ -2564,6 +2578,8 @@ class MemoryAwarePrefixCache:
 
         self._last_save_outcome = "failed"
         t0 = _time.monotonic()
+        with self._lock:
+            save_generation = self._content_generation
 
         try:
             import mlx_lm.models.cache  # noqa: F401
@@ -2938,6 +2954,9 @@ class MemoryAwarePrefixCache:
         # ships alongside, or load_from_disk's ``num_entries`` read drifts
         # from reality and downstream callers report a phantom count.
         index["num_entries"] = len(index["entries"])
+        index["total_memory_bytes"] = sum(
+            int(entry["memory_bytes"]) for entry in index["entries"]
+        )
 
         # Pass 3 — orphan-file sweep. The atomic rename publishes the
         # entire ``.new/`` directory tree, so any file we wrote but the
@@ -3152,6 +3171,11 @@ class MemoryAwarePrefixCache:
         # at least one entry landed AND the atomic rename published it. A
         # zero-commit / un-renamed result stays "failed" (set above).
         self._last_save_outcome = "committed" if committed else "failed"
+        if committed:
+            with self._lock:
+                self._persisted_generation = max(
+                    self._persisted_generation, save_generation
+                )
         return committed
 
     def load_from_disk(
@@ -3952,6 +3976,15 @@ class MemoryAwarePrefixCache:
         # rolled back out of the cache — they must NOT count toward the loaded
         # total the caller (and the import route's ``entries_loaded``) sees.
         loaded -= radix_rolled_back
+
+        if loaded > 0:
+            with self._lock:
+                self._content_generation += 1
+                # A startup load into an empty cache exactly matches the
+                # committed disk snapshot.  Merge imports can coexist with
+                # unsaved live entries and must remain dirty.
+                if len(self._entries) == loaded:
+                    self._persisted_generation = self._content_generation
 
         dt = _time.monotonic() - t0
         summary = (
