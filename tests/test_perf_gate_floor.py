@@ -289,3 +289,30 @@ def test_main_allows_floors_file_without_alias_when_env_floor_set(
     # It failed for the RIGHT reason (no server), not the arg guard.
     assert rc == 2
     assert "no rapid-mlx server reachable" in err
+
+
+def test_main_valid_cli_floor_ignores_malformed_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # CLI-over-env precedence must cover ERRORS too: a garbage
+    # $RAPID_MLX_PERF_MIN_TPS must not abort a run whose --min-tps is valid.
+    # (_env_float SystemExits on garbage; if main parsed env unconditionally
+    # this would raise instead of proceeding.) With a valid CLI floor and no
+    # server, main returns 2 for "no server" — never SystemExit on the env.
+    monkeypatch.setenv("RAPID_MLX_PERF_MIN_TPS", "not-a-number")
+    monkeypatch.setattr(perf_gate, "_server_reachable", lambda _url: False)
+    monkeypatch.setattr("sys.argv", ["perf_gate.py", "--min-tps", "30"])
+    assert perf_gate.main() == 2
+
+
+def test_main_malformed_env_aborts_when_no_cli_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # But when there is NO CLI floor, a garbage env value is the operator's
+    # intended-but-broken floor and must fail loudly (SystemExit from
+    # _env_float), not silently run advisory.
+    monkeypatch.setenv("RAPID_MLX_PERF_MIN_TPS", "not-a-number")
+    monkeypatch.setattr(perf_gate, "_server_reachable", lambda _url: False)
+    monkeypatch.setattr("sys.argv", ["perf_gate.py"])
+    with pytest.raises(SystemExit):
+        perf_gate.main()

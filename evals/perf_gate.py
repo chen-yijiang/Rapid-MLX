@@ -383,7 +383,11 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    env_min_tps = _env_float("RAPID_MLX_PERF_MIN_TPS")
+    # Honor CLI-over-env precedence for BOTH the value and its errors: an
+    # explicit --min-tps makes $RAPID_MLX_PERF_MIN_TPS irrelevant, so don't
+    # even parse it (``_env_float`` SystemExits on a malformed value — parsing
+    # it unconditionally would abort a run whose CLI floor is perfectly valid).
+    env_min_tps = _env_float("RAPID_MLX_PERF_MIN_TPS") if args.min_tps is None else None
 
     # A --floors-file with no --alias resolves to advisory (nothing to look
     # up), which silently defeats the gate the caller clearly meant to arm.
