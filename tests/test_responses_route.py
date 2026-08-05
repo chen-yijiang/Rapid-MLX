@@ -1895,3 +1895,52 @@ def test_deepseek_codex_reasoning_budget_fails_closed(
     )
 
     assert "reasoning_budget_logits_processor" not in kwargs
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("tool_parser", "expected"),
+    [("deepseek_v4_0731", True), ("qwen3", False)],
+)
+def test_responses_route_wires_deepseek_codex_reasoning_budget(
+    monkeypatch, responses_client, stream, tool_parser, expected
+):
+    from vllm_mlx.api.reasoning_budget import ReasoningBudgetLogitsProcessor
+    from vllm_mlx.config import get_config
+
+    cfg = get_config()
+    cfg.model_name = "deepseek-v4-flash-0731"
+    cfg.model_path = "DeepSeek-V4-Flash-0731"
+    cfg.reasoning_parser_name = "deepseek_v4"
+    cfg.tool_call_parser = tool_parser
+    engine = responses_client.engine
+    engine.tokenizer.get_vocab = lambda: {"</think>": 18}
+    monkeypatch.setattr(
+        "vllm_mlx.routes.chat._engine_output_vocab_size", lambda _engine: 256
+    )
+    tools = [
+        {
+            "type": "function",
+            "name": name,
+            "description": name,
+            "parameters": {"type": "object", "properties": {}},
+        }
+        for name in ("exec_command", "write_stdin")
+    ]
+
+    response = responses_client.client.post(
+        "/v1/responses",
+        json=_payload(
+            model="deepseek-v4-flash-0731",
+            input="inspect the repository",
+            tools=tools,
+            reasoning={"effort": "medium"},
+            stream=stream,
+        ),
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 200, response.text
+    calls = engine.stream_calls if stream else engine.calls
+    processor = calls[-1].kwargs.get("reasoning_budget_logits_processor")
+    assert isinstance(processor, ReasoningBudgetLogitsProcessor) is expected

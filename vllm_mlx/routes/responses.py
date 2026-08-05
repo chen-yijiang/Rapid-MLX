@@ -511,9 +511,7 @@ def _attach_deepseek_codex_reasoning_budget(
         return
 
     if (
-        _effective_enable_thinking(
-            resolved_thinking, cfg.model_path or cfg.model_name
-        )
+        _effective_enable_thinking(resolved_thinking, cfg.model_path or cfg.model_name)
         is not True
         or getattr(openai_request, "reasoning_max_tokens", None) is None
     ):
@@ -533,7 +531,11 @@ def _attach_deepseek_codex_reasoning_budget(
     except Exception:
         return
     vocab_size = _engine_output_vocab_size(engine)
-    if not isinstance(end_id, int) or vocab_size is None or not 0 <= end_id < vocab_size:
+    if (
+        not isinstance(end_id, int)
+        or vocab_size is None
+        or not 0 <= end_id < vocab_size
+    ):
         return
     chat_kwargs["reasoning_budget_logits_processor"] = ReasoningBudgetLogitsProcessor(
         end_id,
