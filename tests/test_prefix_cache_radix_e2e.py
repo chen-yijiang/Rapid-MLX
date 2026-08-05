@@ -42,7 +42,7 @@ class _FakeCacheLayer:
     """
 
     def __init__(self, payload_size: int = 1024):
-        self.offset = 0
+        self.offset = payload_size
         # A bytes payload makes ``estimate_kv_cache_memory`` return a
         # stable value across runs (no MLX arrays involved).
         self._payload = b"\x00" * payload_size
@@ -55,10 +55,12 @@ class _FakeCacheLayer:
     def meta_state(self):
         return (str(self.offset),)
 
-    def trim(self, n: int) -> None:
-        """No-op trim — the cache code only checks for the method's
-        existence to decide trimmability."""
+    def trim(self, n: int) -> int:
+        """Mirror mlx-lm's exact-rewind return contract."""
+        if n > self.offset:
+            return 0
         self.offset = max(0, self.offset - n)
+        return n
 
     def is_trimmable(self) -> bool:
         return True

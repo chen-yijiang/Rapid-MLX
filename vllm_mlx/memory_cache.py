@@ -1234,7 +1234,7 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
         permission to rewind an arbitrary LCP distance leaks the divergent
         suffix into the next request.
         """
-        tc = copy.deepcopy(layer)
+        tc = copy.copy(layer)
         children = getattr(tc, "caches", None)
         if children is not None:
             trimmed_children = []
@@ -1257,6 +1257,8 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
             trimmed.append(layer_cache)
             continue
         if QuantizedKVCache is not None and isinstance(layer_cache, QuantizedKVCache):
+            if layer_cache.offset < trim_by:
+                return None
             tc = QuantizedKVCache.__new__(QuantizedKVCache)
             tc.keys = layer_cache.keys
             tc.values = layer_cache.values
@@ -1266,6 +1268,9 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
             trimmed.append(tc)
         elif hasattr(layer_cache, "values_compressed"):
             # TurboQuantKVCache — use its trim method on a copy
+            offset = getattr(layer_cache, "offset", None)
+            if isinstance(offset, int) and offset < trim_by:
+                return None
             tc = copy.copy(layer_cache)
             tc.trim(trim_by)
             trimmed.append(tc)
@@ -1274,6 +1279,8 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
             and hasattr(layer_cache, "keys")
             and not isinstance(layer_cache.keys, (list, tuple))
         ):
+            if layer_cache.offset < trim_by:
+                return None
             tc = KVCache.__new__(KVCache)
             tc.keys = layer_cache.keys
             tc.values = layer_cache.values

@@ -582,6 +582,16 @@ class TestCacheListTrimmability:
         assert result[0].caches[0].offset == 3
         assert result[0].caches[1].offset == 3
 
+    def test_top_level_kv_rejects_rewind_beyond_its_offset(self, cache):
+        stored = [1, 2, 3, 4, 5, 6, 7, 8]
+        cache.store(stored, [self.TrimmableLayer(500, 500, offset=2)])
+
+        result, remaining = cache.fetch([1, 20, 21])
+
+        assert result is None
+        assert remaining == [1, 20, 21]
+        assert cache.get_stats()["hits"] == 0
+
 
 class TestGetAvailableMemory:
     """Tests for _get_available_memory helper."""
