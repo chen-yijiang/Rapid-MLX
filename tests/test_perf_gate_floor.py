@@ -11,6 +11,7 @@ file-parsing helpers against ``tmp_path`` fixtures and monkeypatched env.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -115,11 +116,63 @@ def test_load_non_object_top_level_raises(tmp_path: Path) -> None:
         _load_floor_from_file(str(p), "a")
 
 
+def test_load_missing_schema_raises(tmp_path: Path) -> None:
+    # A missing schema must fail loudly, NOT be read as an empty registry —
+    # otherwise a future format change silently disables enforcement.
+    p = tmp_path / "noschema.json"
+    p.write_text(json.dumps({"floors": {"a": 10.0}}))
+    with pytest.raises(FloorsFileError, match="unsupported schema"):
+        _load_floor_from_file(str(p), "a")
+
+
+def test_load_wrong_schema_raises(tmp_path: Path) -> None:
+    p = tmp_path / "v2.json"
+    p.write_text(json.dumps({"schema": 2, "floors": {"a": 10.0}}))
+    with pytest.raises(FloorsFileError, match="unsupported schema"):
+        _load_floor_from_file(str(p), "a")
+
+
+def test_load_missing_floors_key_raises(tmp_path: Path) -> None:
+    # Missing 'floors' key is a broken file (not an empty registry); an empty
+    # {} object is separately valid — see test_load_empty_floors_object.
+    p = tmp_path / "nofloors.json"
+    p.write_text(json.dumps({"schema": 1}))
+    with pytest.raises(FloorsFileError, match="missing required 'floors'"):
+        _load_floor_from_file(str(p), "a")
+
+
 def test_load_floors_not_object_raises(tmp_path: Path) -> None:
     p = tmp_path / "f.json"
     p.write_text(json.dumps({"schema": 1, "floors": [1, 2]}))
     with pytest.raises(FloorsFileError, match="'floors' must be an object"):
         _load_floor_from_file(str(p), "a")
+
+
+def test_load_infinity_value_raises(tmp_path: Path) -> None:
+    # Python's json decoder parses the JS literal ``Infinity``; a committed
+    # +inf floor would make every model fail, so it is a config error, not a
+    # floor. (json.dumps(float("inf")) emits the literal ``Infinity``.)
+    floors_file = _write_floors(tmp_path, {"a": float("inf")})
+    with pytest.raises(FloorsFileError, match="finite number"):
+        _load_floor_from_file(floors_file, "a")
+
+
+def test_load_nan_value_raises(tmp_path: Path) -> None:
+    floors_file = _write_floors(tmp_path, {"a": float("nan")})
+    with pytest.raises(FloorsFileError, match="finite number"):
+        _load_floor_from_file(floors_file, "a")
+
+
+def test_load_zero_value_raises(tmp_path: Path) -> None:
+    floors_file = _write_floors(tmp_path, {"a": 0})
+    with pytest.raises(FloorsFileError, match="finite number"):
+        _load_floor_from_file(floors_file, "a")
+
+
+def test_load_negative_value_raises(tmp_path: Path) -> None:
+    floors_file = _write_floors(tmp_path, {"a": -5.0})
+    with pytest.raises(FloorsFileError, match="finite number"):
+        _load_floor_from_file(floors_file, "a")
 
 
 def test_load_non_numeric_value_raises(tmp_path: Path) -> None:
@@ -158,6 +211,9 @@ def test_committed_perf_floors_is_valid() -> None:
     for alias, floor in data["floors"].items():
         assert isinstance(alias, str) and alias
         assert isinstance(floor, (int, float)) and not isinstance(floor, bool)
+        # finite AND > 0 — a committed +Infinity (which json parses) or 0 would
+        # pass ``> 0`` alone yet be rejected by the loader at release time.
+        assert math.isfinite(floor)
         assert floor > 0
     # And the loader agrees with a straight parse for any committed alias.
     for alias in data["floors"]:
@@ -169,3 +225,45 @@ def test_module_exposes_resolution_api() -> None:
     assert callable(perf_gate.resolve_floor)
     assert callable(perf_gate._load_floor_from_file)
     assert issubclass(perf_gate.FloorsFileError, RuntimeError)
+
+
+# --------------------------- main() argument guards -----------------------
+
+
+def test_main_rejects_floors_file_without_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A --floors-file with no --alias and no CLI/env floor silently defeats the
+    # gate — main() must reject it (exit 2) BEFORE any server contact, so this
+    # needs no running server.
+    floors_file = _write_floors(tmp_path, {"a": 10.0})
+    monkeypatch.delenv("RAPID_MLX_PERF_MIN_TPS", raising=False)
+    monkeypatch.setattr("sys.argv", ["perf_gate.py", "--floors-file", floors_file])
+    assert perf_gate.main() == 2
+
+
+def test_main_allows_floors_file_without_alias_when_env_floor_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # With a higher-precedence env floor active the file is moot, so the
+    # missing-alias guard must NOT fire. Both that guard and the downstream
+    # "no server" path return 2, so distinguish them by stderr: the arg-guard
+    # message must be ABSENT (the run reached the measurement path instead).
+    floors_file = _write_floors(tmp_path, {"a": 10.0})
+    monkeypatch.setenv("RAPID_MLX_PERF_MIN_TPS", "12.5")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "perf_gate.py",
+            "--floors-file",
+            floors_file,
+            "--base-url",
+            "http://127.0.0.1:59999/v1",
+        ],
+    )
+    rc = perf_gate.main()
+    err = capsys.readouterr().err
+    assert "--floors-file was given without --alias" not in err
+    # It failed for the RIGHT reason (no server), not the arg guard.
+    assert rc == 2
+    assert "no rapid-mlx server reachable" in err

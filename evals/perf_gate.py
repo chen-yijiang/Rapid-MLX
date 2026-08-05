@@ -105,19 +105,21 @@ def _load_floor_from_file(path: str, alias: str) -> float | None:
         {"schema": 1, "floors": {"qwen3.5-9b-4bit": 29.5, ...}}
 
     Returns the floor for ``alias`` if present, else ``None`` (advisory — the
-    alias simply has no reviewed floor yet). A committed config that cannot be
-    parsed is an operator error, not a missing-floor: it raises
-    ``FloorsFileError`` so the caller can fail loudly rather than silently drop
-    enforcement. A present-but-non-numeric floor value is likewise a config
-    error (not silently ignored). The numeric VALUE is not range-checked here;
-    the shared finite/``> 0`` guard in :func:`main` validates whatever floor
-    ultimately wins, so a bogus ``0`` / ``NaN`` is rejected the same way for
-    the file, the env var, and ``--min-tps``.
+    alias simply has no reviewed floor yet). Anything else about the COMMITTED
+    config being wrong raises ``FloorsFileError`` so the caller fails loudly
+    rather than silently dropping enforcement — this includes an unreadable
+    file, invalid JSON, a non-object top level, an unsupported/absent
+    ``schema``, an absent or non-object ``floors``, and a present floor whose
+    value is not a finite number ``> 0`` (a committed ``0`` / negative / NaN /
+    ``Infinity`` floor cannot enforce anything, so it is a config error, not a
+    "no floor"). Only a MISSING alias — not a broken file — is the advisory
+    ``None`` path.
     """
     if not alias:
         # No alias to look up — a floors file is useless without one. Treat as
         # "no file floor" rather than erroring, so callers can always pass the
-        # file and let the alias decide whether it matters.
+        # file and let the alias decide whether it matters. main() separately
+        # rejects a --floors-file supplied with no --alias and no other floor.
         return None
     try:
         with open(path, encoding="utf-8") as fh:
@@ -130,7 +132,20 @@ def _load_floor_from_file(path: str, alias: str) -> float | None:
         raise FloorsFileError(f"floors file {path!r} is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise FloorsFileError(f"floors file {path!r} must be a JSON object")
-    floors = data.get("floors", {})
+    # A committed config with the wrong/absent schema is malformed, not empty:
+    # a future breaking format change must fail loudly here, never be read as
+    # "no floors" (which would silently disable enforcement for every alias).
+    if data.get("schema") != 1:
+        raise FloorsFileError(
+            f"floors file {path!r}: unsupported schema {data.get('schema')!r} "
+            "(expected 1)"
+        )
+    # ``floors`` must be PRESENT — a missing key is a broken file, not an empty
+    # registry. An empty ``{}`` object IS valid (the seeded state: advisory for
+    # every alias); a missing key is not.
+    if "floors" not in data:
+        raise FloorsFileError(f"floors file {path!r}: missing required 'floors' object")
+    floors = data["floors"]
     if not isinstance(floors, dict):
         raise FloorsFileError(f"floors file {path!r}: 'floors' must be an object")
     if alias not in floors:
@@ -142,7 +157,17 @@ def _load_floor_from_file(path: str, alias: str) -> float | None:
         raise FloorsFileError(
             f"floors file {path!r}: floor for {alias!r} must be a number, got {value!r}"
         )
-    return float(value)
+    value = float(value)
+    # Range-check the committed value HERE so a bogus 0 / negative / NaN /
+    # Infinity fails as a config error naming the file + alias, rather than
+    # slipping through to main()'s generic "resolved floor cannot enforce"
+    # guard (which still backstops CLI / env floors).
+    if not math.isfinite(value) or value <= 0:
+        raise FloorsFileError(
+            f"floors file {path!r}: floor for {alias!r} must be a finite number "
+            f"> 0, got {value!r}"
+        )
+    return value
 
 
 def resolve_floor(
@@ -355,6 +380,27 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    env_min_tps = _env_float("RAPID_MLX_PERF_MIN_TPS")
+
+    # A --floors-file with no --alias resolves to advisory (nothing to look
+    # up), which silently defeats the gate the caller clearly meant to arm.
+    # Reject it — UNLESS a higher-precedence CLI/env floor is active, in which
+    # case the file is moot and the run is legitimately enforcing anyway.
+    if (
+        args.floors_file is not None
+        and not (args.alias or "").strip()
+        and args.min_tps is None
+        and env_min_tps is None
+    ):
+        print(
+            "ERROR: --floors-file was given without --alias and no "
+            "--min-tps / $RAPID_MLX_PERF_MIN_TPS floor is set, so no floor "
+            "could be looked up and the gate would silently run advisory. "
+            "Pass --alias <served model> to enforce its committed floor.",
+            file=sys.stderr,
+        )
+        return 2
+
     # Resolve the effective floor from all sources (CLI > env > floors file).
     # A broken COMMITTED floors file is an operator error that must fail loudly
     # rather than silently dropping enforcement — the whole point of wiring
@@ -362,7 +408,7 @@ def main() -> int:
     try:
         min_tps = resolve_floor(
             cli_min_tps=args.min_tps,
-            env_min_tps=_env_float("RAPID_MLX_PERF_MIN_TPS"),
+            env_min_tps=env_min_tps,
             floors_file=args.floors_file,
             alias=args.alias,
         )
