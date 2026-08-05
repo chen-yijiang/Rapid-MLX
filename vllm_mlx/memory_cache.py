@@ -1247,9 +1247,9 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
         permission to rewind an arbitrary LCP distance leaks the divergent
         suffix into the next request.
         """
-        tc = copy.copy(layer)
-        children = getattr(tc, "caches", None)
+        children = getattr(layer, "caches", None)
         if children is not None:
+            tc = copy.copy(layer)
             trimmed_children = []
             for child in children:
                 trimmed_child = trim_wrapper_exact(child)
@@ -1259,6 +1259,7 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
             tc.caches = tuple(trimmed_children)
             return tc
 
+        tc = copy.deepcopy(layer)
         trim = getattr(tc, "trim", None)
         if not callable(trim):
             return None
