@@ -1497,7 +1497,7 @@ def test_deadline_save_skips_oversized_prefix_and_tries_smaller(tmp_path):
     cache.store([1], make_kvcache(num_tokens=1))
     cache.store(list(range(100)), make_kvcache(num_tokens=100, fill=2.0))
     entry_sizes = sorted(entry.memory_bytes for entry in cache._entries.values())
-    threshold = sum(entry_sizes) / 2 / (150 * 1024 * 1024)
+    threshold = sum(entry_sizes) / 2 / (500 * 1024 * 1024)
 
     assert (
         cache.save_to_disk(
@@ -1869,7 +1869,7 @@ def test_save_to_disk_predicts_entry_zero_from_bootstrap_floor(tmp_path):
     """Codex PR #667 round 3 BLOCKING-1.
 
     Entry 0 must receive a non-zero forward-looking ``predicted_sec``
-    derived from the 150 MB/s bootstrap floor — round 2 passed 0 here
+    derived from the 500 MB/s bootstrap floor — round 2 passed 0 here
     and let a catastrophically large first entry straddle the SIGTERM
     grace deadline, leaving ``cache_dir.new/`` orphaned. The estimate
     scales with ``entry.memory_bytes`` so a too-large entry-0 trips
@@ -1887,9 +1887,11 @@ def test_save_to_disk_predicts_entry_zero_from_bootstrap_floor(tmp_path):
 
     cache.save_to_disk(str(cache_dir), should_abort=predicate)
     assert len(seen_predicted) == 1
-    assert seen_predicted[0] > 0, (
+    entry = next(iter(cache._entries.values()))
+    expected = entry.memory_bytes / (500 * 1024 * 1024)
+    assert seen_predicted[0] == pytest.approx(expected), (
         f"entry 0 must receive a non-zero predicted_sec (bootstrap "
-        f"150 MB/s × entry size) — round 2 used 0 here and let huge "
+        f"500 MB/s × entry size) — round 2 used 0 here and let huge "
         f"entries straddle the deadline (codex round 3 BLOCKING-1). "
         f"Got {seen_predicted[0]}"
     )

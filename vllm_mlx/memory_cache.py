@@ -2660,21 +2660,18 @@ class MemoryAwarePrefixCache:
         # orphaned; this is the bug the deadline gate exists to prevent).
         #
         # Bootstrap floor for entry 0 (no observed sample yet) is
-        # 150 MB/s — calibrated so:
-        #   - typical Gemma 4 26B entry (~250 MB) predicts ~1.7 s,
-        #     comfortably fitting the 3.1 s safe budget (3.5 s budget −
-        #     0.4 s commit headroom);
-        #   - genuinely oversized entry (~600 MB+) predicts >4 s and
-        #     correctly trips before write starts — would straddle
-        #     deadline either way.
+        # 500 MB/s. A real DeepSeek-V4 120k restart benchmark wrote three
+        # entries / 2,397 MB in 0.9 s (~2.66 GB/s), while the former 150 MB/s
+        # estimate predicted ~16 s and skipped every reusable boundary under
+        # the default 3.5 s shutdown budget. 500 MB/s retains >5x headroom
+        # against that measured path while allowing one 0.8-1.1 GB long-context
+        # boundary to seed the observed-throughput estimator.
         # Round 1 used 50 MB/s and over-predicted typical entries
         # (codex round 2 BLOCKING-1). Round 2 used 0 and let huge
         # entries straddle the deadline (codex round 3 BLOCKING-1).
-        # 150 MB/s is the goldilocks middle ground: 3× round 1, gives
-        # real-world observed throughput (~875 MB/s during the
-        # original incident) ~6× safety margin while still catching
-        # genuinely-too-large entries.
-        _BOOTSTRAP_BYTES_PER_SEC = 150 * _BYTES_PER_MB
+        # Entries above ~1.55 GB still predict beyond the 3.1 s safe window
+        # and are skipped before their uninterruptible write begins.
+        _BOOTSTRAP_BYTES_PER_SEC = 500 * _BYTES_PER_MB
         # Support BOTH zero-arg and one-arg ``should_abort`` predicates
         # at the per-entry layer. The new contract is
         # ``Callable[[float], bool]`` (forward-looking) but external
