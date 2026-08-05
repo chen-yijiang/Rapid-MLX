@@ -502,6 +502,12 @@ def _attach_deepseek_codex_reasoning_budget(
     Without this coupling, Responses only trims hidden reasoning after decode;
     long agent turns can therefore spend thousands of invisible tokens without
     ever reaching the next action even though ``reasoning_max_tokens`` is set.
+
+    Once a request qualifies, missing boundary metadata is a server invariant
+    violation rather than an opt-out: silently retaining the post-hoc trim would
+    re-open the unbounded-decode failure this path exists to prevent. Streaming
+    converts this error into ``response.failed``; non-streaming returns the
+    route's normal server-error envelope.
     """
     if (
         not codex_surface
@@ -525,18 +531,39 @@ def _attach_deepseek_codex_reasoning_budget(
     # prefilled or is the first generated token. Treating it as seeded also avoids
     # losing that first marker when mlx-lm establishes the processor's cumulative
     # token baseline on its first callback.
-    tokenizer = getattr(engine, "tokenizer", None)
-    try:
-        end_id = tokenizer.get_vocab().get("</think>")
-    except Exception:
-        return
-    vocab_size = _engine_output_vocab_size(engine)
-    if (
-        not isinstance(end_id, int)
-        or vocab_size is None
-        or not 0 <= end_id < vocab_size
+    cache_attr = "_rapid_mlx_deepseek_codex_reasoning_boundary"
+    boundary = getattr(engine, cache_attr, None)
+    if not (
+        isinstance(boundary, tuple)
+        and len(boundary) == 2
+        and all(isinstance(value, int) for value in boundary)
     ):
-        return
+        tokenizer = getattr(engine, "tokenizer", None)
+        try:
+            end_id = tokenizer.get_vocab().get("</think>")
+        except Exception as exc:
+            raise RuntimeError(
+                "DeepSeek Codex reasoning budget unavailable: tokenizer cannot "
+                "resolve the </think> boundary"
+            ) from exc
+        vocab_size = _engine_output_vocab_size(engine)
+        if (
+            not isinstance(end_id, int)
+            or vocab_size is None
+            or not 0 <= end_id < vocab_size
+        ):
+            raise RuntimeError(
+                "DeepSeek Codex reasoning budget unavailable: </think> is "
+                "missing or outside the model output vocabulary"
+            )
+        boundary = (end_id, vocab_size)
+        try:
+            setattr(engine, cache_attr, boundary)
+        except (AttributeError, TypeError):
+            # Slot-only engine facades still get the enforced processor; they
+            # merely pay the one-token lookup again on their next request.
+            pass
+    end_id, _vocab_size = boundary
     chat_kwargs["reasoning_budget_logits_processor"] = ReasoningBudgetLogitsProcessor(
         end_id,
         getattr(openai_request, "reasoning_max_tokens", None),

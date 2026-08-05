@@ -1860,17 +1860,15 @@ def test_deepseek_codex_reasoning_budget_is_narrowly_attached(
 
 
 @pytest.mark.parametrize(
-    ("vocab", "vocab_size", "resolved_thinking", "budget"),
+    ("vocab", "vocab_size"),
     [
-        ({}, 256, True, 2048),
-        ({"</think>": 256}, 256, True, 2048),
-        ({"</think>": 18}, None, True, 2048),
-        ({"</think>": 18}, 256, False, 2048),
-        ({"</think>": 18}, 256, True, None),
+        ({}, 256),
+        ({"</think>": 256}, 256),
+        ({"</think>": 18}, None),
     ],
 )
-def test_deepseek_codex_reasoning_budget_fails_closed(
-    monkeypatch, vocab, vocab_size, resolved_thinking, budget
+def test_deepseek_codex_reasoning_budget_rejects_unsafe_metadata(
+    monkeypatch, vocab, vocab_size
 ):
     from vllm_mlx.routes.responses import _attach_deepseek_codex_reasoning_budget
 
@@ -1887,6 +1885,29 @@ def test_deepseek_codex_reasoning_budget_fails_closed(
         model_name="deepseek-v4-flash-0731",
         reasoning_parser_name="deepseek_v4",
     )
+    request = SimpleNamespace(tools=[object()], reasoning_max_tokens=2048)
+    kwargs = {}
+
+    with pytest.raises(RuntimeError, match="reasoning budget unavailable"):
+        _attach_deepseek_codex_reasoning_budget(
+            engine, cfg, request, True, True, kwargs
+        )
+
+    assert "reasoning_budget_logits_processor" not in kwargs
+
+
+@pytest.mark.parametrize(("resolved_thinking", "budget"), [(False, 2048), (True, None)])
+def test_deepseek_codex_reasoning_budget_keeps_explicit_opt_outs(
+    resolved_thinking, budget
+):
+    from vllm_mlx.routes.responses import _attach_deepseek_codex_reasoning_budget
+
+    engine = SimpleNamespace(tokenizer=SimpleNamespace())
+    cfg = SimpleNamespace(
+        model_path="DeepSeek-V4-Flash-0731",
+        model_name="deepseek-v4-flash-0731",
+        reasoning_parser_name="deepseek_v4",
+    )
     request = SimpleNamespace(tools=[object()], reasoning_max_tokens=budget)
     kwargs = {}
 
@@ -1895,6 +1916,34 @@ def test_deepseek_codex_reasoning_budget_fails_closed(
     )
 
     assert "reasoning_budget_logits_processor" not in kwargs
+
+
+def test_deepseek_codex_reasoning_boundary_is_cached_per_engine(monkeypatch):
+    from vllm_mlx.routes.responses import _attach_deepseek_codex_reasoning_budget
+
+    calls = 0
+
+    def get_vocab():
+        nonlocal calls
+        calls += 1
+        return {"</think>": 18}
+
+    monkeypatch.setattr(
+        "vllm_mlx.routes.chat._engine_output_vocab_size", lambda _engine: 256
+    )
+    engine = SimpleNamespace(tokenizer=SimpleNamespace(get_vocab=get_vocab))
+    cfg = SimpleNamespace(
+        model_path="DeepSeek-V4-Flash-0731",
+        model_name="deepseek-v4-flash-0731",
+        reasoning_parser_name="deepseek_v4",
+    )
+    request = SimpleNamespace(tools=[object()], reasoning_max_tokens=2048)
+
+    for _ in range(2):
+        _attach_deepseek_codex_reasoning_budget(engine, cfg, request, True, True, {})
+
+    assert calls == 1
+    assert engine._rapid_mlx_deepseek_codex_reasoning_boundary == (18, 256)
 
 
 @pytest.mark.parametrize("stream", [False, True])
