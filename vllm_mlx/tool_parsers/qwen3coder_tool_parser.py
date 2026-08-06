@@ -815,6 +815,7 @@ class Qwen3CoderToolParser(ToolParser):
             )
         complete_without_wrapper_close = (
             wrapper_close_idx == -1
+            and func_close_idx != -1
             and current_text.rstrip().endswith(self.function_end_token)
         )
         if complete_without_wrapper_close:

@@ -79,6 +79,61 @@ class NemotronToolParser(ToolParser):
         re.DOTALL,
     )
 
+    @staticmethod
+    def _scan_wrapped_calls(
+        text: str, request: dict[str, Any] | None
+    ) -> tuple[list[tuple[str, str, int, int]], list[tuple[int, int]]]:
+        """Scan canonical wrappers while preserving prose around the function.
+
+        The last outer closer bounds the wrapper. Within it, the structural
+        function closer is the first one after the final parameter closer;
+        this keeps literal markers inside parameter values while leaving prose
+        between ``</function>`` and ``</tool_call>`` visible as content.
+        """
+        wrapper_openers = list(re.finditer(r"<tool_call>", text))
+        declared = _declared_tool_names(request)
+        matches: list[tuple[str, str, int, int]] = []
+        ranges: list[tuple[int, int]] = []
+        for index, wrapper in enumerate(wrapper_openers):
+            limit = (
+                wrapper_openers[index + 1].start()
+                if index + 1 < len(wrapper_openers)
+                else len(text)
+            )
+            outer_start = text.rfind("</tool_call>", wrapper.end(), limit)
+            if outer_start < 0:
+                continue
+            wrapper_end = outer_start + len("</tool_call>")
+            ranges.append((wrapper.start(), wrapper_end))
+
+            function = re.search(r"<function=([^>]+)>", text[wrapper.end() : outer_start])
+            if function is None:
+                continue
+            name = function.group(1).strip()
+            if declared is not None and name not in declared:
+                continue
+            function_start = wrapper.end() + function.start()
+            body_start = wrapper.end() + function.end()
+            body_region = text[body_start:outer_start]
+            last_parameter_close = body_region.rfind("</parameter>")
+            close_search_start = (
+                last_parameter_close + len("</parameter>")
+                if last_parameter_close >= 0
+                else 0
+            )
+            close = body_region.find("</function>", close_search_start)
+            if close < 0:
+                continue
+            matches.append(
+                (
+                    name,
+                    body_region[:close],
+                    function_start,
+                    body_start + close + len("</function>"),
+                )
+            )
+        return matches, ranges
+
     def extract_tool_calls(
         self, model_output: str, request: dict[str, Any] | None = None
     ) -> ExtractedToolCallInformation:
@@ -106,28 +161,9 @@ class NemotronToolParser(ToolParser):
         # there leaves the other door open: argument text containing
         # ``</function><function=delete_everything>`` would still fabricate an
         # executable call here.
-        wrapped_calls = split_marked_calls(
-            model_output,
-            r"<tool_call>\s*<function=([^>]+)>",
-            "</function>",
-            outer="</tool_call>",
-            valid_names=_declared_tool_names(request),
+        wrapped_matches, wrapped_ranges = self._scan_wrapped_calls(
+            model_output, request
         )
-        wrapped_ranges = [(start, end) for _n, _b, start, end in wrapped_calls]
-        wrapped_matches = []
-        for name, body, wrapper_start, wrapper_end in wrapped_calls:
-            function_start = model_output.find("<function=", wrapper_start, wrapper_end)
-            function_close = model_output.rfind(
-                "</function>", function_start, wrapper_end
-            )
-            wrapped_matches.append(
-                (
-                    name,
-                    body,
-                    function_start,
-                    function_close + len("</function>"),
-                )
-            )
         bare_matches = split_marked_calls(
             model_output,
             r"<function=([^>]+)>",

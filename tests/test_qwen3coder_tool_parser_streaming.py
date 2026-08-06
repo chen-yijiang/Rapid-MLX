@@ -304,6 +304,23 @@ def test_missing_optional_wrapper_close_still_finalizes_arguments():
     assert json.loads("".join(_argument_fragments(deltas))) == {"body": "hello"}
 
 
+def test_literal_function_close_at_chunk_boundary_does_not_finalize_early():
+    """A payload marker can align exactly with a tokenizer delta boundary."""
+    value = "text literal </function> still value"
+    request = _request_with_tool("note_write", {"body": {"type": "string"}})
+    chunks = [
+        "<tool_call>\n",
+        "<function=note_write>\n",
+        "<parameter=body>text literal ",
+        "</function>",
+        " still value</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+    deltas = _feed(Qwen3CoderToolParser(tokenizer=None), chunks, request)
+    assert json.loads("".join(_argument_fragments(deltas))) == {"body": value}
+
+
 def test_same_chunk_close_and_trailing_param_not_dropped():
     """When one chunk batches ``...tail</parameter><parameter=other>val</parameter>``
     the parser must emit BOTH the closing tail of the in-flight string

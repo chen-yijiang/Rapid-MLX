@@ -133,6 +133,19 @@ def test_wrapped_call_does_not_consume_later_function_marker_in_prose(parser):
     assert result.content == "Explain the literal </function> marker."
 
 
+def test_degraded_wrapper_preserves_closer_like_prose_before_outer_close(parser):
+    """Prose inside a degraded wrapper starts after the structural closer."""
+    text = (
+        "<tool_call><function=get_weather>"
+        "<parameter=city>Paris</parameter></function>"
+        " Explain the literal </function> marker.</tool_call>"
+    )
+    result = parser.extract_tool_calls(text)
+    tc = _only_call(result)
+    assert json.loads(tc["arguments"]) == {"city": "Paris"}
+    assert result.content == "Explain the literal </function> marker."
+
+
 def test_surrounding_prose_bare_call_no_leak(parser):
     """A bare call embedded in prose parses; no XML leaks into content."""
     text = (
