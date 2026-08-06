@@ -6134,7 +6134,7 @@ async def stream_chat_completion(
             and _stream_tool_choice
             and _stream_tool_choice.get("mode") in ("required", "named")
         )
-        _forced_content_parts: list[tuple[str, ChoiceLogProbs | None]] = []
+        _forced_stream_events: list[tuple[str, object]] = []
 
         # Track token counts for usage reporting
         prompt_tokens = 0
@@ -6222,7 +6222,7 @@ async def stream_chat_completion(
                         "reasoning",
                         "tool_call",
                     )
-                    and not (event.type == "content" and _buffer_forced_content)
+                    and not _buffer_forced_content
                 ):
                     first_token_ts = time.perf_counter()
                 if event.type == "content":
@@ -6230,12 +6230,20 @@ async def stream_chat_completion(
                         _build_chunk_logprobs(output) if want_logprobs else None
                     )
                     if _buffer_forced_content:
-                        _forced_content_parts.append((event.content, _event_logprobs))
+                        _forced_stream_events.append(
+                            ("content", (event.content, _event_logprobs))
+                        )
                     else:
                         yield _content_sse_chunk(event.content, _event_logprobs)
 
                 elif event.type == "reasoning":
-                    yield _fast_sse_chunk(event.reasoning, "reasoning_content")
+                    _reasoning_sse = _fast_sse_chunk(
+                        event.reasoning, "reasoning_content"
+                    )
+                    if _buffer_forced_content:
+                        _forced_stream_events.append(("sse", _reasoning_sse))
+                    else:
+                        yield _reasoning_sse
 
                 elif event.type == "tool_call":
                     # r7-A R7-H1: streaming-lane parity with the
@@ -6301,7 +6309,10 @@ async def stream_chat_completion(
                     # double-emit the turn end.
                     if event.finish_reason is not None:
                         inline_terminal_finish_emitted = True
-                    yield _tc_sse
+                    if _buffer_forced_content:
+                        _forced_stream_events.append(("sse", _tc_sse))
+                    else:
+                        yield _tc_sse
 
                 elif event.type == "finish":
                     # Defer emission: finalize() (below) may recover a
@@ -6472,31 +6483,57 @@ async def stream_chat_completion(
         # parsing, fallback recovery, synthesis, and schema validation have all
         # finished. The structural detector examines the aggregate so a wire
         # opener and closer split across engine deltas cannot evade it.
-        _forced_content_scrubbed = False
+        _forced_terminal_content_scrubbed = False
+        _forced_terminal_content = ""
         if _buffer_forced_content:
-            _deferred_raw = "".join(text for text, _ in _forced_content_parts)
+            # Replay in original event order. Only adjacent content deltas are
+            # coalesced for structural inspection; reasoning/tool events remain
+            # at their original positions relative to each content group.
+            _event_index = 0
+            while _event_index < len(_forced_stream_events):
+                _kind, _payload = _forced_stream_events[_event_index]
+                if _kind == "sse":
+                    if first_token_ts is None:
+                        first_token_ts = time.perf_counter()
+                    yield _payload
+                    _event_index += 1
+                    continue
+
+                _content_group: list[tuple[str, ChoiceLogProbs | None]] = []
+                while _event_index < len(_forced_stream_events):
+                    _group_kind, _group_payload = _forced_stream_events[_event_index]
+                    if _group_kind != "content":
+                        break
+                    _content_group.append(_group_payload)
+                    _event_index += 1
+                _group_raw = "".join(text for text, _ in _content_group)
+                if _contains_structural_tool_wire_leak(_group_raw):
+                    _group_clean = _scrub_visible_tool_wire_leaks(_group_raw)
+                    if _group_clean:
+                        if first_token_ts is None:
+                            first_token_ts = time.perf_counter()
+                        # Rewriting across deltas invalidates their token-level
+                        # logprob alignment, so emit one clean group without it.
+                        yield _content_sse_chunk(_group_clean, None)
+                else:
+                    for _text, _logprobs in _content_group:
+                        if not _text:
+                            continue
+                        if first_token_ts is None:
+                            first_token_ts = time.perf_counter()
+                        yield _content_sse_chunk(_text, _logprobs)
+
+            # Finish/finalize content is chronologically after every buffered
+            # event, so scrub it separately and keep it in the terminal slot.
             _finish_held = ""
             if buffered_finish is not None:
                 _finish_held = buffered_finish[0].content or ""
-            _held_content = _deferred_raw + _finish_held + finalize_content
-            if _contains_structural_tool_wire_leak(_held_content):
-                _forced_content_scrubbed = True
-                _clean_held = _scrub_visible_tool_wire_leaks(_held_content)
-                if _clean_held:
-                    if first_token_ts is None:
-                        first_token_ts = time.perf_counter()
-                    # Scrubbing can span multiple original deltas, so their
-                    # per-token logprobs no longer map to the rewritten text.
-                    yield _content_sse_chunk(_clean_held, None)
-            else:
-                # No structural wire exists: replay the original chunks exactly
-                # so ordinary forced-choice prose and requested logprobs survive.
-                for _text, _logprobs in _forced_content_parts:
-                    if not _text:
-                        continue
-                    if first_token_ts is None:
-                        first_token_ts = time.perf_counter()
-                    yield _content_sse_chunk(_text, _logprobs)
+            _terminal_held = _finish_held + finalize_content
+            if _contains_structural_tool_wire_leak(_terminal_held):
+                _forced_terminal_content_scrubbed = True
+                _forced_terminal_content = _scrub_visible_tool_wire_leaks(
+                    _terminal_held
+                )
 
         # Emit the terminal chunk. Three cases:
         #   (a) Streaming parser already emitted tool_calls during the
@@ -6521,8 +6558,8 @@ async def stream_chat_completion(
             # plain-text streams (deltas already drained content during
             # the loop), so this typically just adds the held suffix.
             terminal_content = (
-                ""
-                if _forced_content_scrubbed
+                _forced_terminal_content
+                if _forced_terminal_content_scrubbed
                 else (finish_event.content or "") + finalize_content
             )
 
@@ -6834,8 +6871,8 @@ async def stream_chat_completion(
                     ChatCompletionChunkChoice(
                         delta=ChatCompletionChunkDelta(
                             content=(
-                                None
-                                if _forced_content_scrubbed
+                                _forced_terminal_content or None
+                                if _forced_terminal_content_scrubbed
                                 else finalize_content or None
                             ),
                             reasoning_content=None,

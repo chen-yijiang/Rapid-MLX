@@ -806,3 +806,61 @@ def test_forced_stream_preserves_non_structural_tool_marker_prose():
         if isinstance((delta := choice.get("delta") or {}).get("content"), str)
     )
     assert content == "Use <tool_call> literally in docs."
+
+
+def test_forced_stream_replays_content_before_later_tool_call():
+    """Deferred forced events must retain model-generation chronology."""
+    ping_tool = [
+        {
+            "type": "function",
+            "function": {
+                "name": "ping",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    engine = _StreamingLeakEngine(
+        [
+            "<think>brief plan</think>",
+            "Before calling. ",
+            '<tool_call>{"name":"ping","arguments":{}}</tool_call>',
+        ]
+    )
+    cfg = reset_config()
+    cfg.engine = engine
+    cfg.model_name = "qwen3-0.6b-4bit"
+    cfg.model_registry = None
+    cfg.no_thinking = False
+    cfg.reasoning_parser = Qwen3ReasoningParser(tokenizer=None)
+    cfg.reasoning_parser_name = "qwen3"
+    cfg.tool_call_parser = "hermes"
+    app = FastAPI()
+    app.include_router(chat_router)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "qwen3-0.6b-4bit",
+            "messages": [{"role": "user", "content": "Get weather."}],
+            "tools": ping_tool,
+            "tool_choice": "required",
+            "max_tokens": 50,
+            "stream": True,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    chronology = []
+    for chunk in _parse_sse_stream(resp.content):
+        for choice in chunk.get("choices", []):
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                chronology.append(("content", delta["content"]))
+            if delta.get("tool_calls"):
+                chronology.append(("tool_call", delta["tool_calls"]))
+
+    content_index = next(i for i, item in enumerate(chronology) if item[0] == "content")
+    tool_index = next(i for i, item in enumerate(chronology) if item[0] == "tool_call")
+    assert chronology[content_index][1] == "Before calling. "
+    assert content_index < tool_index, chronology
