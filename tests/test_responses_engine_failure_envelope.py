@@ -35,16 +35,21 @@ async def test_deepseek_codex_nonprogress_retry_is_internal(monkeypatch):
     import vllm_mlx.routes.responses as responses_route
 
     calls: list[bool] = []
+    visible_heartbeat_state: dict[str, object] = {}
 
     async def fake_stream(*args, nonprogress_retry=False, **kwargs):
         calls.append(nonprogress_retry)
+        state = kwargs["heartbeat_state"]
         if not nonprogress_retry:
+            state["response"] = {"id": "hidden-attempt"}
+            assert visible_heartbeat_state == {}
             yield 'data: {"type":"response.created","attempt":1}\n\n'
             yield (
                 'data: {"type":"response.failed","response":{"error":'
                 '{"code":"model_no_final_answer"}}}\n\n'
             )
         else:
+            state["response"] = {"id": "visible-attempt"}
             yield 'data: {"type":"response.created","attempt":2}\n\n'
             yield 'data: {"type":"response.completed","attempt":2}\n\n'
 
@@ -64,13 +69,14 @@ async def test_deepseek_codex_nonprogress_retry_is_internal(monkeypatch):
     events = [
         event
         async for event in responses_route._stream_responses_with_nonprogress_retry(
-            object(), object(), request
+            object(), object(), request, heartbeat_state=visible_heartbeat_state
         )
     ]
 
     assert calls == [False, True]
     assert all('"attempt":1' not in event for event in events)
     assert any('"type":"response.completed"' in event for event in events)
+    assert visible_heartbeat_state["response"] == {"id": "visible-attempt"}
 
 
 class _Tokenizer:

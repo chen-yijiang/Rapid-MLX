@@ -2356,7 +2356,10 @@ async def _stream_responses_with_nonprogress_retry(
     # Transport liveness and cancellation remain owned by the outer
     # ``_disconnect_guard`` in ``create_response``. While lifecycle events are
     # held here, that guard keeps polling disconnects and emits parsed
-    # Responses heartbeats from ``heartbeat_state`` at the configured interval.
+    # Responses heartbeats at the configured interval. Keep the attempt's
+    # lifecycle private until it commits so a heartbeat cannot expose an ID
+    # that will be discarded by the transparent retry.
+    attempt_heartbeat_state: dict[str, object] = {}
     buffered: list[str] = []
     buffered_bytes = 0
     committed = False
@@ -2367,7 +2370,7 @@ async def _stream_responses_with_nonprogress_retry(
         responses_request,
         explicit_no_thinking=explicit_no_thinking,
         request_id_holder=request_id_holder,
-        heartbeat_state=heartbeat_state,
+        heartbeat_state=attempt_heartbeat_state,
     ):
         if committed:
             yield event
@@ -2384,6 +2387,9 @@ async def _stream_responses_with_nonprogress_retry(
             )
             committed = True
         if committed:
+            if heartbeat_state is not None:
+                heartbeat_state.clear()
+                heartbeat_state.update(attempt_heartbeat_state)
             for pending in buffered:
                 yield pending
             buffered.clear()
@@ -2393,6 +2399,9 @@ async def _stream_responses_with_nonprogress_retry(
     if committed:
         return
     if not retry_nonprogress:
+        if heartbeat_state is not None:
+            heartbeat_state.clear()
+            heartbeat_state.update(attempt_heartbeat_state)
         for event in buffered:
             yield event
         return
