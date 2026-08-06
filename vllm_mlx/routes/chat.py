@@ -6121,20 +6121,64 @@ async def stream_chat_completion(
         # absent.
         processor.seed_forced_assistant_prefix(kwargs.get("forced_assistant_prefix"))
 
-        # A forced tool-choice stream cannot safely release content deltas until
-        # the terminal synth/validation decision is known. In particular, when
-        # schema validation refuses a synthesized call, the parser may already
-        # have surfaced the model's raw ``<tool_call>{...}</tool_call>`` bytes as
-        # content. Buffer this narrow path and structurally scrub the aggregate
-        # before anything reaches the client. Auto/none streams retain normal
-        # token-by-token latency.
+        # Forced-choice content needs a small streaming quarantine: a parser can
+        # surface raw ``<tool_call>{...}</tool_call>`` bytes as content before
+        # terminal synthesis/schema validation refuses the call (#1508). Hold
+        # only marker-like content, while safe prose, reasoning, and parsed tool
+        # calls retain normal streaming latency.
         _stream_tool_choice = _normalize_tool_choice_for_grammar(request.tool_choice)
         _buffer_forced_content = bool(
             request.tools
             and _stream_tool_choice
             and _stream_tool_choice.get("mode") in ("required", "named")
         )
-        _forced_stream_events: list[tuple[str, object]] = []
+        _forced_content_pending: list[tuple[str, ChoiceLogProbs | None]] = []
+        _forced_wire_quarantine = False
+        _forced_quarantine_tail = ""
+        _wire_prefixes = (
+            "<tool_call>",
+            "</tool_call>",
+            "<function=",
+            "<function>",
+            "</function>",
+            "<parameter=",
+            "</parameter>",
+            "<｜tool▁calls▁begin｜>",
+            "<｜tool▁call▁begin｜>",
+            "<｜tool▁sep｜>",
+            "<arg_key>",
+            "</arg_value>",
+            "<minimax:tool_call>",
+            "<invoke",
+            "</invoke>",
+            "<|python_tag|>",
+            "<|tool_calls_section_begin|>",
+            "[TOOL_CALLS]",
+            "[/TOOL_CALLS]",
+        )
+        _wire_closers = (
+            "</tool_call>",
+            "</function>",
+            "<｜tool▁calls▁end｜>",
+            "<｜tool▁call▁end｜>",
+            "</arg_value>",
+            "</minimax:tool_call>",
+            "</invoke>",
+            "<|tool_calls_section_end|>",
+            "[/TOOL_CALLS]",
+        )
+
+        def _may_be_tool_wire(text: str) -> bool:
+            if _contains_tool_wire_literal(text):
+                return True
+            starts = [i for i in (text.rfind("<"), text.rfind("[")) if i >= 0]
+            if not starts:
+                return False
+            suffix = text[max(starts) :]
+            return any(
+                marker.startswith(suffix) or suffix.startswith(marker)
+                for marker in _wire_prefixes
+            )
 
         # Track token counts for usage reporting
         prompt_tokens = 0
@@ -6230,20 +6274,63 @@ async def stream_chat_completion(
                         _build_chunk_logprobs(output) if want_logprobs else None
                     )
                     if _buffer_forced_content:
-                        _forced_stream_events.append(
-                            ("content", (event.content, _event_logprobs))
-                        )
+                        if _forced_wire_quarantine:
+                            # A channel boundary bisected marker-shaped content.
+                            # Discard content until its closer arrives; otherwise
+                            # dropping only the opener would leak the following
+                            # JSON payload as plain assistant text.
+                            _forced_quarantine_tail = (
+                                _forced_quarantine_tail + event.content
+                            )[-256:]
+                            if any(
+                                closer in _forced_quarantine_tail
+                                for closer in _wire_closers
+                            ):
+                                _forced_wire_quarantine = False
+                                _forced_quarantine_tail = ""
+                            continue
+                        if _forced_content_pending or _may_be_tool_wire(event.content):
+                            _forced_content_pending.append(
+                                (event.content, _event_logprobs)
+                            )
+                            _pending_raw = "".join(
+                                text for text, _ in _forced_content_pending
+                            )
+                            if _contains_structural_tool_wire_leak(_pending_raw):
+                                _clean_pending = _scrub_visible_tool_wire_leaks(
+                                    _pending_raw
+                                )
+                                _forced_content_pending.clear()
+                                if _clean_pending:
+                                    if first_token_ts is None:
+                                        first_token_ts = time.perf_counter()
+                                    yield _content_sse_chunk(_clean_pending, None)
+                            elif not _may_be_tool_wire(_pending_raw):
+                                # A partial candidate diverged into ordinary
+                                # prose (e.g. ``<funx``): replay every held byte.
+                                for _text, _logprobs in _forced_content_pending:
+                                    if _text:
+                                        if first_token_ts is None:
+                                            first_token_ts = time.perf_counter()
+                                        yield _content_sse_chunk(_text, _logprobs)
+                                _forced_content_pending.clear()
+                        else:
+                            if first_token_ts is None:
+                                first_token_ts = time.perf_counter()
+                            yield _content_sse_chunk(event.content, _event_logprobs)
                     else:
                         yield _content_sse_chunk(event.content, _event_logprobs)
 
                 elif event.type == "reasoning":
-                    _reasoning_sse = _fast_sse_chunk(
-                        event.reasoning, "reasoning_content"
-                    )
-                    if _buffer_forced_content:
-                        _forced_stream_events.append(("sse", _reasoning_sse))
-                    else:
-                        yield _reasoning_sse
+                    if _forced_content_pending:
+                        # A channel boundary makes later content non-contiguous.
+                        # Fail closed on the ambiguous marker-shaped fragment so
+                        # it cannot be spliced around this reasoning event.
+                        _forced_content_pending.clear()
+                        _forced_wire_quarantine = True
+                    if first_token_ts is None:
+                        first_token_ts = time.perf_counter()
+                    yield _fast_sse_chunk(event.reasoning, "reasoning_content")
 
                 elif event.type == "tool_call":
                     # r7-A R7-H1: streaming-lane parity with the
@@ -6309,10 +6396,15 @@ async def stream_chat_completion(
                     # double-emit the turn end.
                     if event.finish_reason is not None:
                         inline_terminal_finish_emitted = True
-                    if _buffer_forced_content:
-                        _forced_stream_events.append(("sse", _tc_sse))
-                    else:
-                        yield _tc_sse
+                    if _forced_content_pending:
+                        # A parsed tool call confirms the held marker-like bytes
+                        # were transport, not assistant prose.
+                        _forced_content_pending.clear()
+                    _forced_wire_quarantine = False
+                    _forced_quarantine_tail = ""
+                    if first_token_ts is None:
+                        first_token_ts = time.perf_counter()
+                    yield _tc_sse
 
                 elif event.type == "finish":
                     # Defer emission: finalize() (below) may recover a
@@ -6479,61 +6571,41 @@ async def stream_chat_completion(
                         _synth_target,
                     )
 
-        # Release the narrow forced-choice content buffer only after tool-call
-        # parsing, fallback recovery, synthesis, and schema validation have all
-        # finished. The structural detector examines the aggregate so a wire
-        # opener and closer split across engine deltas cannot evade it.
-        _forced_terminal_content_scrubbed = False
-        _forced_terminal_content = ""
+        # Finish/finalize content is the last contiguous content segment. Join
+        # it to any quarantined marker prefix so a wire span split at stream end
+        # is inspected as one logical content stream, then consume it here to
+        # avoid a second copy in the terminal chunk.
+        _forced_terminal_content_consumed = False
         if _buffer_forced_content:
-            # Replay in original event order. Only adjacent content deltas are
-            # coalesced for structural inspection; reasoning/tool events remain
-            # at their original positions relative to each content group.
-            _event_index = 0
-            while _event_index < len(_forced_stream_events):
-                _kind, _payload = _forced_stream_events[_event_index]
-                if _kind == "sse":
-                    if first_token_ts is None:
-                        first_token_ts = time.perf_counter()
-                    yield _payload
-                    _event_index += 1
-                    continue
-
-                _content_group: list[tuple[str, ChoiceLogProbs | None]] = []
-                while _event_index < len(_forced_stream_events):
-                    _group_kind, _group_payload = _forced_stream_events[_event_index]
-                    if _group_kind != "content":
-                        break
-                    _content_group.append(_group_payload)
-                    _event_index += 1
-                _group_raw = "".join(text for text, _ in _content_group)
-                if _contains_structural_tool_wire_leak(_group_raw):
-                    _group_clean = _scrub_visible_tool_wire_leaks(_group_raw)
-                    if _group_clean:
+            _finish_held = ""
+            if buffered_finish is not None:
+                _finish_held = buffered_finish[0].content or ""
+            _terminal_held = _finish_held + finalize_content
+            if _forced_wire_quarantine:
+                # The stream ended inside a quarantined wire fragment. Its
+                # remaining bytes are transport residue, never visible content.
+                _forced_terminal_content_consumed = bool(_terminal_held)
+                _forced_content_pending.clear()
+            elif _forced_content_pending or _may_be_tool_wire(_terminal_held):
+                _forced_terminal_content_consumed = True
+                _forced_content_pending.append((_terminal_held, None))
+                _pending_raw = "".join(text for text, _ in _forced_content_pending)
+                if _contains_structural_tool_wire_leak(_pending_raw):
+                    _final_content = _scrub_visible_tool_wire_leaks(_pending_raw)
+                    if _final_content:
                         if first_token_ts is None:
                             first_token_ts = time.perf_counter()
-                        # Rewriting across deltas invalidates their token-level
-                        # logprob alignment, so emit one clean group without it.
-                        yield _content_sse_chunk(_group_clean, None)
+                        yield _content_sse_chunk(_final_content, None)
                 else:
-                    for _text, _logprobs in _content_group:
+                    # No payload-bearing structure materialized by stream end:
+                    # preserve literal marker documentation and partial prose.
+                    for _text, _logprobs in _forced_content_pending:
                         if not _text:
                             continue
                         if first_token_ts is None:
                             first_token_ts = time.perf_counter()
                         yield _content_sse_chunk(_text, _logprobs)
-
-            # Finish/finalize content is chronologically after every buffered
-            # event, so scrub it separately and keep it in the terminal slot.
-            _finish_held = ""
-            if buffered_finish is not None:
-                _finish_held = buffered_finish[0].content or ""
-            _terminal_held = _finish_held + finalize_content
-            if _contains_structural_tool_wire_leak(_terminal_held):
-                _forced_terminal_content_scrubbed = True
-                _forced_terminal_content = _scrub_visible_tool_wire_leaks(
-                    _terminal_held
-                )
+                _forced_content_pending.clear()
 
         # Emit the terminal chunk. Three cases:
         #   (a) Streaming parser already emitted tool_calls during the
@@ -6558,8 +6630,8 @@ async def stream_chat_completion(
             # plain-text streams (deltas already drained content during
             # the loop), so this typically just adds the held suffix.
             terminal_content = (
-                _forced_terminal_content
-                if _forced_terminal_content_scrubbed
+                ""
+                if _forced_terminal_content_consumed
                 else (finish_event.content or "") + finalize_content
             )
 
@@ -6871,8 +6943,8 @@ async def stream_chat_completion(
                     ChatCompletionChunkChoice(
                         delta=ChatCompletionChunkDelta(
                             content=(
-                                _forced_terminal_content or None
-                                if _forced_terminal_content_scrubbed
+                                None
+                                if _forced_terminal_content_consumed
                                 else finalize_content or None
                             ),
                             reasoning_content=None,
