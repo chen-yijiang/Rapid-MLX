@@ -428,7 +428,7 @@ class TestCommon:
         def _refuse(*args, **kwargs):
             raise PermissionError("not a member of that group")
 
-        monkeypatch.setattr(_common.os, "chown", _refuse)
+        monkeypatch.setattr(_common.os, "fchown", _refuse)
 
         bak = _common.backup_existing(target)
 
@@ -436,6 +436,37 @@ class TestCommon:
         assert bak.read_bytes() == target.read_bytes()
         assert bak.stat().st_mode & 0o077 == 0, (
             "backup kept group/other access it could not vouch for"
+        )
+
+    def test_backup_never_touches_the_destination_by_name(self, tmp_path, monkeypatch):
+        """Ownership and mode go through the descriptor, never the path.
+
+        Anyone who can write the config's *directory* can unlink our backup
+        and leave a symlink where it was. A pathname-based chown/chmod would
+        then follow that symlink and re-permission someone else's file. The
+        O_EXCL create is what makes the name ours; addressing the descriptor
+        from then on is what keeps it ours.
+
+        A 0640 source is what forces the interesting path: the mode-narrowing
+        block only runs when the source has group/other bits, so a 0600 source
+        would pass this test without ever reaching a chown or a chmod.
+        """
+        target = tmp_path / "config.json"
+        target.write_text('{"apiKey": "sk-secret"}')
+        target.chmod(0o640)
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("backup_existing addressed the backup by pathname")
+
+        monkeypatch.setattr(_common.os, "chown", _boom)
+        monkeypatch.setattr(_common.os, "chmod", _boom)
+
+        bak = _common.backup_existing(target)
+
+        assert bak is not None
+        assert bak.read_bytes() == target.read_bytes()
+        assert bak.stat().st_mode & 0o077 == 0o040, (
+            "expected the 0640 source's group bit to be reproduced via fchmod"
         )
 
     def test_load_json_lenient_missing(self, tmp_path):

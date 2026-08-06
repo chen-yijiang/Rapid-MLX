@@ -15,6 +15,15 @@ import textwrap
 import pytest
 import yaml
 
+# Same compatibility shim the production merge path uses. Importing plain
+# ``tomllib`` here would make every TOML test below fail with
+# ModuleNotFoundError on 3.10 — which ``requires-python`` still supports —
+# so these tests would stop covering the very fallback they exist to guard.
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover — Python 3.10 only
+    import tomli as tomllib
+
 from vllm_mlx.agents.adapter import (
     _deep_merge,
     _merge_file_config,
@@ -434,8 +443,6 @@ class TestTomlMerge:
     """)
 
     def _merged(self, tmp_path):
-        import tomllib
-
         existing = tmp_path / "config.toml"
         existing.write_text(self.USER_CONFIG)
         return tomllib.loads(_merge_file_config(existing, self.TEMPLATE, "toml"))
@@ -464,8 +471,6 @@ class TestTomlMerge:
 
     def test_user_keys_inside_our_own_table_survive(self, tmp_path):
         """``env_key`` is what the template's own comment tells users to add."""
-        import tomllib
-
         existing = tmp_path / "config.toml"
         existing.write_text(
             textwrap.dedent("""\
@@ -507,8 +512,6 @@ class TestTomlMerge:
         any of it to matter, and the codex profile is the only caller that
         can prove it.
         """
-        import tomllib
-
         from vllm_mlx.agents import get_profile
 
         monkeypatch.setenv("HOME", str(tmp_path))

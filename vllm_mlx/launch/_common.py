@@ -74,9 +74,31 @@ def backup_existing(path: Path) -> Path | None:
     src_fd = os.open(path, os.O_RDONLY)
     try:
         src = os.fstat(src_fd)
-        data = b""
+        # ``chunks`` then one join, not ``data += chunk``: the latter copies
+        # the whole accumulated buffer every iteration, which is quadratic in
+        # file size.
+        chunks: list[bytes] = []
         while chunk := os.read(src_fd, 1 << 20):
-            data += chunk
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        # Security metadata has to come off the SAME descriptor as the bytes
+        # and the mode. Reading it by pathname further down would let an
+        # editor's atomic replace answer for a file we did not copy: the
+        # backup would hold the OLD secret while the ACL decision below came
+        # from the NEW file. That is the same TOCTOU the single open already
+        # closed for st_mode, just wearing a different field.
+        listxattr = getattr(os, "listxattr", None)
+        if listxattr is None:
+            # macOS ships no os.listxattr, so a macOS ACL is invisible from
+            # here. Empty (rather than None) keeps the mode policy unchanged
+            # on that platform — the gap is real and stated, not silently
+            # turned into over-tightening every backup.
+            src_xattrs: tuple[str, ...] | None = ()
+        else:
+            try:
+                src_xattrs = tuple(listxattr(src_fd))
+            except OSError:
+                src_xattrs = None
     finally:
         os.close(src_fd)
     while True:
@@ -86,51 +108,58 @@ def backup_existing(path: Path) -> Path | None:
             counter += 1
             bak = path.with_suffix(path.suffix + f".bak.{ts}.{counter}")
             continue
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
         break
-    # Match the original once the bytes are down. Created restrictive
-    # first so the contents are never briefly readable at a wider mode;
-    # a source that is itself group/world-readable keeps that, because
-    # the backup should not be MORE exposed than what it copies, and
-    # need not be less.
-    mode = src.st_mode & 0o7777
-    if mode & 0o077:
-        # Group/other bits only mean "no wider than the source" if the
-        # backup answers to the same principals. A new file takes the
-        # DIRECTORY's group, which need not be the source's — copying
-        # 0640 from an alice:secrets config onto an alice:staff backup
-        # would hand the key to all of staff. Mode bits are numbers, not
-        # an audience.
-        #
-        # Adopt the source's group where the OS allows it (it does when
-        # the caller is a member, which is the ordinary case for one's
-        # own dotfiles), and otherwise keep the file owner-only. Refusing
-        # to widen is the safe direction: a backup that is tighter than
-        # its source still restores.
-        try:
-            os.chown(bak, -1, src.st_gid)
-        except (PermissionError, OSError):
-            mode &= 0o700
-        else:
-            if os.stat(bak).st_gid != src.st_gid:
-                mode &= 0o700
-        # An ACL can DENY a principal the mode bits would otherwise admit, and
-        # a freshly created file carries none. Reproducing 0644 without the
-        # deny entry hands the file to exactly the account the source shut
-        # out. There is no stdlib API to copy one, so when the source carries
-        # a security xattr the backup stays owner-only rather than pretending
-        # the numbers tell the whole story.
-        listxattr = getattr(os, "listxattr", None)
-        if listxattr is not None:
+    # Everything from here on addresses the DESCRIPTOR, never ``bak`` the
+    # name. Once O_EXCL has handed us the file, a pathname-based chown/stat/
+    # chmod could still be redirected: anyone who can write the config's
+    # DIRECTORY can unlink our backup and drop a symlink in its place between
+    # two of those calls, and we would then hand their target our ownership
+    # or our mode. fchown/fstat/fchmod cannot be pointed at another file.
+    try:
+        offset = 0
+        while offset < len(data):
+            offset += os.write(fd, data[offset:])
+        # Match the original once the bytes are down. Created restrictive
+        # first so the contents are never briefly readable at a wider mode;
+        # a source that is itself group/world-readable keeps that, because
+        # the backup should not be MORE exposed than what it copies, and
+        # need not be less.
+        mode = src.st_mode & 0o7777
+        if mode & 0o077:
+            # Group/other bits only mean "no wider than the source" if the
+            # backup answers to the same principals. A new file takes the
+            # DIRECTORY's group, which need not be the source's — copying
+            # 0640 from an alice:secrets config onto an alice:staff backup
+            # would hand the key to all of staff. Mode bits are numbers, not
+            # an audience.
+            #
+            # Adopt the source's group where the OS allows it (it does when
+            # the caller is a member, which is the ordinary case for one's
+            # own dotfiles), and otherwise keep the file owner-only. Refusing
+            # to widen is the safe direction: a backup that is tighter than
+            # its source still restores.
             try:
-                if any(
-                    x.startswith("com.apple.system.Security") for x in listxattr(path)
-                ):
-                    mode &= 0o700
-            except OSError:
+                os.fchown(fd, -1, src.st_gid)
+            except (PermissionError, OSError):
                 mode &= 0o700
-    os.chmod(bak, mode)
+            else:
+                if os.fstat(fd).st_gid != src.st_gid:
+                    mode &= 0o700
+            # An ACL can DENY a principal the mode bits would otherwise admit,
+            # and a freshly created file carries none. Reproducing 0644
+            # without the deny entry hands the file to exactly the account the
+            # source shut out. There is no stdlib API to copy one, so when the
+            # source carries a security/ACL xattr — or when the list could not
+            # be read at all — the backup stays owner-only rather than
+            # pretending the numbers tell the whole story.
+            if src_xattrs is None or any(
+                x.startswith(("com.apple.system.Security", "system.posix_acl"))
+                for x in src_xattrs
+            ):
+                mode &= 0o700
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
     print(f"  backup: {bak}", file=sys.stderr)
     return bak
 
