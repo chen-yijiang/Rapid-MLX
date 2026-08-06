@@ -217,7 +217,16 @@ def _merge_toml(existing_text: str, rendered: str) -> str:
     hand-tuned config is an annoyance; losing its contents is data loss.
     """
     import tomli_w
-    import tomllib
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover — Python 3.10 only
+        # ``tomllib`` is stdlib from 3.11; ``pyproject`` still supports 3.10,
+        # where a bare import would abort --setup with ModuleNotFoundError on
+        # the merge path only — every fresh-write test would stay green.
+        # ``tomli`` is the same parser under its pre-stdlib name and is now a
+        # runtime dependency under that marker, not just a [test] one.
+        import tomli as tomllib
 
     if not existing_text.strip():
         return rendered

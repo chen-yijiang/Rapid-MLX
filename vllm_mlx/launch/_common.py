@@ -83,7 +83,29 @@ def backup_existing(path: Path) -> Path | None:
     # a source that is itself group/world-readable keeps that, because
     # the backup should not be MORE exposed than what it copies, and
     # need not be less.
-    os.chmod(bak, os.stat(path).st_mode & 0o7777)
+    src = os.stat(path)
+    mode = src.st_mode & 0o7777
+    if mode & 0o077:
+        # Group/other bits only mean "no wider than the source" if the
+        # backup answers to the same principals. A new file takes the
+        # DIRECTORY's group, which need not be the source's — copying
+        # 0640 from an alice:secrets config onto an alice:staff backup
+        # would hand the key to all of staff. Mode bits are numbers, not
+        # an audience.
+        #
+        # Adopt the source's group where the OS allows it (it does when
+        # the caller is a member, which is the ordinary case for one's
+        # own dotfiles), and otherwise keep the file owner-only. Refusing
+        # to widen is the safe direction: a backup that is tighter than
+        # its source still restores.
+        try:
+            os.chown(bak, -1, src.st_gid)
+        except (PermissionError, OSError):
+            mode &= 0o700
+        else:
+            if os.stat(bak).st_gid != src.st_gid:
+                mode &= 0o700
+    os.chmod(bak, mode)
     print(f"  backup: {bak}", file=sys.stderr)
     return bak
 

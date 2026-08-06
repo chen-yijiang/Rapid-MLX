@@ -410,6 +410,34 @@ class TestCommon:
         assert bak is not None
         assert bak.stat().st_mode & 0o777 == 0o644
 
+    def test_backup_drops_group_bits_when_the_group_cannot_be_matched(
+        self, tmp_path, monkeypatch
+    ):
+        """Mode bits are numbers; what matters is who they authorize.
+
+        A new file takes the *directory's* group, not the source's. Copying
+        0640 from an ``alice:secrets`` config onto an ``alice:staff`` backup
+        keeps the number and changes the audience — every member of staff can
+        then read the API key. When the group cannot be adopted, the backup
+        stays owner-only: tighter than the source still restores.
+        """
+        target = tmp_path / "config.json"
+        target.write_text('{"apiKey": "sk-secret"}')
+        target.chmod(0o640)
+
+        def _refuse(*args, **kwargs):
+            raise PermissionError("not a member of that group")
+
+        monkeypatch.setattr(_common.os, "chown", _refuse)
+
+        bak = _common.backup_existing(target)
+
+        assert bak is not None
+        assert bak.read_bytes() == target.read_bytes()
+        assert bak.stat().st_mode & 0o077 == 0, (
+            "backup kept group/other access it could not vouch for"
+        )
+
     def test_load_json_lenient_missing(self, tmp_path):
         assert _common.load_json_lenient(tmp_path / "missing.json") == {}
 
