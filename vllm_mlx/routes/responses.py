@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import re
+import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
@@ -115,7 +116,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _NONPROGRESS_RETRY_BUFFER_LIMIT = 4 * 1024 * 1024
-_DEFERRED_PUBLIC_TEXT_LIMIT = 4 * 1024 * 1024
 
 
 def _should_prime_deepseek_codex_exec(
@@ -2404,7 +2404,7 @@ async def _stream_responses_with_nonprogress_retry(
             buffered.clear()
             if not event_buffered:
                 yield event
-        elif '"code":"model_no_final_answer"' in event.replace(" ", ""):
+        elif _responses_event_is_nonprogress_failure(event):
             retry_nonprogress = True
 
     if committed:
@@ -2450,6 +2450,23 @@ def _responses_event_commits_progress(event: str) -> bool:
             item_type = data.get("item", {}).get("type")
             if item_type in {"function_call", "computer_call"}:
                 return True
+    return False
+
+
+def _responses_event_is_nonprogress_failure(event: str) -> bool:
+    """Match only the terminal failure envelope, never model-authored text."""
+    for line in event.splitlines():
+        if not line.startswith("data: "):
+            continue
+        try:
+            data = json.loads(line[6:])
+        except (TypeError, ValueError):
+            continue
+        return bool(
+            data.get("type") == "response.failed"
+            and data.get("response", {}).get("error", {}).get("code")
+            == "model_no_final_answer"
+        )
     return False
 
 
@@ -2695,15 +2712,39 @@ async def _stream_responses(
         # public text for DeepSeek Codex tool turns until generation finishes,
         # when the complete reasoning/message/tool ordering is known. Ordinary
         # chat streams and other models retain token-by-token text delivery.
-        _defer_public_text = _forced_choice_active or bool(
+        _deepseek_defer_public_text = bool(
             codex_surface
             and openai_request.tools
             and openai_request.tool_choice != "none"
             and cfg.tool_call_parser == "deepseek_v4_0731"
         )
+        _defer_public_text = _forced_choice_active or _deepseek_defer_public_text
         deferred_text: list[str] = []
-        deferred_text_bytes = 0
-        deferred_text_overflow = False
+        # DeepSeek auto-tool turns can defer much more prose than legacy
+        # forced-choice synthesis. Spill beyond 1 MiB instead of growing an
+        # unbounded Python list; the file is closed when the generator exits.
+        deferred_text_file = (
+            tempfile.SpooledTemporaryFile(
+                max_size=1024 * 1024, mode="w+", encoding="utf-8"
+            )
+            if _deepseek_defer_public_text
+            else None
+        )
+
+        def _clear_deferred_text() -> None:
+            deferred_text.clear()
+            if deferred_text_file is not None:
+                deferred_text_file.close()
+
+        def _take_deferred_text() -> str:
+            if deferred_text_file is not None:
+                deferred_text_file.seek(0)
+                value = deferred_text_file.read()
+                deferred_text_file.close()
+                return value
+            value = "".join(deferred_text)
+            deferred_text.clear()
+            return value
 
         _tokenizer = engine.tokenizer
         _chat_template = ""
@@ -3077,19 +3118,14 @@ async def _stream_responses(
             yielded — final flush decision happens after the engine
             stream completes and we know whether synthesis is needed.
             """
-            nonlocal accumulated_text, deferred_text_bytes, deferred_text_overflow
+            nonlocal accumulated_text
             if not delta:
                 return
             if _defer_public_text:
-                delta_bytes = len(delta.encode("utf-8"))
-                if deferred_text_bytes + delta_bytes > _DEFERRED_PUBLIC_TEXT_LIMIT:
-                    deferred_text.clear()
-                    deferred_text_overflow = True
-                    return
-                if deferred_text_overflow:
-                    return
-                deferred_text.append(delta)
-                deferred_text_bytes += delta_bytes
+                if deferred_text_file is not None:
+                    deferred_text_file.write(delta)
+                else:
+                    deferred_text.append(delta)
                 return
             if not message_open:
                 for ev in await _open_message_item():
@@ -3126,14 +3162,11 @@ async def _stream_responses(
             ``output_text.delta`` so the client still sees the
             assistant's actual text content.
             """
-            nonlocal accumulated_text, deferred_text_bytes
-            if will_synthesise or not deferred_text:
-                deferred_text.clear()
-                deferred_text_bytes = 0
+            nonlocal accumulated_text
+            if will_synthesise:
+                _clear_deferred_text()
                 return
-            joined = "".join(deferred_text)
-            deferred_text.clear()
-            deferred_text_bytes = 0
+            joined = _take_deferred_text()
             if not joined:
                 return
             if not message_open:
@@ -3666,27 +3699,6 @@ async def _stream_responses(
         # are out — emit a ``response.failed`` event with the same
         # error envelope instead so the client sees a clean shutdown
         # signal.
-        if deferred_text_overflow:
-            logger.warning(
-                "DeepSeek Codex deferred public text exceeded %d bytes",
-                _DEFERRED_PUBLIC_TEXT_LIMIT,
-            )
-            yield _emit(
-                "response.failed",
-                {
-                    "type": "response.failed",
-                    "response": {
-                        **_initial_response_payload,
-                        "status": "failed",
-                        "error": {
-                            "code": "deferred_text_limit_exceeded",
-                            "message": "Deferred agent output exceeded the safe buffer limit.",
-                        },
-                    },
-                },
-            )
-            return
-
         try:
             tool_calls = _enforce_responses_tool_choice(
                 parsed_tool_calls, responses_request, openai_request
@@ -3703,7 +3715,7 @@ async def _stream_responses(
             # Drop any deferred buffered text — the request failed
             # under forced choice, the deferred prose has no
             # legitimate destination on the wire.
-            deferred_text.clear()
+            _clear_deferred_text()
             err_detail = forced_choice_err.detail
             if isinstance(err_detail, dict):
                 err_envelope = err_detail.get("error", {})
