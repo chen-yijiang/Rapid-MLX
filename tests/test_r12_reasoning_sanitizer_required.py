@@ -693,7 +693,15 @@ _LEAKY_STREAM_PIECES = [
 ]
 
 
-def test_chat_route_streaming_required_reasoning_is_sanitized():
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+    ids=["required", "named"],
+)
+def test_chat_route_streaming_required_reasoning_is_sanitized(tool_choice):
     """Streaming variant of the Vlad r12 repro: aggregate every
     ``delta.reasoning_content`` SSE frame and assert no leaked
     special token survives. Pre-fix the streaming hot-path
@@ -719,7 +727,7 @@ def test_chat_route_streaming_required_reasoning_is_sanitized():
             "model": "qwen3-0.6b-4bit",
             "messages": [{"role": "user", "content": "What's the weather in Tokyo?"}],
             "tools": _WEATHER_TOOL,
-            "tool_choice": "required",
+            "tool_choice": tool_choice,
             "max_tokens": 200,
             "stream": True,
         },

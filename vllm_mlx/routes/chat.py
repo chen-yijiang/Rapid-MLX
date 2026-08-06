@@ -317,13 +317,13 @@ def _compute_forced_tool_prefix(cfg, request) -> str | None:
     """
     if not (request.tools and getattr(request, "tool_choice", None) is not None):
         return None
+    normalized = _normalize_tool_choice_for_grammar(request.tool_choice)
     _forced_name: str | None = None
-    if (
-        isinstance(request.tool_choice, dict)
-        and request.tool_choice.get("type") == "function"
+    if normalized and normalized.get("mode") == "named":
+        _forced_name = normalized.get("name")
+    elif (
+        normalized and normalized.get("mode") == "required" and len(request.tools) == 1
     ):
-        _forced_name = (request.tool_choice.get("function") or {}).get("name")
-    elif request.tool_choice == "required" and len(request.tools) == 1:
         # OpenAI spec: ``required`` with a single tool is unambiguous — same
         # forcing semantics as a named choice.
         _forced_name = request.tools[0].function.get("name")
@@ -362,6 +362,19 @@ def _normalize_tool_choice_for_grammar(tool_choice) -> dict | None:
     drops ``request.tools``). A malformed object form (no usable name) also
     degrades to ``None`` — free-form, rather than fabricating a constraint.
     """
+    # Pydantic currently preserves this field as a raw dict, but callers and a
+    # future stricter request schema may supply a model instance. Normalize that
+    # representation once so every forced-choice consumer sees the same shape.
+    if not isinstance(tool_choice, dict):
+        model_dump = getattr(tool_choice, "model_dump", None)
+        if callable(model_dump):
+            try:
+                dumped = model_dump(exclude_none=True)
+            except (TypeError, ValueError):
+                dumped = None
+            if isinstance(dumped, dict):
+                tool_choice = dumped
+
     # Object form is the ONLY place a tool name appears: a named choice.
     if isinstance(tool_choice, dict):
         if tool_choice.get("type") == "function":
@@ -5578,9 +5591,10 @@ async def _create_chat_completion_impl(
     # model ignores ``tool_choice="required"`` and emits ordinary
     # prose. Scrub only when the visible text contains STRUCTURAL
     # parser-wire residue, not merely a literal token mention.
-    _is_forced_choice = request.tool_choice == "required" or (
-        isinstance(request.tool_choice, dict)
-        and request.tool_choice.get("type") == "function"
+    _normalized_tool_choice = _normalize_tool_choice_for_grammar(request.tool_choice)
+    _is_forced_choice = bool(
+        _normalized_tool_choice
+        and _normalized_tool_choice.get("mode") in ("required", "named")
     )
     _raw_text_for_reasoning = output.raw_text or output.text
     _raw_has_structural_wire = _contains_structural_tool_wire_leak(
@@ -6114,12 +6128,11 @@ async def stream_chat_completion(
         # content. Buffer this narrow path and structurally scrub the aggregate
         # before anything reaches the client. Auto/none streams retain normal
         # token-by-token latency.
-        _buffer_forced_content = bool(request.tools) and (
-            request.tool_choice == "required"
-            or (
-                isinstance(request.tool_choice, dict)
-                and request.tool_choice.get("type") == "function"
-            )
+        _stream_tool_choice = _normalize_tool_choice_for_grammar(request.tool_choice)
+        _buffer_forced_content = bool(
+            request.tools
+            and _stream_tool_choice
+            and _stream_tool_choice.get("mode") in ("required", "named")
         )
         _forced_content_parts: list[tuple[str, ChoiceLogProbs | None]] = []
 
@@ -6378,11 +6391,8 @@ async def stream_chat_completion(
             and request.tool_choice is not None
         ):
             _synth_target: str | None = None
-            if (
-                isinstance(request.tool_choice, dict)
-                and request.tool_choice.get("type") == "function"
-            ):
-                _pinned = (request.tool_choice.get("function") or {}).get("name")
+            if _stream_tool_choice and _stream_tool_choice.get("mode") == "named":
+                _pinned = _stream_tool_choice.get("name")
                 _submitted = {
                     t.function.get("name")
                     for t in request.tools
@@ -6390,7 +6400,11 @@ async def stream_chat_completion(
                 }
                 if _pinned and _pinned in _submitted:
                     _synth_target = _pinned
-            elif request.tool_choice == "required" and len(request.tools) == 1:
+            elif (
+                _stream_tool_choice
+                and _stream_tool_choice.get("mode") == "required"
+                and len(request.tools) == 1
+            ):
                 _synth_target = request.tools[0].function.get("name")
             if _synth_target:
                 _raw_text = (
