@@ -746,37 +746,13 @@ def test_chat_route_streaming_required_reasoning_is_sanitized():
             f"R12-MED-2 streaming leak: {leak!r} survived in "
             f"aggregated reasoning_content: {aggregated_reasoning!r}"
         )
-        if leak == "</tool_call>":
-            # KNOWN PRE-EXISTING LEAK — tracked in #1508, NOT weakened here.
-            #
-            # This path really does put the model's raw tool wire on the
-            # content channel. It always did: replaying this same input
-            # through the pre-fix global sanitizer yields
-            #     <tool_call>{"name":"get_weather","arguments":{...}}
-            # i.e. the opener AND the whole JSON payload stayed visible to
-            # the user. The assertion passed only because the blanket
-            # ``</tool_call>`` strip removed the trailing 13 bytes — a
-            # cosmetic strip that never prevented the leak it appeared to
-            # guard.
-            #
-            # That blanket strip was also deleting the token out of
-            # ordinary assistant prose on every surface, so it is gone.
-            # Fixing the underlying structural leak needs a
-            # streaming-aware version of ``_scrub_visible_tool_wire_leaks``
-            # (it is payload-aware and needs the whole span) — #1508.
-            #
-            # Pin the leak explicitly so it stays visible instead of
-            # silently reappearing as a green test.
-            assert "<tool_call>" in aggregated_content, (
-                "#1508 appears fixed — the forced/required streaming path no "
-                "longer leaks tool wire into content. Delete this branch and "
-                "restore the strict assertion below."
-            )
-            continue
         assert leak not in aggregated_content, (
             f"R12-MED-2 streaming leak: {leak!r} survived in "
             f"aggregated content: {aggregated_content!r}"
         )
+
+    assert '"name":"get_weather"' not in aggregated_content
+    assert '"arguments":{"city":"Tokyo"}' not in aggregated_content
 
     # The non-marker reasoning prose still made it through — we
     # didn't accidentally scrub the whole channel.
@@ -784,3 +760,41 @@ def test_chat_route_streaming_required_reasoning_is_sanitized():
         f"sanitizer over-strip: legitimate reasoning prose lost; "
         f"got reasoning={aggregated_reasoning!r}"
     )
+
+
+def test_forced_stream_preserves_non_structural_tool_marker_prose():
+    """Buffering #1508 must not delete documentation about marker syntax."""
+    engine = _StreamingLeakEngine(
+        ["<think>brief plan</think>", "Use <tool_call> literally in docs."]
+    )
+    cfg = reset_config()
+    cfg.engine = engine
+    cfg.model_name = "qwen3-0.6b-4bit"
+    cfg.model_registry = None
+    cfg.no_thinking = False
+    cfg.reasoning_parser = Qwen3ReasoningParser(tokenizer=None)
+    cfg.reasoning_parser_name = "qwen3"
+    cfg.tool_call_parser = "hermes"
+    app = FastAPI()
+    app.include_router(chat_router)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "qwen3-0.6b-4bit",
+            "messages": [{"role": "user", "content": "Explain the marker."}],
+            "tools": _WEATHER_TOOL,
+            "tool_choice": "required",
+            "max_tokens": 50,
+            "stream": True,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    content = "".join(
+        delta["content"]
+        for chunk in _parse_sse_stream(resp.content)
+        for choice in chunk.get("choices", [])
+        if isinstance((delta := choice.get("delta") or {}).get("content"), str)
+    )
+    assert content == "Use <tool_call> literally in docs."

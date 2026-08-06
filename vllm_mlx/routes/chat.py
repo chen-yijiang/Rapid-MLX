@@ -6017,6 +6017,25 @@ async def stream_chat_completion(
             escaped = json.dumps(_sanitize(text))
             return f'{_sse_prefix}"{field}":{escaped}{_sse_suffix}'
 
+        def _content_sse_chunk(
+            text: str, chunk_logprobs: ChoiceLogProbs | None = None
+        ) -> str:
+            """Serialize one content delta, preserving requested logprobs."""
+            if not want_logprobs:
+                return _fast_sse_chunk(text, "content")
+            chunk = ChatCompletionChunk(
+                id=response_id,
+                created=_sse_created,
+                model=_resolve_model_name(request.model),
+                choices=[
+                    ChatCompletionChunkChoice(
+                        delta=ChatCompletionChunkDelta(content=text),
+                        logprobs=chunk_logprobs,
+                    )
+                ],
+            )
+            return f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+
         # First chunk with role
         _first_sse = f'{_sse_prefix}"role":"assistant"{_sse_suffix}'
         if logger.isEnabledFor(logging.INFO):
@@ -6087,6 +6106,22 @@ async def stream_chat_completion(
         # the swallow-buffer state machine. No-op when the prefix is
         # absent.
         processor.seed_forced_assistant_prefix(kwargs.get("forced_assistant_prefix"))
+
+        # A forced tool-choice stream cannot safely release content deltas until
+        # the terminal synth/validation decision is known. In particular, when
+        # schema validation refuses a synthesized call, the parser may already
+        # have surfaced the model's raw ``<tool_call>{...}</tool_call>`` bytes as
+        # content. Buffer this narrow path and structurally scrub the aggregate
+        # before anything reaches the client. Auto/none streams retain normal
+        # token-by-token latency.
+        _buffer_forced_content = bool(request.tools) and (
+            request.tool_choice == "required"
+            or (
+                isinstance(request.tool_choice, dict)
+                and request.tool_choice.get("type") == "function"
+            )
+        )
+        _forced_content_parts: list[tuple[str, ChoiceLogProbs | None]] = []
 
         # Track token counts for usage reporting
         prompt_tokens = 0
@@ -6166,32 +6201,25 @@ async def stream_chat_completion(
                 # Telemetry: stamp TTFT on the first real output token
                 # (content / reasoning / tool_call). Cheap monotonic read
                 # gated to fire once; never touches the wire.
-                if first_token_ts is None and event.type in (
-                    "content",
-                    "reasoning",
-                    "tool_call",
+                if (
+                    first_token_ts is None
+                    and event.type
+                    in (
+                        "content",
+                        "reasoning",
+                        "tool_call",
+                    )
+                    and not (event.type == "content" and _buffer_forced_content)
                 ):
                     first_token_ts = time.perf_counter()
                 if event.type == "content":
-                    if not want_logprobs:
-                        _sse = _fast_sse_chunk(event.content, "content")
-                        if _sse:
-                            yield _sse
+                    _event_logprobs = (
+                        _build_chunk_logprobs(output) if want_logprobs else None
+                    )
+                    if _buffer_forced_content:
+                        _forced_content_parts.append((event.content, _event_logprobs))
                     else:
-                        chunk = ChatCompletionChunk(
-                            id=response_id,
-                            created=_sse_created,
-                            model=_resolve_model_name(request.model),
-                            choices=[
-                                ChatCompletionChunkChoice(
-                                    delta=ChatCompletionChunkDelta(
-                                        content=event.content,
-                                    ),
-                                    logprobs=_build_chunk_logprobs(output),
-                                )
-                            ],
-                        )
-                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                        yield _content_sse_chunk(event.content, _event_logprobs)
 
                 elif event.type == "reasoning":
                     yield _fast_sse_chunk(event.reasoning, "reasoning_content")
@@ -6426,6 +6454,36 @@ async def stream_chat_completion(
                         _synth_target,
                     )
 
+        # Release the narrow forced-choice content buffer only after tool-call
+        # parsing, fallback recovery, synthesis, and schema validation have all
+        # finished. The structural detector examines the aggregate so a wire
+        # opener and closer split across engine deltas cannot evade it.
+        _forced_content_scrubbed = False
+        if _buffer_forced_content:
+            _deferred_raw = "".join(text for text, _ in _forced_content_parts)
+            _finish_held = ""
+            if buffered_finish is not None:
+                _finish_held = buffered_finish[0].content or ""
+            _held_content = _deferred_raw + _finish_held + finalize_content
+            if _contains_structural_tool_wire_leak(_held_content):
+                _forced_content_scrubbed = True
+                _clean_held = _scrub_visible_tool_wire_leaks(_held_content)
+                if _clean_held:
+                    if first_token_ts is None:
+                        first_token_ts = time.perf_counter()
+                    # Scrubbing can span multiple original deltas, so their
+                    # per-token logprobs no longer map to the rewritten text.
+                    yield _content_sse_chunk(_clean_held, None)
+            else:
+                # No structural wire exists: replay the original chunks exactly
+                # so ordinary forced-choice prose and requested logprobs survive.
+                for _text, _logprobs in _forced_content_parts:
+                    if not _text:
+                        continue
+                    if first_token_ts is None:
+                        first_token_ts = time.perf_counter()
+                    yield _content_sse_chunk(_text, _logprobs)
+
         # Emit the terminal chunk. Three cases:
         #   (a) Streaming parser already emitted tool_calls during the
         #       loop → buffered_finish has finish_reason="tool_calls"
@@ -6448,7 +6506,11 @@ async def stream_chat_completion(
             # finish_event.content path is normally None for non-tool
             # plain-text streams (deltas already drained content during
             # the loop), so this typically just adds the held suffix.
-            terminal_content = (finish_event.content or "") + finalize_content
+            terminal_content = (
+                ""
+                if _forced_content_scrubbed
+                else (finish_event.content or "") + finalize_content
+            )
 
             # Issue #569 streaming rescue: if NOTHING was streamed as
             # ``content`` across the whole turn AND no ``tool_calls``
@@ -6757,7 +6819,11 @@ async def stream_chat_completion(
                 choices=[
                     ChatCompletionChunkChoice(
                         delta=ChatCompletionChunkDelta(
-                            content=finalize_content or None,
+                            content=(
+                                None
+                                if _forced_content_scrubbed
+                                else finalize_content or None
+                            ),
                             reasoning_content=None,
                             tool_calls=fallback_tool_calls or None,
                         ),
