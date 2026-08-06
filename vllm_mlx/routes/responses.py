@@ -19,7 +19,6 @@ import json
 import logging
 import re
 import shlex
-import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
@@ -2757,29 +2756,16 @@ async def _stream_responses(
             and cfg.tool_call_parser == "deepseek_v4_0731"
         )
         _defer_public_text = _forced_choice_active or _deepseek_defer_public_text
+        # This buffer is bounded by the request's already-resolved scheduler
+        # ``max_tokens`` budget (32K by default for Codex), not by wall time or
+        # context length. Keeping it in memory avoids blocking file I/O and
+        # cancellation-time descriptor cleanup on the async request path.
         deferred_text: list[str] = []
-        # DeepSeek auto-tool turns can defer much more prose than legacy
-        # forced-choice synthesis. Spill beyond 1 MiB instead of growing an
-        # unbounded Python list; the file is closed when the generator exits.
-        deferred_text_file = (
-            tempfile.SpooledTemporaryFile(
-                max_size=1024 * 1024, mode="w+", encoding="utf-8"
-            )
-            if _deepseek_defer_public_text
-            else None
-        )
 
         def _clear_deferred_text() -> None:
             deferred_text.clear()
-            if deferred_text_file is not None:
-                deferred_text_file.close()
 
         def _take_deferred_text() -> str:
-            if deferred_text_file is not None:
-                deferred_text_file.seek(0)
-                value = deferred_text_file.read()
-                deferred_text_file.close()
-                return value
             value = "".join(deferred_text)
             deferred_text.clear()
             return value
@@ -3160,10 +3146,7 @@ async def _stream_responses(
             if not delta:
                 return
             if _defer_public_text:
-                if deferred_text_file is not None:
-                    deferred_text_file.write(delta)
-                else:
-                    deferred_text.append(delta)
+                deferred_text.append(delta)
                 return
             if not message_open:
                 for ev in await _open_message_item():
