@@ -66,8 +66,19 @@ def backup_existing(path: Path) -> Path | None:
     # probe alone is a check-then-act, so two concurrent launches could
     # settle on the same counter and one would silently overwrite the
     # other's backup. Losing on the open just advances the counter.
+    # One open, then read AND stat through that same descriptor. Looking the
+    # pathname up twice lets an editor's atomic replace land in between, so the
+    # backup could hold the OLD secret while wearing the NEW file's looser
+    # mode.
     counter = 0
-    data = path.read_bytes()
+    src_fd = os.open(path, os.O_RDONLY)
+    try:
+        src = os.fstat(src_fd)
+        data = b""
+        while chunk := os.read(src_fd, 1 << 20):
+            data += chunk
+    finally:
+        os.close(src_fd)
     while True:
         try:
             fd = os.open(bak, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -83,7 +94,6 @@ def backup_existing(path: Path) -> Path | None:
     # a source that is itself group/world-readable keeps that, because
     # the backup should not be MORE exposed than what it copies, and
     # need not be less.
-    src = os.stat(path)
     mode = src.st_mode & 0o7777
     if mode & 0o077:
         # Group/other bits only mean "no wider than the source" if the
@@ -104,6 +114,21 @@ def backup_existing(path: Path) -> Path | None:
             mode &= 0o700
         else:
             if os.stat(bak).st_gid != src.st_gid:
+                mode &= 0o700
+        # An ACL can DENY a principal the mode bits would otherwise admit, and
+        # a freshly created file carries none. Reproducing 0644 without the
+        # deny entry hands the file to exactly the account the source shut
+        # out. There is no stdlib API to copy one, so when the source carries
+        # a security xattr the backup stays owner-only rather than pretending
+        # the numbers tell the whole story.
+        listxattr = getattr(os, "listxattr", None)
+        if listxattr is not None:
+            try:
+                if any(
+                    x.startswith("com.apple.system.Security") for x in listxattr(path)
+                ):
+                    mode &= 0o700
+            except OSError:
                 mode &= 0o700
     os.chmod(bak, mode)
     print(f"  backup: {bak}", file=sys.stderr)
