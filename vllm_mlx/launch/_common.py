@@ -87,14 +87,16 @@ def backup_existing(path: Path) -> Path | None:
         # backup would hold the OLD secret while the ACL decision below came
         # from the NEW file. That is the same TOCTOU the single open already
         # closed for st_mode, just wearing a different field.
+        # ``None`` means "could not verify", which the mode policy below
+        # treats as "do not reproduce group/other bits". macOS ships no
+        # os.listxattr at all, and a macOS ACL is not an xattr we could read
+        # even if it did — so on the platform this project actually targets
+        # we can never establish ACL equivalence, and a 0644 source carrying
+        # a deny entry would otherwise yield a 0644 backup that denies
+        # nobody.
         listxattr = getattr(os, "listxattr", None)
-        if listxattr is None:
-            # macOS ships no os.listxattr, so a macOS ACL is invisible from
-            # here. Empty (rather than None) keeps the mode policy unchanged
-            # on that platform — the gap is real and stated, not silently
-            # turned into over-tightening every backup.
-            src_xattrs: tuple[str, ...] | None = ()
-        else:
+        src_xattrs: tuple[str, ...] | None = None
+        if listxattr is not None:
             try:
                 src_xattrs = tuple(listxattr(src_fd))
             except OSError:
