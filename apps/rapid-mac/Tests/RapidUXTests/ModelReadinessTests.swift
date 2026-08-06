@@ -813,6 +813,17 @@ final class ModelReadinessTests: XCTestCase {
             resolve(.starting(alias: alias), alias: other, cached: true),
             .needsStart(alias: other)
         )
+        // codex r2: a PLACEHOLDER start (engine reports no alias) while a
+        // real model B is selected must not claim "Starting B" and swallow
+        // B's Start — we can't prove the start is B's, so resolve B.
+        XCTAssertEqual(
+            resolve(.starting(alias: ""), alias: other, cached: true),
+            .needsStart(alias: other)
+        )
+        // …but a placeholder start with NOTHING selected stays visible.
+        if case .starting = resolve(.starting(alias: ""), alias: "") {} else {
+            XCTFail("a placeholder start with no selection must still show as starting")
+        }
     }
 
     /// A turn-level error is shown in the ready composer only when it

@@ -517,16 +517,28 @@ enum ModelReadiness: Equatable {
     }
 
     /// Permissive rule for a NON-Send-enabling serve-state (``.starting``):
-    /// let it describe the current pick UNLESS a *different real model* is
-    /// selected. A placeholder serving name (an engine "Loading" mid-start)
-    /// or a not-yet-synced selection (the first frame at launch, before the
-    /// picker breadcrumb catches up to an auto-started model) both fall
-    /// through to `true` so the in-flight start stays visible; only a
-    /// deliberate pick of another real model suppresses it. (#1505.)
+    /// may the in-flight start describe the current pick?
+    ///
+    ///   * serving real, selected real → only when they are the same model.
+    ///   * serving real, selection not synced yet (placeholder) → yes: the
+    ///     launch frame where the picker breadcrumb lags the auto-started
+    ///     model. Show the real serving name.
+    ///   * serving is a placeholder (an engine "Loading" with no alias) →
+    ///     yes ONLY when the selection is also unresolved. If a *real* model
+    ///     B is selected we must NOT claim "Starting B" and suppress B's
+    ///     Start — we cannot prove the placeholder start is B's, so resolve
+    ///     B's own state instead. (#1505; codex r2.)
     static func serveStateSpeaksForSelection(serving: String, selected: String) -> Bool {
-        guard let servingName = displayable(serving) else { return true }
-        guard let selectedName = displayable(selected) else { return true }
-        return servingName == selectedName
+        switch (displayable(serving), displayable(selected)) {
+        case (.some(let servingName), .some(let selectedName)):
+            return servingName == selectedName
+        case (.some, .none):
+            return true
+        case (.none, .none):
+            return true
+        case (.none, .some):
+            return false
+        }
     }
 
     /// Strict rule for the Send-enabling ``.ready`` state: it may describe
