@@ -75,6 +75,7 @@ async def test_deepseek_codex_nonprogress_retry_is_internal(monkeypatch):
 
     assert calls == [False, True]
     assert all('"attempt":1' not in event for event in events)
+    assert all('"type":"response.failed"' not in event for event in events)
     assert any('"type":"response.completed"' in event for event in events)
     assert visible_heartbeat_state["response"] == {"id": "visible-attempt"}
 

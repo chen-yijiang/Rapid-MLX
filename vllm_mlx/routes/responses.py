@@ -2590,6 +2590,7 @@ async def _stream_responses(
                 openai_request, responses_request, cfg.tool_call_parser
             ),
         }
+        forced_prefix = None
         if openai_request.tools:
             chat_kwargs["tools"] = convert_tools_for_template(openai_request.tools)
             from .chat import _compute_forced_tool_prefix
@@ -2687,6 +2688,7 @@ async def _stream_responses(
             codex_surface
             and openai_request.tools
             and openai_request.tool_choice != "none"
+            and forced_prefix
             and cfg.tool_call_parser == "deepseek_v4_0731"
         )
         deferred_text: list[str] = []
