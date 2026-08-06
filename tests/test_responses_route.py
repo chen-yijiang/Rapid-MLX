@@ -1486,6 +1486,54 @@ def test_codex_progress_reminder_recognizes_shell_file_creation_as_edit():
     )
 
 
+def test_codex_progress_reminder_recognizes_interactive_write_as_edit():
+    from vllm_mlx.api.responses_models import ResponsesRequest
+    from vllm_mlx.routes.responses import _inject_codex_progress_reminder
+
+    items = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "call_id": "edit",
+            "arguments": '{"chars":"cat > fixed.py\\nnew content\\n"}',
+        }
+    ]
+    for index in range(8):
+        items.extend(
+            [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": f"check_{index}",
+                    "arguments": f'{{"cmd":"check {index}"}}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": f"check_{index}",
+                    "output": "ok",
+                },
+            ]
+        )
+
+    assert (
+        _inject_codex_progress_reminder(
+            [], ResponsesRequest(model="deepseek-v4", input=items)
+        )
+        == []
+    )
+
+
+def test_codex_progress_reminder_ignores_dev_null_redirection():
+    from vllm_mlx.routes.responses import _codex_call_performs_edit
+
+    assert not _codex_call_performs_edit(
+        "exec_command", '{"cmd":"cat source.py > /dev/null"}'
+    )
+    assert not _codex_call_performs_edit(
+        "exec_command", '{"cmd":"printf status | tee /dev/null"}'
+    )
+
+
 def test_codex_progress_does_not_mistake_prose_passed_for_test_success():
     from vllm_mlx.api.responses_models import ResponsesRequest
     from vllm_mlx.routes.responses import _inject_codex_progress_reminder

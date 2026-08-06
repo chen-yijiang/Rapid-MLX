@@ -284,16 +284,22 @@ def _codex_call_performs_edit(name: str, arguments: str) -> bool:
     if name == "apply_patch":
         return True
     command = arguments
+    argument_field = "chars" if name == "write_stdin" else "cmd"
     try:
         decoded = json.loads(arguments)
-        if isinstance(decoded, dict) and isinstance(decoded.get("cmd"), str):
-            command = decoded["cmd"]
+        if isinstance(decoded, dict) and isinstance(decoded.get(argument_field), str):
+            command = decoded[argument_field]
     except (TypeError, ValueError):
         # Some model-emitted argument objects escape apostrophes as ``\'``,
         # which is harmless to the shell command but invalid JSON.
-        match = re.search(r'"cmd"\s*:\s*"((?:\\.|[^"\\])*)"', arguments)
+        match = re.search(rf'"{argument_field}"\s*:\s*"((?:\\.|[^"\\])*)"', arguments)
         if match:
             command = match.group(1).replace(r"\'", "'").replace(r"\"", '"')
+
+    # Output sinks do not modify the project and should not suppress the
+    # exploration checkpoint.
+    command = re.sub(r"(?:>>|>)\s*/dev/null\b", "", command)
+    command = re.sub(r"\btee(?:\s+-\S+)*\s+/dev/null\b", "", command)
 
     shell_write = re.compile(
         r"(?:^|[\n;&|])\s*(?:"
@@ -2347,6 +2353,10 @@ async def _stream_responses_with_nonprogress_retry(
             yield event
         return
 
+    # Transport liveness and cancellation remain owned by the outer
+    # ``_disconnect_guard`` in ``create_response``. While lifecycle events are
+    # held here, that guard keeps polling disconnects and emits parsed
+    # Responses heartbeats from ``heartbeat_state`` at the configured interval.
     buffered: list[str] = []
     buffered_bytes = 0
     committed = False
@@ -2667,6 +2677,7 @@ async def _stream_responses(
         _defer_public_text = _forced_choice_active or bool(
             codex_surface
             and openai_request.tools
+            and openai_request.tool_choice != "none"
             and cfg.tool_call_parser == "deepseek_v4_0731"
         )
         deferred_text: list[str] = []
