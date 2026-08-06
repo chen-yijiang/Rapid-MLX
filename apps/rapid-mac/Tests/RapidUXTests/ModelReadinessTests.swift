@@ -754,6 +754,89 @@ final class ModelReadinessTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - #1505 follow-up: serve-state must not describe a foreign selection
+
+    /// The Send-enabling `.ready` state may only describe the SELECTED
+    /// model. A user who picks B while A is still serving must NOT get a
+    /// bright Send button wired to a model that isn't running — resolve B's
+    /// own state instead, so the composer offers B's Start and Send stays
+    /// gated. (Regression: `.ready` previously described the serving alias
+    /// unconditionally, enabling a send that ``ChatView`` would dispatch
+    /// against the un-running selection.)
+    func testReadyForADifferentModelResolvesTheSelection() {
+        let other = "bonsai-1.7b-2bit"
+        let state = resolve(.ready(alias: alias), alias: other, cached: true)
+        XCTAssertEqual(state, .needsStart(alias: other))
+        XCTAssertFalse(state.sendAllowed, "Send must not enable for a model that isn't the one serving")
+
+        let cold = resolve(.ready(alias: alias), alias: other, cached: false)
+        XCTAssertEqual(cold, .needsDownload(alias: other, sizeText: nil))
+        XCTAssertFalse(cold.sendAllowed)
+    }
+
+    /// The launch pre-sync frame: the child is serving but the picker
+    /// breadcrumb hasn't synced yet (empty selection). `.ready` must not win
+    /// with an empty/foreign alias — Send stays gated until a real model is
+    /// actually selected, which the `onChange(of: server.state)` sync does a
+    /// frame later.
+    func testReadyWithNoSelectionYetIsNotSendable() {
+        let state = resolve(.ready(alias: alias), alias: "", cached: true)
+        XCTAssertFalse(state.sendAllowed)
+        XCTAssertEqual(state, .noModel)
+    }
+
+    /// The matching case is untouched: serving == selected → ready.
+    func testReadyForTheSelectedModelStaysReady() {
+        XCTAssertEqual(resolve(.ready(alias: alias), alias: alias), .ready(alias: alias))
+        XCTAssertTrue(readyDescribesSelectionRef(serving: alias, selected: alias))
+        XCTAssertFalse(readyDescribesSelectionRef(serving: alias, selected: "bonsai-1.7b-2bit"))
+        XCTAssertFalse(readyDescribesSelectionRef(serving: alias, selected: ""))
+    }
+
+    /// `.starting` is permissive (it never enables Send): a not-yet-synced
+    /// selection at launch keeps the in-flight start visible, but a
+    /// deliberate pick of a DIFFERENT real model resolves that model.
+    func testStartingIsPermissiveExceptForADifferentRealModel() {
+        // Launch: breadcrumb lags the auto-started model — still show it.
+        let launch = resolve(.starting(alias: alias), alias: "")
+        if case .starting = launch {} else {
+            XCTFail("a starting child with no selection yet must still show as starting, got \(launch)")
+        }
+        // Same model selected — unchanged.
+        if case .starting = resolve(.starting(alias: alias), alias: alias) {} else {
+            XCTFail("starting the selected model must show as starting")
+        }
+        // A different real model deliberately selected — resolve it.
+        let other = "bonsai-1.7b-2bit"
+        XCTAssertEqual(
+            resolve(.starting(alias: alias), alias: other, cached: true),
+            .needsStart(alias: other)
+        )
+    }
+
+    /// A turn-level error is shown in the ready composer only when it
+    /// belongs to the current model (or carries no alias at all). Switching
+    /// to a healthy model must not inherit the previous model's error.
+    func testTurnErrorScopedToSelection() {
+        XCTAssertTrue(
+            ModelReadiness.turnErrorApplies(failureAlias: nil, selectedAlias: alias),
+            "an unattributed turn error is about the current turn and must show"
+        )
+        XCTAssertTrue(
+            ModelReadiness.turnErrorApplies(failureAlias: alias, selectedAlias: alias)
+        )
+        XCTAssertFalse(
+            ModelReadiness.turnErrorApplies(failureAlias: crashed, selectedAlias: alias),
+            "a prior model's turn error must not leak onto a freshly selected model"
+        )
+    }
+
+    /// Local ref so the strict predicate is exercised directly, not only
+    /// through the eight-case resolve matrix.
+    private func readyDescribesSelectionRef(serving: String, selected: String) -> Bool {
+        ModelReadiness.readyDescribesSelection(serving: serving, selected: selected)
+    }
 }
 
 /// The detail-pane branch. Reduced to the one thing it decides now that

@@ -413,7 +413,17 @@ struct ChatView: View {
                 )
                 .frame(maxWidth: contentMaxWidth)
                 .frame(maxWidth: .infinity)
-            } else if let error = viewModel.lastError {
+            } else if let error = viewModel.lastError,
+                      ModelReadiness.turnErrorApplies(
+                          failureAlias: viewModel.lastFailureAlias,
+                          selectedAlias: alias
+                      ) {
+                // Only the CURRENT model's turn error (or an unattributed
+                // one) belongs here. Without the alias gate, switching to a
+                // healthy model and letting it reach ``ready`` would render
+                // the previous model's error under the fresh composer until
+                // the next send cleared it — a model-scoped error leaking
+                // across a model switch (#1505 follow-up).
                 InlineNotice(message: error, tone: .error)
                     .frame(maxWidth: contentMaxWidth)
                     .frame(maxWidth: .infinity)

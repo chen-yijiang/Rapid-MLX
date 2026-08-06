@@ -198,7 +198,16 @@ enum ModelReadiness: Equatable {
     ) -> ModelReadiness {
         if case .missing = serverState { return .engineMissing }
 
-        if case .starting(let starting) = serverState {
+        // A live serve-state describes the SERVING model. It may speak for
+        // the current pick only under the rules below — otherwise a user who
+        // selects B while A is still serving would see B's surface driven by
+        // A. `.starting` uses the permissive rule (it never enables Send, so
+        // the only harm is a name, and at launch the picker breadcrumb
+        // legitimately lags the auto-started model); `.ready` uses the strict
+        // rule because it is the one Send-enabling state and must never light
+        // up against a model the dispatch path isn't holding. (#1505 follow-up.)
+        if case .starting(let starting) = serverState,
+           serveStateSpeaksForSelection(serving: starting, selected: alias) {
             // Defensive fallback rather than `?? starting`: if BOTH the
             // serving alias and the picker's are placeholders, echoing
             // the raw string would render "Starting Loading" or, worse,
@@ -216,7 +225,9 @@ enum ModelReadiness: Equatable {
             return .starting(alias: name, detail: startingDetail(for: activity, subtitle: progress?.subtitle))
         }
 
-        if case .ready(let serving) = serverState, let name = displayable(serving) {
+        if case .ready(let serving) = serverState,
+           readyDescribesSelection(serving: serving, selected: alias),
+           let name = displayable(serving) {
             return .ready(alias: name)
         }
 
@@ -503,6 +514,44 @@ enum ModelReadiness: Equatable {
         guard let selectedAlias else { return true }
         guard let failedAlias else { return false }
         return failedAlias == selectedAlias
+    }
+
+    /// Permissive rule for a NON-Send-enabling serve-state (``.starting``):
+    /// let it describe the current pick UNLESS a *different real model* is
+    /// selected. A placeholder serving name (an engine "Loading" mid-start)
+    /// or a not-yet-synced selection (the first frame at launch, before the
+    /// picker breadcrumb catches up to an auto-started model) both fall
+    /// through to `true` so the in-flight start stays visible; only a
+    /// deliberate pick of another real model suppresses it. (#1505.)
+    static func serveStateSpeaksForSelection(serving: String, selected: String) -> Bool {
+        guard let servingName = displayable(serving) else { return true }
+        guard let selectedName = displayable(selected) else { return true }
+        return servingName == selectedName
+    }
+
+    /// Strict rule for the Send-enabling ``.ready`` state: it may describe
+    /// the selection ONLY when a real serving model equals a real selected
+    /// model. If a different model is serving, or nothing is really selected
+    /// yet, ``.ready`` must NOT win — resolving the selection's own state
+    /// keeps Send gated instead of enabling it against an alias the dispatch
+    /// path (``ChatView.send(_:alias:)``) isn't holding. (#1505.)
+    static func readyDescribesSelection(serving: String, selected: String) -> Bool {
+        guard let servingName = displayable(serving),
+              let selectedName = displayable(selected) else { return false }
+        return servingName == selectedName
+    }
+
+    /// Whether a turn-level error attributed to ``failureAlias`` should
+    /// still show in the composer once the currently-selected model is
+    /// ready. An unattributed error (a generic 500 with no alias recorded)
+    /// always shows; an attributed one shows only for the model it came
+    /// from — so switching to a healthy model does not inherit the previous
+    /// model's error banner. Distinct from ``failureApplies`` (which
+    /// suppresses an unattributed *readiness* failure): a turn error with no
+    /// alias is about the turn the user just took, so it is shown. (#1505.)
+    static func turnErrorApplies(failureAlias: String?, selectedAlias: String?) -> Bool {
+        guard let failureAlias else { return true }
+        return failureAlias == selectedAlias
     }
 
     // MARK: - Pure helpers
