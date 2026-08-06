@@ -1076,6 +1076,12 @@ class TestResponsesStreamFailureEnvelope:
         )
         assert reasoning_done < message_added
         assert "response.function_call_arguments.delta" in names
+        text = "".join(
+            str(data.get("delta") or "")
+            for name, data in events
+            if name == "response.output_text.delta"
+        )
+        assert "I'll patch it." in text
 
     def test_auto_tool_choice_allows_textual_action_language(
         self, tool_intent_only_stop_client

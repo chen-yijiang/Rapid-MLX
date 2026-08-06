@@ -114,6 +114,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_NONPROGRESS_RETRY_BUFFER_LIMIT = 4 * 1024 * 1024
+
 
 def _should_prime_deepseek_codex_exec(
     responses_request: ResponsesRequest, tool_parser: str | None
@@ -232,22 +234,7 @@ def _inject_codex_progress_reminder(
             call_id = str(data.get("call_id") or "")
             calls[call_id] = arguments
             call_names[call_id] = str(data.get("name") or "")
-            if any(
-                marker in arguments
-                for marker in (
-                    "apply_patch",
-                    "cat >",
-                    "cat >>",
-                    "tee ",
-                    "sed -i",
-                    ".write_text(",
-                    ".write_bytes(",
-                    'open(p,"w")',
-                    'open(p, "w")',
-                    "open(p,'w')",
-                    "open(p, 'w')",
-                )
-            ):
+            if _codex_call_performs_edit(call_names[call_id], arguments):
                 has_edited = True
                 has_test_passed = False
                 has_test_failed = False
@@ -290,6 +277,43 @@ def _inject_codex_progress_reminder(
             "_rapid_mlx_transient_priming": True,
         },
     ]
+
+
+def _codex_call_performs_edit(name: str, arguments: str) -> bool:
+    """Recognize common coding-agent writes without matching search literals."""
+    if name == "apply_patch":
+        return True
+    command = arguments
+    try:
+        decoded = json.loads(arguments)
+        if isinstance(decoded, dict) and isinstance(decoded.get("cmd"), str):
+            command = decoded["cmd"]
+    except (TypeError, ValueError):
+        # Some model-emitted argument objects escape apostrophes as ``\'``,
+        # which is harmless to the shell command but invalid JSON.
+        match = re.search(r'"cmd"\s*:\s*"((?:\\.|[^"\\])*)"', arguments)
+        if match:
+            command = match.group(1).replace(r"\'", "'").replace(r"\"", '"')
+
+    shell_write = re.compile(
+        r"(?:^|[\n;&|])\s*(?:"
+        r"apply_patch\b|"
+        r"cat\b[^\n;]*(?:>>|>)|"
+        r"tee(?:\s+-\S+)*\s+[^\n;]+|"
+        r"sed\s+(?:-[A-Za-z]*i[A-Za-z]*|--in-place)\b"
+        r")"
+    )
+    if shell_write.search(command):
+        return True
+    if not re.search(r"(?:^|[\s/])python(?:\d+(?:\.\d+)?)?\b", command):
+        return False
+    return bool(
+        re.search(r"\.(?:write_text|write_bytes)\s*\(", command)
+        or re.search(
+            r"\bopen\s*\([^,\n]+,\s*(['\"])[^'\"]*[wax+][^'\"]*\1",
+            command,
+        )
+    )
 
 
 def _codex_action_command_prefix(responses_request: ResponsesRequest) -> str | None:
@@ -2324,6 +2348,8 @@ async def _stream_responses_with_nonprogress_retry(
         return
 
     buffered: list[str] = []
+    buffered_bytes = 0
+    committed = False
     retry_nonprogress = False
     async for event in _stream_responses(
         engine,
@@ -2333,10 +2359,29 @@ async def _stream_responses_with_nonprogress_retry(
         request_id_holder=request_id_holder,
         heartbeat_state=heartbeat_state,
     ):
+        if committed:
+            yield event
+            continue
         buffered.append(event)
-        if '"code":"model_no_final_answer"' in event.replace(" ", ""):
+        buffered_bytes += len(event.encode("utf-8"))
+        if _responses_event_commits_progress(event):
+            committed = True
+        elif buffered_bytes >= _NONPROGRESS_RETRY_BUFFER_LIMIT:
+            logger.warning(
+                "DeepSeek Codex retry buffer reached %d bytes; preserving streaming "
+                "and disabling the transparent retry for this turn",
+                buffered_bytes,
+            )
+            committed = True
+        if committed:
+            for pending in buffered:
+                yield pending
+            buffered.clear()
+        elif '"code":"model_no_final_answer"' in event.replace(" ", ""):
             retry_nonprogress = True
 
+    if committed:
+        return
     if not retry_nonprogress:
         for event in buffered:
             yield event
@@ -2357,6 +2402,25 @@ async def _stream_responses_with_nonprogress_retry(
         nonprogress_retry=True,
     ):
         yield event
+
+
+def _responses_event_commits_progress(event: str) -> bool:
+    """Return whether an SSE event proves this attempt has public progress."""
+    for line in event.splitlines():
+        if not line.startswith("data: "):
+            continue
+        try:
+            data = json.loads(line[6:])
+        except (TypeError, ValueError):
+            continue
+        event_type = data.get("type")
+        if event_type == "response.output_text.delta":
+            return bool(str(data.get("delta") or "").strip())
+        if event_type == "response.output_item.added":
+            item_type = data.get("item", {}).get("type")
+            if item_type in {"function_call", "computer_call"}:
+                return True
+    return False
 
 
 async def _stream_responses(
