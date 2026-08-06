@@ -367,6 +367,49 @@ class TestCommon:
         assert b1 is not None and b2 is not None
         assert b1 != b2
 
+    def test_backup_is_never_more_permissive_than_its_source(self, tmp_path):
+        """A backup must not widen access to what it copies.
+
+        ``atomic_write_json`` writes the config itself through ``mkstemp``,
+        so the live file is 0600 — and ``launch`` puts ``RAPID_MLX_API_KEY``
+        into it. The backup used to be a plain ``write_bytes``, i.e.
+        ``0666 & ~umask`` — 0644 on a default install — so every second
+        ``rapid-mlx launch`` dropped the live bearer token into a
+        world-readable file beside the protected one.
+
+        Mutation check: restore ``bak.write_bytes(path.read_bytes())`` and
+        this fails with 0644 (or whatever the ambient umask yields).
+        """
+        target = tmp_path / "config.json"
+        _common.atomic_write_json(target, {"apiKey": "sk-secret"})
+        source_mode = target.stat().st_mode & 0o777
+        assert source_mode == 0o600, (
+            "precondition: the config itself is written restrictively — if "
+            "this changed, the backup expectation below must change with it"
+        )
+
+        bak = _common.backup_existing(target)
+
+        assert bak is not None
+        assert bak.read_bytes() == target.read_bytes()
+        assert bak.stat().st_mode & 0o777 == source_mode
+
+    def test_backup_matches_a_deliberately_open_source(self, tmp_path):
+        """Not "always 0600" — mirror the source, whatever it is.
+
+        A user who chmod'd their own config group-readable did so on
+        purpose; silently tightening the backup would make the recovery
+        copy behave differently from the thing it recovers.
+        """
+        target = tmp_path / "config.json"
+        target.write_text('{"a": 1}')
+        target.chmod(0o644)
+
+        bak = _common.backup_existing(target)
+
+        assert bak is not None
+        assert bak.stat().st_mode & 0o777 == 0o644
+
     def test_load_json_lenient_missing(self, tmp_path):
         assert _common.load_json_lenient(tmp_path / "missing.json") == {}
 

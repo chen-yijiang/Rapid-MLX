@@ -44,6 +44,14 @@ def backup_existing(path: Path) -> Path | None:
     Prints the backup location to stderr so a user reading the launch
     command's output sees "backup at <path>" without it being mixed
     into the success stdout (which scripts may parse).
+
+    The backup is created 0600 and then given the original's mode. A
+    plain ``write_bytes`` would have created it ``0666 & ~umask`` — 0644
+    on a default install — while :func:`atomic_write_json` hands the
+    config itself the 0600 that ``mkstemp`` produces. Since
+    ``rapid-mlx launch`` writes ``RAPID_MLX_API_KEY`` into these files,
+    that difference put the live bearer token in a world-readable file
+    next to the protected one, for any other local account to read.
     """
     if not path.exists():
         return None
@@ -53,11 +61,29 @@ def backup_existing(path: Path) -> Path | None:
     # (unlikely interactively but trivially reachable in tests). Walk
     # the suffix counter forward until we find an unused name; we don't
     # care about the counter value being meaningful.
+    #
+    # ``O_EXCL`` is what actually makes the name ours: the ``exists()``
+    # probe alone is a check-then-act, so two concurrent launches could
+    # settle on the same counter and one would silently overwrite the
+    # other's backup. Losing on the open just advances the counter.
     counter = 0
-    while bak.exists():
-        counter += 1
-        bak = path.with_suffix(path.suffix + f".bak.{ts}.{counter}")
-    bak.write_bytes(path.read_bytes())
+    data = path.read_bytes()
+    while True:
+        try:
+            fd = os.open(bak, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            counter += 1
+            bak = path.with_suffix(path.suffix + f".bak.{ts}.{counter}")
+            continue
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        break
+    # Match the original once the bytes are down. Created restrictive
+    # first so the contents are never briefly readable at a wider mode;
+    # a source that is itself group/world-readable keeps that, because
+    # the backup should not be MORE exposed than what it copies, and
+    # need not be less.
+    os.chmod(bak, os.stat(path).st_mode & 0o7777)
     print(f"  backup: {bak}", file=sys.stderr)
     return bak
 
