@@ -625,7 +625,9 @@ class Qwen3CoderToolParser(ToolParser):
             if self._top_level_function_close(text, start) != -1
         )
 
-    def _function_start_positions(self, text: str) -> list[int]:
+    def _function_start_positions(
+        self, text: str, valid_names: set[str] | None = None
+    ) -> list[int]:
         """Positions of TOP-LEVEL ``<function=`` openers in ``text``.
 
         Skips ``<function=`` substrings that appear inside a
@@ -665,8 +667,13 @@ class Qwen3CoderToolParser(ToolParser):
                     return positions
                 i = close_pos + param_close_len
                 continue
-            positions.append(next_func)
-            i = next_func + prefix_len
+            header_end = text.find(">", next_func + prefix_len)
+            if header_end == -1:
+                return positions
+            name = text[next_func + prefix_len : header_end]
+            if valid_names is None or name in valid_names:
+                positions.append(next_func)
+            i = header_end + 1
         return positions
 
     def extract_tool_calls_streaming(
@@ -709,7 +716,7 @@ class Qwen3CoderToolParser(ToolParser):
         # advance loop into targeting a bogus next block (codex review
         # on #978).
         if self.json_closed and not self.in_function:
-            top_level_starts = self._function_start_positions(current_text)
+            top_level_starts = self._function_start_positions(current_text, declared)
             tool_count = len(top_level_starts)
             tool_ends = self._top_level_function_close_count(
                 current_text, top_level_starts
@@ -792,6 +799,9 @@ class Qwen3CoderToolParser(ToolParser):
         # ends use the parameter-aware scanners so a user-visible
         # ``<function=…>`` OR ``</function>`` embedded in a parameter
         # value can't corrupt the slice.
+        # Keep undeclared openers here so the header rejection path can return
+        # their buffered bytes as content. The completed-call counter above is
+        # schema-filtered; this active-candidate lookup must not be.
         function_starts = self._function_start_positions(current_text)
         if self.current_tool_index >= len(function_starts):
             return None

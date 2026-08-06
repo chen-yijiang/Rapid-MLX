@@ -85,10 +85,10 @@ class NemotronToolParser(ToolParser):
     ) -> tuple[list[tuple[str, str, int, int]], list[tuple[int, int]]]:
         """Scan canonical wrappers while preserving prose around the function.
 
-        The last outer closer bounds the wrapper. Within it, the structural
-        function closer is the first one after the final parameter closer;
-        this keeps literal markers inside parameter values while leaving prose
-        between ``</function>`` and ``</tool_call>`` visible as content.
+        The last outer closer bounds the wrapper. Within it, a function closer
+        is structural only when the preceding parameter body is itself fully
+        closed (or the JSON body is valid). This keeps literal markers inside
+        values while leaving degraded prose after the function visible.
         """
         wrapper_openers = list(re.finditer(r"<tool_call>", text))
         declared = _declared_tool_names(request)
@@ -115,13 +115,21 @@ class NemotronToolParser(ToolParser):
             function_start = wrapper.end() + function.start()
             body_start = wrapper.end() + function.end()
             body_region = text[body_start:outer_start]
-            last_parameter_close = body_region.rfind("</parameter>")
-            close_search_start = (
-                last_parameter_close + len("</parameter>")
-                if last_parameter_close >= 0
-                else 0
-            )
-            close = body_region.find("</function>", close_search_start)
+            close = -1
+            for candidate in re.finditer(r"</function>", body_region):
+                prefix = body_region[: candidate.start()].strip()
+                if "<parameter=" in prefix:
+                    structurally_complete = prefix.endswith("</parameter>")
+                elif prefix.startswith("{"):
+                    try:
+                        structurally_complete = isinstance(json.loads(prefix), dict)
+                    except json.JSONDecodeError:
+                        structurally_complete = False
+                else:
+                    structurally_complete = True
+                if structurally_complete:
+                    close = candidate.start()
+                    break
             if close < 0:
                 continue
             matches.append(

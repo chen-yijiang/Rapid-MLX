@@ -321,6 +321,23 @@ def test_literal_function_close_at_chunk_boundary_does_not_finalize_early():
     assert json.loads("".join(_argument_fragments(deltas))) == {"body": value}
 
 
+def test_literal_undeclared_function_marker_does_not_corrupt_following_content():
+    """A fake opener inside the value must not become the next stream call."""
+    value = "before </parameter> literal <function=fake> after"
+    request = _request_with_tool("note_write", {"body": {"type": "string"}})
+    chunks = [
+        "<tool_call>\n",
+        "<function=note_write>\n",
+        f"<parameter=body>{value}</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+        " trailing prose",
+    ]
+    deltas = _feed(Qwen3CoderToolParser(tokenizer=None), chunks, request)
+    assert json.loads("".join(_argument_fragments(deltas))) == {"body": value}
+    assert "".join(d.get("content", "") for d in deltas) == " trailing prose"
+
+
 def test_same_chunk_close_and_trailing_param_not_dropped():
     """When one chunk batches ``...tail</parameter><parameter=other>val</parameter>``
     the parser must emit BOTH the closing tail of the in-flight string

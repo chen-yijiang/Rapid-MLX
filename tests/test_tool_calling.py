@@ -215,6 +215,41 @@ class TestParseToolCalls:
         assert tool_calls[0].function.name == "get_weather"
         assert "city" in tool_calls[0].function.arguments
 
+    def test_nested_calling_tool_cleanup_does_not_leak_nemotron_envelope(self):
+        text = (
+            "<tool_call><function=note_write><parameter=body>"
+            '[Calling tool: helper({"x":1})]'
+            "</parameter></function></tool_call>"
+        )
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "note_write",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"body": {"type": "string"}},
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "helper",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"x": {"type": "integer"}},
+                        },
+                    },
+                },
+            ]
+        }
+        cleaned, tool_calls = parse_tool_calls(text, request)
+        assert tool_calls is not None
+        assert [call.function.name for call in tool_calls] == ["helper", "note_write"]
+        assert cleaned == ""
+
     def test_qwen3_bracket_style(self):
         """Test Qwen3 bracket-style tool call."""
         text = '[Calling tool: get_weather({"city": "NYC"})] Some response'

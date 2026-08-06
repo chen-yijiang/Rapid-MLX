@@ -576,7 +576,20 @@ def parse_tool_calls(
     # because earlier branches may already have edited ``cleaned_text``.
     if nemotron_matches:
         for _, _, span_start, span_end in nemotron_matches:
-            cleaned_text = cleaned_text.replace(text[span_start:span_end], "", 1)
+            # Earlier branches may already have removed a nested
+            # ``[Calling tool: ...]`` span from ``cleaned_text``. Mirror those
+            # edits inside this original Nemotron slice before matching it;
+            # otherwise the exact replacement misses and leaks the complete
+            # XML envelope into assistant content.
+            residual_span = text[span_start:span_end]
+            nested = [
+                (start - span_start, end - span_start)
+                for start, end, _name, _args in calling_tool_matches
+                if span_start <= start and end <= span_end
+            ]
+            for start, end in reversed(nested):
+                residual_span = residual_span[:start] + residual_span[end:]
+            cleaned_text = cleaned_text.replace(residual_span, "", 1)
         cleaned_text = cleaned_text.strip()
 
     # Pattern for Qwen-style tool calls:
