@@ -111,16 +111,13 @@ class NemotronToolParser(ToolParser):
                 if declared is None or match.group(1).strip() in declared
             ]
             wrapper_matched = False
-            for function_index, function in enumerate(functions):
+            function_index = 0
+            while function_index < len(functions):
+                function = functions[function_index]
                 name = function.group(1).strip()
                 function_start = wrapper.end() + function.start()
                 body_start = wrapper.end() + function.end()
-                body_end = (
-                    wrapper.end() + functions[function_index + 1].start()
-                    if function_index + 1 < len(functions)
-                    else outer_start
-                )
-                body_region = text[body_start:body_end]
+                body_region = text[body_start:outer_start]
                 close = -1
                 for candidate in re.finditer(r"</function>", body_region):
                     prefix = body_region[: candidate.start()].strip()
@@ -137,16 +134,27 @@ class NemotronToolParser(ToolParser):
                         close = candidate.start()
                         break
                 if close < 0:
-                    continue
+                    # Without a structural closer, later function-shaped
+                    # openers are still inside this function's value. They
+                    # cannot safely become executable sibling calls.
+                    break
+                function_end = body_start + close + len("</function>")
                 matches.append(
                     (
                         name,
                         body_region[:close],
                         function_start,
-                        body_start + close + len("</function>"),
+                        function_end,
                     )
                 )
                 wrapper_matched = True
+                function_index += 1
+                while (
+                    function_index < len(functions)
+                    and wrapper.end() + functions[function_index].start() < function_end
+                ):
+                    # This opener was consumed inside the completed value.
+                    function_index += 1
             if wrapper_matched:
                 ranges.append((wrapper.start(), wrapper_end))
         return matches, ranges
