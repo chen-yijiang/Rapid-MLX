@@ -529,6 +529,94 @@ struct QuickstartViewTests {
             serverState: .ready(alias: QuickstartCoordinator.defaultChoice.alias)
         ))
     }
+
+    // MARK: - #1503 memory-guard deadlock
+
+    /// Build an ``.unsafe`` memory warning for an alias — the shape
+    /// ``ServerManager.start`` parks on when a Quickstart serve would push
+    /// live memory past the 85% panic line.
+    private func makeWarning(alias: String) -> ModelSizing.MemoryWarning {
+        ModelSizing.MemoryWarning(
+            alias: alias,
+            hfPath: nil,
+            isAutoRespawn: false,
+            severity: .unsafe,
+            footprintGB: 3.25,
+            freeGB: 0.7
+        )
+    }
+
+    /// The deadlock scenario itself: a serve we handed off has parked on the
+    /// memory guard (``phase == .starting``, warning for OUR selection). Old
+    /// code had no in-sheet surface for this — the covered ContentView alert
+    /// could never present and the sheet sat on "Starting…" forever. The
+    /// predicate must now hand the sheet the warning to render.
+    @Test("Parked memory warning for our alias while starting IS surfaced in-sheet")
+    func memoryWarningSurfacedWhenStartingOurAlias() {
+        let alias = QuickstartCoordinator.defaultChoice.alias
+        let warning = makeWarning(alias: alias)
+        let shown = QuickstartView.memoryWarningToPresent(
+            phase: .starting,
+            pending: warning,
+            selectionAlias: alias
+        )
+        #expect(shown == warning)
+    }
+
+    @Test("No warning pending while starting → normal Starting card, nothing surfaced")
+    func noMemoryWarningWhenNonePending() {
+        let shown = QuickstartView.memoryWarningToPresent(
+            phase: .starting,
+            pending: nil,
+            selectionAlias: QuickstartCoordinator.defaultChoice.alias
+        )
+        #expect(shown == nil)
+    }
+
+    @Test("A warning for a DIFFERENT alias is not ours to resolve inside onboarding")
+    func memoryWarningForForeignAliasIgnored() {
+        let shown = QuickstartView.memoryWarningToPresent(
+            phase: .starting,
+            pending: makeWarning(alias: "qwen3.5-9b-4bit"),
+            selectionAlias: QuickstartCoordinator.defaultChoice.alias
+        )
+        #expect(shown == nil)
+    }
+
+    @Test("A warning is only surfaced while starting — not mid-download / idle / ready")
+    func memoryWarningOnlyWhileStarting() {
+        let alias = QuickstartCoordinator.defaultChoice.alias
+        let warning = makeWarning(alias: alias)
+        #expect(
+            QuickstartView.memoryWarningToPresent(
+                phase: .downloading, pending: warning, selectionAlias: alias
+            ) == nil
+        )
+        #expect(
+            QuickstartView.memoryWarningToPresent(
+                phase: .idle, pending: warning, selectionAlias: alias
+            ) == nil
+        )
+        #expect(
+            QuickstartView.memoryWarningToPresent(
+                phase: .ready, pending: warning, selectionAlias: alias
+            ) == nil
+        )
+    }
+
+    /// Declining the risky load must LEAVE ``.starting`` — that is the whole
+    /// point, otherwise the sheet stays wedged. It returns to the chooser
+    /// (download already succeeded; only loading was refused), not ``.failed``
+    /// and not the hero.
+    @Test("returnToChooser leaves .starting for the chooser step")
+    func returnToChooserLeavesStarting() {
+        let coord = makeCoordinator()
+        coord.enterStarting()
+        #expect(coord.phase == .starting)
+        coord.returnToChooser()
+        #expect(coord.phase == .idle)
+        #expect(coord.stage == .chooseModel)
+    }
 }
 
 /// F-LWT-1 source-grep tripwire: catch a partial swap that leaves
