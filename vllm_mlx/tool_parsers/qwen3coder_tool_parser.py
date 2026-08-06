@@ -347,6 +347,14 @@ class Qwen3CoderToolParser(ToolParser):
                 if close >= 0:
                     parsed_parameters.append((name, segment[:close].strip()))
                     parsed_names.add(name)
+                elif next_start == len(parameters) and segment.strip():
+                    # ``</function>`` (removed by the caller before this
+                    # helper runs) is the established fallback boundary when
+                    # the model omits the final ``</parameter>``. Preserve the
+                    # value instead of emitting `{}` or leaving streamed JSON
+                    # with an unterminated quote.
+                    parsed_parameters.append((name, segment.strip()))
+                    parsed_names.add(name)
 
         for p_name, p_value in parsed_parameters:
             param_dict[p_name] = _convert_param_value(
@@ -399,7 +407,10 @@ class Qwen3CoderToolParser(ToolParser):
         # the complete-call scanner: bare mentions and values cut in the middle
         # remain ordinary content rather than executable tool calls.
         wrapper_start = model_output.find(self.tool_call_start_token)
-        if wrapper_start < 0 or self.tool_call_end_token in model_output[wrapper_start:]:
+        if (
+            wrapper_start < 0
+            or self.tool_call_end_token in model_output[wrapper_start:]
+        ):
             return []
 
         for opener in re.finditer(r"<function=([^>]+)>", model_output, re.DOTALL):
@@ -493,9 +504,7 @@ class Qwen3CoderToolParser(ToolParser):
                     return ExtractedToolCallInformation(
                         tools_called=False, tool_calls=[], content=model_output
                     )
-                tc = self._parse_xml_function_call(
-                    f"{candidate_name}>{body}", tools
-                )
+                tc = self._parse_xml_function_call(f"{candidate_name}>{body}", tools)
                 if not tc:
                     continue
                 if tc.get("name") not in declared:
@@ -832,9 +841,7 @@ class Qwen3CoderToolParser(ToolParser):
             # The outer wrapper is optional framing and is commonly the token
             # lost when max_tokens cuts a generation. A function closer at the
             # end of the accumulated text is therefore a complete boundary.
-            func_close_idx = current_text.rfind(
-                self.function_end_token, tool_start_idx
-            )
+            func_close_idx = current_text.rfind(self.function_end_token, tool_start_idx)
         if func_close_idx == -1:
             tool_text = current_text[tool_start_idx:]
         else:
@@ -981,9 +988,7 @@ class Qwen3CoderToolParser(ToolParser):
                     if (
                         (end := tool_text.find(">", pos + len(self.parameter_prefix)))
                         != -1
-                        and tool_text[
-                            pos + len(self.parameter_prefix) : end
-                        ]
+                        and tool_text[pos + len(self.parameter_prefix) : end]
                         in declared_params
                     )
                 ]
@@ -1028,9 +1033,7 @@ class Qwen3CoderToolParser(ToolParser):
                                 if marker_positions
                                 else value_text
                             )
-                            frag = self._emit_string_increment(
-                                param_name, safe_value
-                            )
+                            frag = self._emit_string_increment(param_name, safe_value)
                             self.in_param = True
                             self.in_param_name = param_name
                             if frag:

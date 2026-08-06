@@ -304,6 +304,28 @@ def test_missing_optional_wrapper_close_still_finalizes_arguments():
     assert json.loads("".join(_argument_fragments(deltas))) == {"body": "hello"}
 
 
+@pytest.mark.parametrize(
+    "value_chunks",
+    [
+        ["short"],
+        ["abc", "defghijklmnopqrstuvwxyz"],
+    ],
+)
+def test_missing_final_parameter_close_recovers_valid_stream_json(value_chunks):
+    """A structural function close is also the fallback parameter boundary."""
+    value = "".join(value_chunks)
+    request = _request_with_tool("note_write", {"body": {"type": "string"}})
+    chunks = [
+        "<tool_call>\n",
+        "<function=note_write>\n",
+        "<parameter=body>",
+        *value_chunks,
+        "</function>\n</tool_call>",
+    ]
+    deltas = _feed(Qwen3CoderToolParser(tokenizer=None), chunks, request)
+    assert json.loads("".join(_argument_fragments(deltas))) == {"body": value}
+
+
 def test_literal_function_close_at_chunk_boundary_does_not_finalize_early():
     """A payload marker can align exactly with a tokenizer delta boundary."""
     value = "text literal </function> still value"

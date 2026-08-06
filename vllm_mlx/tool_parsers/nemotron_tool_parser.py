@@ -104,42 +104,51 @@ class NemotronToolParser(ToolParser):
             if outer_start < 0:
                 continue
             wrapper_end = outer_start + len("</tool_call>")
-            ranges.append((wrapper.start(), wrapper_end))
-
-            function = re.search(r"<function=([^>]+)>", text[wrapper.end() : outer_start])
-            if function is None:
-                continue
-            name = function.group(1).strip()
-            if declared is not None and name not in declared:
-                continue
-            function_start = wrapper.end() + function.start()
-            body_start = wrapper.end() + function.end()
-            body_region = text[body_start:outer_start]
-            close = -1
-            for candidate in re.finditer(r"</function>", body_region):
-                prefix = body_region[: candidate.start()].strip()
-                if "<parameter=" in prefix:
-                    structurally_complete = prefix.endswith("</parameter>")
-                elif prefix.startswith("{"):
-                    try:
-                        structurally_complete = isinstance(json.loads(prefix), dict)
-                    except json.JSONDecodeError:
-                        structurally_complete = False
-                else:
-                    structurally_complete = True
-                if structurally_complete:
-                    close = candidate.start()
-                    break
-            if close < 0:
-                continue
-            matches.append(
-                (
-                    name,
-                    body_region[:close],
-                    function_start,
-                    body_start + close + len("</function>"),
+            wrapper_body = text[wrapper.end() : outer_start]
+            functions = [
+                match
+                for match in re.finditer(r"<function=([^>]+)>", wrapper_body)
+                if declared is None or match.group(1).strip() in declared
+            ]
+            wrapper_matched = False
+            for function_index, function in enumerate(functions):
+                name = function.group(1).strip()
+                function_start = wrapper.end() + function.start()
+                body_start = wrapper.end() + function.end()
+                body_end = (
+                    wrapper.end() + functions[function_index + 1].start()
+                    if function_index + 1 < len(functions)
+                    else outer_start
                 )
-            )
+                body_region = text[body_start:body_end]
+                close = -1
+                for candidate in re.finditer(r"</function>", body_region):
+                    prefix = body_region[: candidate.start()].strip()
+                    if "<parameter=" in prefix:
+                        structurally_complete = prefix.endswith("</parameter>")
+                    elif prefix.startswith("{"):
+                        try:
+                            structurally_complete = isinstance(json.loads(prefix), dict)
+                        except json.JSONDecodeError:
+                            structurally_complete = False
+                    else:
+                        structurally_complete = True
+                    if structurally_complete:
+                        close = candidate.start()
+                        break
+                if close < 0:
+                    continue
+                matches.append(
+                    (
+                        name,
+                        body_region[:close],
+                        function_start,
+                        body_start + close + len("</function>"),
+                    )
+                )
+                wrapper_matched = True
+            if wrapper_matched:
+                ranges.append((wrapper.start(), wrapper_end))
         return matches, ranges
 
     def extract_tool_calls(

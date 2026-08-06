@@ -68,6 +68,24 @@ def test_canonical_json_body_wrapper(parser):
     assert json.loads(tc["arguments"]) == {"expression": "2*3"}
 
 
+def test_multiple_functions_inside_one_wrapper_are_all_kept(parser):
+    request = {
+        "tools": [
+            {"type": "function", "function": {"name": "a", "parameters": {}}},
+            {"type": "function", "function": {"name": "b", "parameters": {}}},
+        ]
+    }
+    text = (
+        "<tool_call>"
+        "<function=a><parameter=x>1</parameter></function>"
+        "<function=b><parameter=y>2</parameter></function>"
+        "</tool_call>"
+    )
+    result = parser.extract_tool_calls(text, request)
+    assert [call["name"] for call in result.tool_calls] == ["a", "b"]
+    assert result.content is None
+
+
 # ---------------------------------------------------------------------------
 # Degraded variants that previously leaked as text.
 # ---------------------------------------------------------------------------
