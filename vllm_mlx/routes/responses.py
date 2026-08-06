@@ -115,6 +115,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _NONPROGRESS_RETRY_BUFFER_LIMIT = 4 * 1024 * 1024
+_DEFERRED_PUBLIC_TEXT_LIMIT = 4 * 1024 * 1024
 
 
 def _should_prime_deepseek_codex_exec(
@@ -2373,19 +2374,27 @@ async def _stream_responses_with_nonprogress_retry(
         heartbeat_state=attempt_heartbeat_state,
     ):
         if committed:
+            if heartbeat_state is not None:
+                heartbeat_state.clear()
+                heartbeat_state.update(attempt_heartbeat_state)
             yield event
             continue
-        buffered.append(event)
-        buffered_bytes += len(event.encode("utf-8"))
+        event_bytes = len(event.encode("utf-8"))
+        event_buffered = False
+        if buffered_bytes + event_bytes >= _NONPROGRESS_RETRY_BUFFER_LIMIT:
+            committed = True
+        else:
+            buffered.append(event)
+            buffered_bytes += event_bytes
+            event_buffered = True
         if _responses_event_commits_progress(event):
             committed = True
-        elif buffered_bytes >= _NONPROGRESS_RETRY_BUFFER_LIMIT:
+        elif committed:
             logger.warning(
                 "DeepSeek Codex retry buffer reached %d bytes; preserving streaming "
                 "and disabling the transparent retry for this turn",
-                buffered_bytes,
+                buffered_bytes + event_bytes,
             )
-            committed = True
         if committed:
             if heartbeat_state is not None:
                 heartbeat_state.clear()
@@ -2393,6 +2402,8 @@ async def _stream_responses_with_nonprogress_retry(
             for pending in buffered:
                 yield pending
             buffered.clear()
+            if not event_buffered:
+                yield event
         elif '"code":"model_no_final_answer"' in event.replace(" ", ""):
             retry_nonprogress = True
 
@@ -2688,10 +2699,11 @@ async def _stream_responses(
             codex_surface
             and openai_request.tools
             and openai_request.tool_choice != "none"
-            and forced_prefix
             and cfg.tool_call_parser == "deepseek_v4_0731"
         )
         deferred_text: list[str] = []
+        deferred_text_bytes = 0
+        deferred_text_overflow = False
 
         _tokenizer = engine.tokenizer
         _chat_template = ""
@@ -3065,11 +3077,19 @@ async def _stream_responses(
             yielded — final flush decision happens after the engine
             stream completes and we know whether synthesis is needed.
             """
-            nonlocal accumulated_text
+            nonlocal accumulated_text, deferred_text_bytes, deferred_text_overflow
             if not delta:
                 return
             if _defer_public_text:
+                delta_bytes = len(delta.encode("utf-8"))
+                if deferred_text_bytes + delta_bytes > _DEFERRED_PUBLIC_TEXT_LIMIT:
+                    deferred_text.clear()
+                    deferred_text_overflow = True
+                    return
+                if deferred_text_overflow:
+                    return
                 deferred_text.append(delta)
+                deferred_text_bytes += delta_bytes
                 return
             if not message_open:
                 for ev in await _open_message_item():
@@ -3106,12 +3126,14 @@ async def _stream_responses(
             ``output_text.delta`` so the client still sees the
             assistant's actual text content.
             """
-            nonlocal accumulated_text
+            nonlocal accumulated_text, deferred_text_bytes
             if will_synthesise or not deferred_text:
                 deferred_text.clear()
+                deferred_text_bytes = 0
                 return
             joined = "".join(deferred_text)
             deferred_text.clear()
+            deferred_text_bytes = 0
             if not joined:
                 return
             if not message_open:
@@ -3644,6 +3666,27 @@ async def _stream_responses(
         # are out — emit a ``response.failed`` event with the same
         # error envelope instead so the client sees a clean shutdown
         # signal.
+        if deferred_text_overflow:
+            logger.warning(
+                "DeepSeek Codex deferred public text exceeded %d bytes",
+                _DEFERRED_PUBLIC_TEXT_LIMIT,
+            )
+            yield _emit(
+                "response.failed",
+                {
+                    "type": "response.failed",
+                    "response": {
+                        **_initial_response_payload,
+                        "status": "failed",
+                        "error": {
+                            "code": "deferred_text_limit_exceeded",
+                            "message": "Deferred agent output exceeded the safe buffer limit.",
+                        },
+                    },
+                },
+            )
+            return
+
         try:
             tool_calls = _enforce_responses_tool_choice(
                 parsed_tool_calls, responses_request, openai_request
