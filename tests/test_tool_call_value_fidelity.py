@@ -665,6 +665,20 @@ def test_scan_rejects_parameter_with_no_closing_marker():
     ) == [("a", "ok")]
 
 
+def test_scan_skips_closed_unknown_parameter_between_declared_siblings():
+    """Unknown wire elements must not be spliced into a valid prior value."""
+    from vllm_mlx.tool_call_scan import split_marked_parameters
+
+    block = (
+        "<parameter=a>x</parameter>"
+        "<parameter=extra>bad</parameter>"
+        "<parameter=b>y</parameter>"
+    )
+    assert split_marked_parameters(
+        block, _P_OPEN, _P_CLOSE, valid_names={"a", "b"}
+    ) == [("a", "x"), ("b", "y")]
+
+
 def test_scan_requires_outer_marker_when_one_is_requested():
     """``outer`` is required when passed, not opportunistic.
 

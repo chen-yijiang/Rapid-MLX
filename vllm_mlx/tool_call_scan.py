@@ -107,9 +107,30 @@ def _next_sibling(
     Returns ``len(openers)`` when no sibling follows.
     """
     for j in range(index + 1, len(openers)):
+        current_is_closed = closer in text[
+            openers[index].end() : openers[j].start()
+        ]
         if valid_names is not None and openers[j].group(1).strip() not in valid_names:
-            continue  # not a declared name — literal text inside the value
-        if closer in text[openers[index].end() : openers[j].start()]:
+            # An unknown opener is normally literal payload. The one shape we
+            # can disambiguate is a fully closed unknown element BETWEEN two
+            # declared siblings: the current element closed before it, and it
+            # closes before the next declared opener. Treat it as a boundary
+            # so its markup is skipped rather than merged into the prior value.
+            if current_is_closed:
+                next_declared = next(
+                    (
+                        k
+                        for k in range(j + 1, len(openers))
+                        if openers[k].group(1).strip() in valid_names
+                    ),
+                    None,
+                )
+                if next_declared is not None and closer in text[
+                    openers[j].end() : openers[next_declared].start()
+                ]:
+                    return j
+            continue  # undeclared marker-shaped text inside the value
+        if current_is_closed:
             return j
     return len(openers)
 
@@ -227,6 +248,10 @@ def split_marked_parameters(
     out: list[tuple[str, str]] = []
     i = 0
     while i < len(openers):
+        if valid_names is not None and openers[i].group(1).strip() not in valid_names:
+            sibling = _next_sibling(block, openers, i, closer, valid_names)
+            i = sibling if sibling > i else i + 1
+            continue
         segmented = segment_by_next_opener(block, openers, i, closer, valid_names)
         sibling = _next_sibling(block, openers, i, closer, valid_names)
         if segmented is not None:
