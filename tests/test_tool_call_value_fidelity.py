@@ -191,17 +191,11 @@ _FIDELITY_EXEMPT: dict[str, str] = {
 # tests/test_xfail_audit.py, issue #320).
 # ---------------------------------------------------------------------------
 KNOWN_BROKEN: dict[tuple[str, str, str], str] = {
-    # (1) qwen3coder and minicpm still carry their own non-greedy scan of a
+    # (1) MiniCPM still carries its own non-greedy scan of a
     #     marker-delimited body. A literal closing marker truncates the value;
     #     a literal OPENING marker truncates it and fabricates an element.
-    #     `vllm_mlx/tool_call_scan` fixes both for tool_calling.py, nemotron
-    #     and hermes; porting is mechanical but touches qwen3coder's four
-    #     instance-level regexes across the streaming and non-streaming paths.
-    ("qwen3_coder_xml", "xml_body", "literal_close_tool_call"): "own scan",
-    ("qwen3_coder_xml", "xml_body", "literal_close_parameter"): "own scan",
-    ("qwen3_coder_xml", "xml_body", "literal_close_function"): "own scan",
-    ("qwen3_coder_xml", "xml_body", "literal_open_parameter"): "own scan",
-    ("qwen3_coder_xml", "xml_body", "literal_open_and_close"): "own scan",
+    #     `vllm_mlx/tool_call_scan` fixes the shared scanner plus Nemotron,
+    #     Hermes, and Qwen3-Coder; MiniCPM has not been ported yet.
     ("minicpm", "minicpm_native", "literal_close_tool_call"): "own scan",
     ("minicpm", "minicpm_native", "literal_close_parameter"): "own scan",
     ("minicpm", "minicpm_native", "literal_close_function"): "own scan",

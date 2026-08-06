@@ -245,6 +245,40 @@ def test_streaming_json_matches_non_streaming():
     )
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "text with a literal </parameter> inside",
+        "text with a literal </function> inside",
+        "has <parameter=fake> and </parameter> both",
+        "has <function=fake> and </function> both",
+    ],
+)
+def test_marker_text_inside_string_value_round_trips(value):
+    """Wire markers inside a string argument are payload, not boundaries.
+
+    The XML format has no escape syntax, so the parser must wait for a real
+    sibling/function boundary and use the final closer before that boundary.
+    This is the streaming twin of the release-blocking non-streaming repro.
+    """
+    parser = Qwen3CoderToolParser(tokenizer=None)
+    request = _request_with_tool("note_write", {"body": {"type": "string"}})
+    chunks = [
+        "<tool_call>\n",
+        "<function=note_write>\n",
+        "<parameter=body>\n",
+        value[: max(1, len(value) // 2)],
+        value[max(1, len(value) // 2) :] + "\n",
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+
+    deltas = _feed(parser, chunks, request)
+    combined = "".join(_argument_fragments(deltas))
+    assert json.loads(combined) == {"body": value}, (combined, deltas)
+
+
 def test_same_chunk_close_and_trailing_param_not_dropped():
     """When one chunk batches ``...tail</parameter><parameter=other>val</parameter>``
     the parser must emit BOTH the closing tail of the in-flight string

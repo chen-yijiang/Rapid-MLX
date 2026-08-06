@@ -32,6 +32,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ..api.tool_calling import _decode_json_like, _schema_type
+from ..tool_call_scan import split_marked_calls, split_marked_parameters
 from .abstract_tool_parser import (
     ExtractedToolCallInformation,
     ToolParser,
@@ -315,17 +316,39 @@ class Qwen3CoderToolParser(ToolParser):
         param_config = _get_arguments_config(function_name, tools)
         parameters = function_call_str[end_index + 1 :]
         param_dict = {}
-        for match_text in self.tool_call_parameter_regex.findall(parameters):
-            try:
-                idx = match_text.index(">")
-            except ValueError:
-                continue
-            p_name = match_text[:idx]
-            p_value = str(match_text[idx + 1 :])
-            if p_value.startswith("\n"):
-                p_value = p_value[1:]
-            if p_value.endswith("\n"):
-                p_value = p_value[:-1]
+        declared_params = set(param_config) or None
+        parsed_parameters = split_marked_parameters(
+            parameters,
+            r"<parameter=([^>]+)>",
+            self.parameter_end_token,
+            valid_names=declared_params,
+        )
+
+        # Qwen occasionally omits one ``</parameter>`` before beginning the
+        # next schema-declared parameter.  The literal-safe scanner correctly
+        # refuses to guess in that ambiguous span, but keep the upstream
+        # parser's graceful recovery for a declared parameter that would
+        # otherwise disappear entirely.  Schema gating is essential here:
+        # marker-looking text for an undeclared name remains part of the value.
+        parsed_names = {name for name, _value in parsed_parameters}
+        if declared_params and parsed_names != declared_params:
+            openers = list(re.finditer(r"<parameter=([^>]+)>", parameters))
+            for index, opener in enumerate(openers):
+                name = opener.group(1).strip()
+                if name not in declared_params or name in parsed_names:
+                    continue
+                next_start = len(parameters)
+                for sibling in openers[index + 1 :]:
+                    if sibling.group(1).strip() in declared_params:
+                        next_start = sibling.start()
+                        break
+                segment = parameters[opener.end() : next_start]
+                close = segment.rfind(self.parameter_end_token)
+                if close >= 0:
+                    parsed_parameters.append((name, segment[:close].strip()))
+                    parsed_names.add(name)
+
+        for p_name, p_value in parsed_parameters:
             param_dict[p_name] = _convert_param_value(
                 p_value, p_name, param_config, function_name
             )
@@ -345,6 +368,58 @@ class Qwen3CoderToolParser(ToolParser):
         for tc in raw_tool_calls:
             raw_function_calls.extend(self.tool_call_function_regex.findall(tc))
         return [m[0] if m[0] else m[1] for m in raw_function_calls]
+
+    def _scan_function_calls(
+        self, model_output: str, request: dict[str, Any] | None
+    ) -> list[tuple[str, str, int, int]]:
+        """Return complete, declared function blocks without marker truncation.
+
+        Qwen's XML has no escaping layer. A parameter can legitimately contain
+        ``</parameter>`` or ``</function>`` (code and parser documentation do
+        this routinely), so a non-greedy regex cannot identify the structural
+        closer. The shared scanner uses the format's only workable convention:
+        the last closer before the next declared sibling closes the element.
+        """
+        declared = self._declared_tool_names(request)
+        if not declared:
+            return []
+        calls = split_marked_calls(
+            model_output,
+            r"<function=([^>]+)>",
+            self.function_end_token,
+            valid_names=declared,
+        )
+        if calls:
+            return calls
+
+        # Preserve the established max_tokens recovery path.  A canonical
+        # wrapper followed by a declared function and one or more *complete*
+        # parameter blocks is enough to recover arguments even when generation
+        # stops before ``</function>``.  Keep this deliberately narrower than
+        # the complete-call scanner: bare mentions and values cut in the middle
+        # remain ordinary content rather than executable tool calls.
+        wrapper_start = model_output.find(self.tool_call_start_token)
+        if wrapper_start < 0 or self.tool_call_end_token in model_output[wrapper_start:]:
+            return []
+
+        for opener in re.finditer(r"<function=([^>]+)>", model_output, re.DOTALL):
+            name = opener.group(1).strip()
+            if opener.start() < wrapper_start or name not in declared:
+                continue
+            body = model_output[opener.end() :]
+            if not body.rstrip().endswith(self.parameter_end_token):
+                continue
+            tools = request.get("tools") if isinstance(request, dict) else None
+            param_config = _get_arguments_config(name, tools)
+            parameters = split_marked_parameters(
+                body,
+                r"<parameter=([^>]+)>",
+                self.parameter_end_token,
+                valid_names=set(param_config) or None,
+            )
+            if parameters:
+                return [(name, body, opener.start(), len(model_output))]
+        return []
 
     @staticmethod
     def _named_tool_choice(request: dict[str, Any] | None) -> str | None:
@@ -393,7 +468,7 @@ class Qwen3CoderToolParser(ToolParser):
             )
 
         try:
-            function_calls = self._get_function_calls(model_output)
+            function_calls = self._scan_function_calls(model_output, request)
             if not function_calls:
                 return ExtractedToolCallInformation(
                     tools_called=False, tool_calls=[], content=model_output
@@ -404,11 +479,10 @@ class Qwen3CoderToolParser(ToolParser):
             selected = self._named_tool_choice(request)
 
             tool_calls = []
-            for fc_str in function_calls:
-                candidate_name = fc_str.split(">", 1)[0]
+            for candidate_name, body, _span_start, _span_end in function_calls:
                 if (
                     self.tool_call_start_token not in model_output
-                    and self.parameter_prefix not in fc_str
+                    and self.parameter_prefix not in body
                     and candidate_name != selected
                 ):
                     # Wrapper-less calls are supported for #978 models, but a
@@ -419,7 +493,9 @@ class Qwen3CoderToolParser(ToolParser):
                     return ExtractedToolCallInformation(
                         tools_called=False, tool_calls=[], content=model_output
                     )
-                tc = self._parse_xml_function_call(fc_str, tools)
+                tc = self._parse_xml_function_call(
+                    f"{candidate_name}>{body}", tools
+                )
                 if not tc:
                     continue
                 if tc.get("name") not in declared:
@@ -721,7 +797,22 @@ class Qwen3CoderToolParser(ToolParser):
             return None
 
         tool_start_idx = function_starts[self.current_tool_index]
-        func_close_idx = self._top_level_function_close(current_text, tool_start_idx)
+        wrapper_close_idx = (
+            current_text.find(self.tool_call_end_token, tool_start_idx)
+            if self._pending_tool_wrapped
+            else -1
+        )
+        if wrapper_close_idx != -1:
+            # A wrapped call gives us an unambiguous outer boundary. The real
+            # function closer is the LAST one before ``</tool_call>``; earlier
+            # occurrences can be literal code inside a string parameter.
+            func_close_idx = current_text.rfind(
+                self.function_end_token, tool_start_idx, wrapper_close_idx
+            )
+        else:
+            func_close_idx = self._top_level_function_close(
+                current_text, tool_start_idx
+            )
         if func_close_idx == -1:
             tool_text = current_text[tool_start_idx:]
         else:
@@ -859,7 +950,116 @@ class Qwen3CoderToolParser(ToolParser):
                 self.current_function_name or "", tools
             )
 
+            # Only schema-declared parameter openers are structural. A string
+            # value such as ``<parameter=fake>`` is ordinary payload and must
+            # not create another JSON key.
+            declared_params = set(param_config)
+            if declared_params:
+                param_starts = [
+                    pos
+                    for pos in param_starts
+                    if (
+                        (end := tool_text.find(">", pos + len(self.parameter_prefix)))
+                        != -1
+                        and tool_text[
+                            pos + len(self.parameter_prefix) : end
+                        ]
+                        in declared_params
+                    )
+                ]
+
             json_fragments = []
+
+            # Wrapped XML is the common Qwen wire and supplies the only fully
+            # unambiguous boundary in this escaping-free format. Until the
+            # outer close arrives, keep streaming the definitely-safe prefix
+            # of a string value but freeze at the first marker-shaped token.
+            # Once ``</tool_call>`` lands, parse with the last-closer scanner
+            # and emit the remaining tail. This preserves live argument
+            # updates without irreversibly treating payload as structure.
+            if self._pending_tool_wrapped and wrapper_close_idx == -1:
+                if self.param_count < len(param_starts):
+                    param_idx = param_starts[self.param_count]
+                    header_end = tool_text.find(">", param_idx)
+                    if header_end != -1:
+                        param_name = tool_text[
+                            param_idx + len(self.parameter_prefix) : header_end
+                        ]
+                        if _is_string_param(param_name, param_config):
+                            value_text = tool_text[header_end + 1 :]
+                            if value_text.startswith("\n"):
+                                value_text = value_text[1:]
+                            marker_positions = [
+                                p
+                                for p in (
+                                    value_text.find(self.parameter_end_token),
+                                    value_text.find(self.function_end_token),
+                                    value_text.find(self.parameter_prefix),
+                                    value_text.find(self.tool_call_end_token),
+                                )
+                                if p != -1
+                            ]
+                            safe_value = (
+                                value_text[: min(marker_positions)]
+                                if marker_positions
+                                else value_text
+                            )
+                            frag = self._emit_string_increment(
+                                param_name, safe_value
+                            )
+                            self.in_param = True
+                            self.in_param_name = param_name
+                            if frag:
+                                return {
+                                    "tool_calls": [
+                                        {
+                                            "index": self.current_tool_index,
+                                            "function": {"arguments": frag},
+                                        }
+                                    ]
+                                }
+                return None
+
+            if self._pending_tool_wrapped and wrapper_close_idx != -1:
+                func_start = tool_text.find(self.tool_call_prefix) + len(
+                    self.tool_call_prefix
+                )
+                fc = tool_text[func_start : tool_text.rfind(self.function_end_token)]
+                parsed = self._parse_xml_function_call(fc, tools)
+                arguments = json.loads(parsed["arguments"]) if parsed else {}
+                pieces: list[str] = []
+                emitted_names: set[str] = set()
+                if self.in_param_opened and self.in_param_name in arguments:
+                    value = arguments[self.in_param_name]
+                    if isinstance(value, str):
+                        tail = value[self.in_param_emitted_chars :]
+                        pieces.append(json.dumps(tail, ensure_ascii=False)[1:-1] + '"')
+                        emitted_names.add(self.in_param_name)
+                for name, value in arguments.items():
+                    if name in emitted_names:
+                        continue
+                    prefix = ", " if self.in_param_opened or pieces else ""
+                    pieces.append(
+                        f'{prefix}"{name}": {json.dumps(value, ensure_ascii=False)}'
+                    )
+                pieces.append("}")
+                self.json_closed = True
+                self.in_function = False
+                self.in_param = False
+                self.in_param_name = None
+                self.accumulated_params = {}
+                if self.current_tool_index < len(self.prev_tool_call_arr):
+                    self.prev_tool_call_arr[self.current_tool_index]["arguments"] = (
+                        parsed["arguments"] if parsed else "{}"
+                    )
+                return {
+                    "tool_calls": [
+                        {
+                            "index": self.current_tool_index,
+                            "function": {"arguments": "".join(pieces)},
+                        }
+                    ]
+                }
 
             # In-flight string param from a prior call: drain whatever's
             # now available (close it if </parameter> has arrived, else
