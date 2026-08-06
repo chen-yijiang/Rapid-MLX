@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import re
+import shlex
 import tempfile
 import time
 import uuid
@@ -302,17 +303,54 @@ def _codex_call_performs_edit(name: str, arguments: str) -> bool:
     command = re.sub(r"(?:>>|>)\s*/dev/null\b", "", command)
     command = re.sub(r"\btee(?:\s+-\S+)*\s+/dev/null\b", "", command)
 
-    shell_write = re.compile(
-        r"(?:^|[\n;&|])\s*(?:"
-        r"apply_patch\b|"
-        r"cat\b[^\n;]*(?:>>|>)|"
-        r"tee(?:\s+-\S+)*\s+[^\n;]+|"
-        r"sed\s+(?:-[A-Za-z]*i[A-Za-z]*|--in-place)\b"
-        r")"
-    )
-    if shell_write.search(command):
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        tokens = []
+    for index, token in enumerate(tokens):
+        if token in {">", ">>"}:
+            target = tokens[index + 1] if index + 1 < len(tokens) else ""
+            if target and target != "/dev/null":
+                return True
+    mutating_commands = {
+        "apply_patch",
+        "cp",
+        "install",
+        "ln",
+        "mkdir",
+        "mv",
+        "rm",
+        "rmdir",
+        "touch",
+        "truncate",
+    }
+    command_words = [
+        token
+        for index, token in enumerate(tokens)
+        if index == 0 or tokens[index - 1] in {";", "&&", "||", "|"}
+    ]
+    if any(word.rsplit("/", 1)[-1] in mutating_commands for word in command_words):
         return True
-    if not re.search(r"(?:^|[\s/])python(?:\d+(?:\.\d+)?)?\b", command):
+    for index, token in enumerate(tokens):
+        if token.rsplit("/", 1)[-1] != "tee":
+            continue
+        destinations = [
+            value
+            for value in tokens[index + 1 :]
+            if value not in {";", "&&", "||", "|"} and not value.startswith("-")
+        ]
+        if any(value != "/dev/null" for value in destinations):
+            return True
+    if re.search(
+        r"(?:^|[\n;&|])\s*sed\s+(?:-[A-Za-z]*i[A-Za-z]*|--in-place)\b", command
+    ):
+        return True
+    if name != "write_stdin" and not re.search(
+        r"(?:^|[\s/])python(?:\d+(?:\.\d+)?)?\b", command
+    ):
         return False
     return bool(
         re.search(r"\.(?:write_text|write_bytes)\s*\(", command)

@@ -1532,6 +1532,16 @@ def test_codex_progress_reminder_ignores_dev_null_redirection():
     assert not _codex_call_performs_edit(
         "exec_command", '{"cmd":"printf status | tee /dev/null"}'
     )
+    assert not _codex_call_performs_edit(
+        "exec_command", '{"cmd":"cat file.py | rg \'x > y\'"}'
+    )
+    assert _codex_call_performs_edit(
+        "exec_command", '{"cmd":"printf content > fixed.py"}'
+    )
+    assert _codex_call_performs_edit("exec_command", '{"cmd":"touch fixed.py"}')
+    assert _codex_call_performs_edit(
+        "write_stdin", '{"chars":"Path(\\"x.py\\").write_text(\\"ok\\")"}'
+    )
 
 
 def test_codex_progress_does_not_mistake_prose_passed_for_test_success():
