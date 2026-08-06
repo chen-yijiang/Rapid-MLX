@@ -46,6 +46,21 @@ NUDGE = (
 DATE = "The date has changed. Today's date is now 2026-08-05."
 
 
+def _local_tokenizer():
+    """A chat-template tokenizer from the local HF cache — never the network.
+
+    codex NIT: downloading a mutable upstream repo at test time makes the
+    suite depend on network availability and on that repo not changing.
+    """
+    transformers = pytest.importorskip("transformers")
+    try:
+        return transformers.AutoTokenizer.from_pretrained(
+            "mlx-community/Qwen3-0.6B-8bit", local_files_only=True
+        )
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"no locally cached chat-template tokenizer: {exc}")
+
+
 def roles(msgs):
     return [m.role for m in msgs]
 
@@ -154,8 +169,17 @@ class TestMidConversationSystemStaysInPlace:
         assert roles(out) == ["system", "user"]
         assert NUDGE in text(out[0])
 
-    def test_nudge_before_an_assistant_turn_is_not_folded_into_it(self):
-        """Only USER turns absorb a reminder; assistant turns are model output."""
+    def test_system_before_an_assistant_turn_forces_a_hoist(self):
+        """It GOVERNED that reply; carrying it forward rewrites history.
+
+        A system message sitting before an assistant turn was in force
+        when that reply was generated. Moving it to the NEXT user turn
+        renders it after the reply it was meant to constrain. The whole
+        request therefore falls back to hoisting.
+
+        (An earlier revision of this test asserted the carry-forward as
+        correct. It was wrong, and review caught it.)
+        """
         out = _merge_system_messages(
             [
                 Message(role="system", content="base"),
@@ -166,8 +190,8 @@ class TestMidConversationSystemStaysInPlace:
             ]
         )
         assert roles(out) == ["system", "user", "assistant", "user"]
-        assert text(out[2]) == "ack"
-        assert NUDGE in text(out[-1])
+        assert NUDGE in text(out[0])
+        assert all("<system-reminder>" not in text(m) for m in out[1:])
 
     def test_empty_mid_system_contributes_nothing(self):
         out = _merge_system_messages(
@@ -359,9 +383,7 @@ class TestRenderedTokenPrefixIsStable:
         return n
 
     def test_leading_tokens_survive_an_injected_nudge(self):
-        tok = pytest.importorskip("transformers").AutoTokenizer.from_pretrained(
-            "mlx-community/Qwen3-0.6B-8bit"
-        )
+        tok = _local_tokenizer()
 
         history = [
             Message(role="system", content="You are a helpful assistant. " * 40),
@@ -391,9 +413,7 @@ class TestRenderedTokenPrefixIsStable:
 
     def test_hoisting_would_have_failed_this_test(self):
         """Pin the contrast, so the assertion above cannot pass vacuously."""
-        tok = pytest.importorskip("transformers").AutoTokenizer.from_pretrained(
-            "mlx-community/Qwen3-0.6B-8bit"
-        )
+        tok = _local_tokenizer()
         history = [
             Message(role="system", content="You are a helpful assistant. " * 40),
             Message(role="user", content="turn 0"),
@@ -410,3 +430,39 @@ class TestRenderedTokenPrefixIsStable:
         )
         # Hoisting diverges almost immediately — inside the system block.
         assert self._shared_prefix(without, hoisted) < 40
+
+
+class TestNoEmptySystemBlockIsSynthesised:
+    """Review raised this as BLOCKING; measurement says otherwise.
+
+    Claim under review: when a conversation has ONLY mid-conversation
+    system messages and no leading one, relocation empties the system
+    list and the unconditional merge then inserts an EMPTY system
+    message at index 0, moving the very prefix this change protects.
+
+    It does not: ``system_texts`` comes back empty and the function
+    returns ``non_system`` before constructing anything. Pinned here so
+    the behaviour cannot regress into the claimed shape.
+    """
+
+    def test_mid_only_no_leading_system(self):
+        out = _merge_system_messages(
+            [
+                Message(role="user", content="t0"),
+                Message(role="system", content=NUDGE),
+                Message(role="user", content="t1"),
+            ]
+        )
+        assert roles(out) == ["user", "user"]
+        assert NUDGE in text(out[-1])
+
+    def test_mid_only_all_empty_drops_cleanly(self):
+        out = _merge_system_messages(
+            [
+                Message(role="user", content="t0"),
+                Message(role="system", content=""),
+                Message(role="user", content="t1"),
+            ]
+        )
+        assert roles(out) == ["user", "user"]
+        assert all(m.content for m in out)
