@@ -42,6 +42,7 @@ __all__ = [
     "split_marked_calls",
     "split_marked_parameter_spans",
     "split_marked_parameters",
+    "split_tool_call_wrappers",
 ]
 
 
@@ -67,6 +68,55 @@ def declared_tool_names(request: dict[str, Any] | None) -> frozenset[str] | None
         if isinstance(function, dict) and isinstance(function.get("name"), str):
             names.add(function["name"])
     return frozenset(names) or None
+
+
+def split_tool_call_wrappers(text: str) -> list[tuple[int, int, int, int]]:
+    """Return balanced outer ``<tool_call>`` framing spans.
+
+    Wrapper markers have no escape syntax. A candidate closer is structural
+    only after the function and parameter markers inside the region are
+    balanced. When several candidates qualify, use the last one before the
+    next sibling wrapper opener; earlier candidates are literal payload.
+    """
+    openers = list(re.finditer(r"<tool_call>", text))
+    closes = list(re.finditer(r"</tool_call>", text))
+    spans: list[tuple[int, int, int, int]] = []
+    index = 0
+    while index < len(openers):
+        opener = openers[index]
+        valid: list[re.Match[str]] = []
+        for closer in closes:
+            if closer.start() <= opener.end():
+                continue
+            body = text[opener.end() : closer.start()]
+            function_opens = len(re.findall(r"<function=[^>]+>", body))
+            parameter_opens = len(re.findall(r"<parameter=[^>]+>", body))
+            if (
+                function_opens > 0
+                and body.count("</function>") >= function_opens
+                and body.count("</parameter>") >= parameter_opens
+            ):
+                valid.append(closer)
+        if not valid:
+            index += 1
+            continue
+        first_valid_end = valid[0].end()
+        sibling = next(
+            (
+                candidate
+                for candidate in openers[index + 1 :]
+                if candidate.start() >= first_valid_end
+            ),
+            None,
+        )
+        limit = sibling.start() if sibling is not None else len(text)
+        bounded = [closer for closer in valid if closer.start() < limit]
+        chosen = bounded[-1]
+        spans.append((opener.start(), opener.end(), chosen.start(), chosen.end()))
+        index += 1
+        while index < len(openers) and openers[index].start() < chosen.end():
+            index += 1
+    return spans
 
 
 def _next_sibling(
@@ -133,6 +183,11 @@ def _next_sibling(
             continue  # undeclared marker-shaped text inside the value
         if current_is_closed:
             return j
+        # A declared-looking opener appeared before the current element had a
+        # closer. From here on the escaping-free wire is ambiguous: a later
+        # closer may belong to this literal nested example. Conservatively keep
+        # the rest in the current value instead of fabricating siblings.
+        return len(openers)
     return len(openers)
 
 

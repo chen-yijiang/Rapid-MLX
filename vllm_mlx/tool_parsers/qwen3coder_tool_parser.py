@@ -36,6 +36,7 @@ from ..tool_call_scan import (
     split_marked_calls,
     split_marked_parameter_spans,
     split_marked_parameters,
+    split_tool_call_wrappers,
 )
 from .abstract_tool_parser import (
     ExtractedToolCallInformation,
@@ -407,33 +408,68 @@ class Qwen3CoderToolParser(ToolParser):
         declared = self._declared_tool_names(request)
         if not declared:
             return []
-        calls = split_marked_calls(
-            model_output,
-            r"<function=([^>]+)>",
-            self.function_end_token,
-            valid_names=declared,
-        )
-        if calls:
-            return calls
+        wrapper_pairs = split_tool_call_wrappers(model_output)
 
+        calls: list[tuple[str, str, int, int]] = []
+        wrapper_ranges: list[tuple[int, int]] = []
+        for outer_start, body_start, body_end, outer_end in wrapper_pairs:
+            wrapper_ranges.append((outer_start, outer_end))
+            body = model_output[body_start:body_end]
+            first = re.search(r"<function=([^>]+)>", body)
+            if first is not None and first.group(1).strip() not in declared:
+                # An undeclared enclosing function makes everything inside it
+                # untrusted payload. Filtering by name first would otherwise
+                # promote a declared-looking nested example into execution.
+                continue
+            for name, value, start, end in split_marked_calls(
+                body,
+                r"<function=([^>]+)>",
+                self.function_end_token,
+                valid_names=declared,
+            ):
+                calls.append((name, value, body_start + start, body_start + end))
+
+        first_any = re.search(r"<function=([^>]+)>", model_output)
+        reject_unwrapped = (
+            first_any is not None
+            and first_any.group(1).strip() not in declared
+            and not any(
+                start <= first_any.start() < end for start, end in wrapper_ranges
+            )
+        )
+        if not reject_unwrapped:
+            bare_calls = split_marked_calls(
+                model_output,
+                r"<function=([^>]+)>",
+                self.function_end_token,
+                valid_names=declared,
+            )
+            calls.extend(
+                call
+                for call in bare_calls
+                if not any(start <= call[2] < end for start, end in wrapper_ranges)
+            )
+        calls.sort(key=lambda call: call[2])
         # Preserve the established max_tokens recovery path.  A canonical
         # wrapper followed by a declared function and one or more *complete*
         # parameter blocks is enough to recover arguments even when generation
         # stops before ``</function>``.  Keep this deliberately narrower than
         # the complete-call scanner: bare mentions and values cut in the middle
         # remain ordinary content rather than executable tool calls.
-        wrapper_start = model_output.find(self.tool_call_start_token)
-        if (
-            wrapper_start < 0
-            or self.tool_call_end_token in model_output[wrapper_start:]
-        ):
-            return []
+        #
+        # Start after the last complete call so a valid call earlier in the
+        # response does not suppress recovery of a truncated final call.
+        recovery_start = max((span_end for _, _, _, span_end in calls), default=0)
+        tail = model_output[recovery_start:]
+        wrapper_start = tail.find(self.tool_call_start_token)
+        if wrapper_start < 0 or self.tool_call_end_token in tail[wrapper_start:]:
+            return calls
 
-        for opener in re.finditer(r"<function=([^>]+)>", model_output, re.DOTALL):
+        for opener in re.finditer(r"<function=([^>]+)>", tail, re.DOTALL):
             name = opener.group(1).strip()
             if opener.start() < wrapper_start or name not in declared:
                 continue
-            body = model_output[opener.end() :]
+            body = tail[opener.end() :]
             if not body.rstrip().endswith(self.parameter_end_token):
                 continue
             tools = request.get("tools") if isinstance(request, dict) else None
@@ -445,8 +481,16 @@ class Qwen3CoderToolParser(ToolParser):
                 valid_names=set(param_config) or None,
             )
             if parameters:
-                return [(name, body, opener.start(), len(model_output))]
-        return []
+                calls.append(
+                    (
+                        name,
+                        body,
+                        recovery_start + opener.start(),
+                        len(model_output),
+                    )
+                )
+                break
+        return calls
 
     @staticmethod
     def _named_tool_choice(request: dict[str, Any] | None) -> str | None:
@@ -741,12 +785,25 @@ class Qwen3CoderToolParser(ToolParser):
         # advance loop into targeting a bogus next block (codex review
         # on #978).
         if self.json_closed and not self.in_function:
-            top_level_starts = self._function_start_positions(current_text, declared)
-            tool_count = len(top_level_starts)
-            tool_ends = self._top_level_function_close_count(
-                current_text, top_level_starts
+            wrapped_calls = (
+                self._scan_function_calls(current_text, request)
+                if self._pending_tool_wrapped
+                and self.tool_call_end_token in current_text
+                else []
             )
-            if tool_ends > self.current_tool_index:
+            if wrapped_calls:
+                tool_count = len(wrapped_calls)
+                should_advance = self.current_tool_index + 1 < tool_count
+            else:
+                top_level_starts = self._function_start_positions(
+                    current_text, declared
+                )
+                tool_count = len(top_level_starts)
+                tool_ends = self._top_level_function_close_count(
+                    current_text, top_level_starts
+                )
+                should_advance = tool_ends > self.current_tool_index
+            if should_advance:
                 self.current_tool_index += 1
                 self.header_sent = False
                 self.param_count = 0
@@ -755,7 +812,20 @@ class Qwen3CoderToolParser(ToolParser):
                 self.accumulated_params = {}
                 if self.current_tool_index >= tool_count:
                     self.is_tool_call_started = False
-                return None
+                else:
+                    return None
+            if wrapped_calls and self.current_tool_index + 1 >= tool_count:
+                pending_start = self._pending_tool_start
+                has_new_pending_wrapper = (
+                    pending_start is not None
+                    and pending_start > wrapped_calls[-1][3]
+                    and self.tool_call_start_token in current_text[pending_start:]
+                    and self.tool_call_end_token not in current_text[pending_start:]
+                )
+                if not has_new_pending_wrapper:
+                    self.is_tool_call_started = False
+                    if delta_text.strip() == self.tool_call_end_token:
+                        return None
 
         # Handle content before tool calls. Either opener (wrapper or bare
         # ``<function=``) transitions us out of content-only mode; the
@@ -818,6 +888,77 @@ class Qwen3CoderToolParser(ToolParser):
                     return None
                 return {"content": delta_text}
 
+        # One complete wrapper can contain several functions. Emit every call
+        # that completes in the wrapper-closing delta; otherwise a
+        # wrapper-wide last-closer rule makes the current function consume its
+        # later siblings, and there may be no subsequent parser invocation in
+        # which to emit those siblings.
+        if self._pending_tool_wrapped and self.tool_call_end_token in current_text:
+            complete_calls = self._scan_function_calls(current_text, request)
+            if len(complete_calls) > self.current_tool_index + 1:
+                tools = request.get("tools") if isinstance(request, dict) else None
+                emitted = []
+                for index in range(self.current_tool_index, len(complete_calls)):
+                    name, body, _start, _end = complete_calls[index]
+                    parsed = self._parse_xml_function_call(f"{name}>{body}", tools)
+                    if not parsed:
+                        continue
+                    if index == self.current_tool_index and self.header_sent:
+                        arguments = json.loads(parsed["arguments"])
+                        if not self.json_started:
+                            suffix = parsed["arguments"]
+                        else:
+                            pieces: list[str] = []
+                            emitted_names: set[str] = set()
+                            if self.in_param_opened and self.in_param_name in arguments:
+                                value = arguments[self.in_param_name]
+                                if isinstance(value, str):
+                                    tail = value[self.in_param_emitted_chars :]
+                                    pieces.append(
+                                        json.dumps(tail, ensure_ascii=False)[1:-1] + '"'
+                                    )
+                                    emitted_names.add(self.in_param_name)
+                            remaining = [
+                                (key, value)
+                                for key, value in arguments.items()
+                                if key not in emitted_names
+                            ][self.param_count :]
+                            for key, value in remaining:
+                                prefix = ", " if self.param_count or pieces else ""
+                                pieces.append(
+                                    f'"{key}": {json.dumps(value, ensure_ascii=False)}'
+                                    if not prefix
+                                    else f'{prefix}"{key}": {json.dumps(value, ensure_ascii=False)}'
+                                )
+                            pieces.append("}")
+                            suffix = "".join(pieces)
+                        emitted.append(
+                            {
+                                "index": index,
+                                "function": {"arguments": suffix},
+                            }
+                        )
+                    else:
+                        emitted.append(
+                            {
+                                "index": index,
+                                "id": parsed["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": parsed["name"],
+                                    "arguments": parsed["arguments"],
+                                },
+                            }
+                        )
+                if emitted:
+                    self.current_tool_index = len(complete_calls) - 1
+                    self.json_started = True
+                    self.json_closed = True
+                    self.in_function = False
+                    self.in_param = False
+                    self.in_param_name = None
+                    return {"tool_calls": emitted}
+
         # Find current tool call portion. Slice from the current
         # ``<function=`` opener to the matching top-level ``</function>``
         # close — this is the wrapper-agnostic tool-call block. Both
@@ -832,11 +973,15 @@ class Qwen3CoderToolParser(ToolParser):
             return None
 
         tool_start_idx = function_starts[self.current_tool_index]
-        wrapper_close_idx = (
-            current_text.find(self.tool_call_end_token, tool_start_idx)
-            if self._pending_tool_wrapped
-            else -1
-        )
+        wrapper_close_idx = -1
+        if self._pending_tool_wrapped and self.tool_call_end_token in current_text:
+            # A literal wrapper closer inside a still-open parameter is data,
+            # not framing. Only accept the final closer once a complete,
+            # declared function can be scanned inside the wrapper.
+            if self._scan_function_calls(current_text, request):
+                wrapper_close_idx = current_text.rfind(
+                    self.tool_call_end_token, tool_start_idx
+                )
         if wrapper_close_idx != -1:
             # A wrapped call gives us an unambiguous outer boundary. The real
             # function closer is the LAST one before ``</tool_call>``; earlier
@@ -849,7 +994,8 @@ class Qwen3CoderToolParser(ToolParser):
                 current_text, tool_start_idx
             )
         complete_without_wrapper_close = (
-            wrapper_close_idx == -1
+            not self._pending_tool_wrapped
+            and wrapper_close_idx == -1
             and func_close_idx != -1
             and current_text.rstrip().endswith(self.function_end_token)
         )
@@ -857,6 +1003,9 @@ class Qwen3CoderToolParser(ToolParser):
             # The outer wrapper is optional framing and is commonly the token
             # lost when max_tokens cuts a generation. A function closer at the
             # end of the accumulated text is therefore a complete boundary.
+            # Do not finalize when bytes follow it: without the outer close,
+            # that marker may still be literal parameter text whose real
+            # closers arrive in a later delta.
             func_close_idx = current_text.rfind(self.function_end_token, tool_start_idx)
         if func_close_idx == -1:
             tool_text = current_text[tool_start_idx:]
@@ -1072,22 +1221,27 @@ class Qwen3CoderToolParser(ToolParser):
                 fc = tool_text[func_start : tool_text.rfind(self.function_end_token)]
                 parsed = self._parse_xml_function_call(fc, tools)
                 arguments = json.loads(parsed["arguments"]) if parsed else {}
-                pieces: list[str] = []
-                emitted_names: set[str] = set()
-                if self.in_param_opened and self.in_param_name in arguments:
-                    value = arguments[self.in_param_name]
-                    if isinstance(value, str):
-                        tail = value[self.in_param_emitted_chars :]
-                        pieces.append(json.dumps(tail, ensure_ascii=False)[1:-1] + '"')
-                        emitted_names.add(self.in_param_name)
-                for name, value in arguments.items():
-                    if name in emitted_names:
-                        continue
-                    prefix = ", " if self.in_param_opened or pieces else ""
-                    pieces.append(
-                        f'{prefix}"{name}": {json.dumps(value, ensure_ascii=False)}'
-                    )
-                pieces.append("}")
+                if not self.json_started:
+                    pieces = [parsed["arguments"] if parsed else "{}"]
+                else:
+                    pieces = []
+                    emitted_names: set[str] = set()
+                    if self.in_param_opened and self.in_param_name in arguments:
+                        value = arguments[self.in_param_name]
+                        if isinstance(value, str):
+                            tail = value[self.in_param_emitted_chars :]
+                            pieces.append(
+                                json.dumps(tail, ensure_ascii=False)[1:-1] + '"'
+                            )
+                            emitted_names.add(self.in_param_name)
+                    for name, value in arguments.items():
+                        if name in emitted_names:
+                            continue
+                        prefix = ", " if self.in_param_opened or pieces else ""
+                        pieces.append(
+                            f'{prefix}"{name}": {json.dumps(value, ensure_ascii=False)}'
+                        )
+                    pieces.append("}")
                 self.json_closed = True
                 self.in_function = False
                 self.in_param = False

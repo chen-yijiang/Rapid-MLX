@@ -21,6 +21,7 @@ from ..tool_call_scan import (
 from ..tool_call_scan import (
     split_marked_calls,
     split_marked_parameters,
+    split_tool_call_wrappers,
 )
 from .abstract_tool_parser import (
     ExtractedToolCallInformation,
@@ -90,21 +91,23 @@ class NemotronToolParser(ToolParser):
         closed (or the JSON body is valid). This keeps literal markers inside
         values while leaving degraded prose after the function visible.
         """
-        wrapper_openers = list(re.finditer(r"<tool_call>", text))
+        # Pair wrappers with a stack. A string parameter may itself document a
+        # complete ``<tool_call>...</tool_call>`` example; treating every
+        # opener independently lets nested text steal the enclosing closer.
+        wrapper_pairs = split_tool_call_wrappers(text)
         declared = _declared_tool_names(request)
         matches: list[tuple[str, str, int, int]] = []
         ranges: list[tuple[int, int]] = []
-        for index, wrapper in enumerate(wrapper_openers):
-            limit = (
-                wrapper_openers[index + 1].start()
-                if index + 1 < len(wrapper_openers)
-                else len(text)
-            )
-            outer_start = text.rfind("</tool_call>", wrapper.end(), limit)
-            if outer_start < 0:
+        for wrapper_start, body_start, outer_start, wrapper_end in wrapper_pairs:
+            wrapper_body = text[body_start:outer_start]
+            first = re.search(r"<function=([^>]+)>", wrapper_body)
+            if (
+                first is not None
+                and declared is not None
+                and first.group(1).strip() not in declared
+            ):
+                ranges.append((wrapper_start, wrapper_end))
                 continue
-            wrapper_end = outer_start + len("</tool_call>")
-            wrapper_body = text[wrapper.end() : outer_start]
             functions = [
                 match
                 for match in re.finditer(r"<function=([^>]+)>", wrapper_body)
@@ -115,10 +118,10 @@ class NemotronToolParser(ToolParser):
             while function_index < len(functions):
                 function = functions[function_index]
                 name = function.group(1).strip()
-                function_start = wrapper.end() + function.start()
-                body_start = wrapper.end() + function.end()
-                body_region = text[body_start:outer_start]
-                close = -1
+                function_start = body_start + function.start()
+                function_body_start = body_start + function.end()
+                body_region = text[function_body_start:outer_start]
+                valid_closes: list[int] = []
                 for candidate in re.finditer(r"</function>", body_region):
                     prefix = body_region[: candidate.start()].strip()
                     if "<parameter=" in prefix:
@@ -131,14 +134,39 @@ class NemotronToolParser(ToolParser):
                     else:
                         structurally_complete = True
                     if structurally_complete:
-                        close = candidate.start()
-                        break
+                        valid_closes.append(candidate.start())
+                close = -1
+                if valid_closes:
+                    # A declared function-shaped marker inside a parameter is
+                    # payload until a valid function closer has been seen.
+                    # After that first valid close, however, the next declared
+                    # opener is an executable sibling and bounds this call.
+                    sibling_start = next(
+                        (
+                            sibling.start()
+                            for sibling in functions[function_index + 1 :]
+                            if sibling.start()
+                            >= function.end() + valid_closes[0] + len("</function>")
+                        ),
+                        len(wrapper_body),
+                    )
+                    bounded = [
+                        candidate
+                        for candidate in valid_closes
+                        if function.end() + candidate < sibling_start
+                    ]
+                    if bounded:
+                        # The wrapper is the unambiguous outer boundary. Use
+                        # the last valid closer before the next sibling so a
+                        # literal ``</parameter></function>`` pair in a string
+                        # remains payload rather than truncating the call.
+                        close = bounded[-1]
                 if close < 0:
                     # Without a structural closer, later function-shaped
                     # openers are still inside this function's value. They
                     # cannot safely become executable sibling calls.
                     break
-                function_end = body_start + close + len("</function>")
+                function_end = function_body_start + close + len("</function>")
                 matches.append(
                     (
                         name,
@@ -151,12 +179,12 @@ class NemotronToolParser(ToolParser):
                 function_index += 1
                 while (
                     function_index < len(functions)
-                    and wrapper.end() + functions[function_index].start() < function_end
+                    and body_start + functions[function_index].start() < function_end
                 ):
                     # This opener was consumed inside the completed value.
                     function_index += 1
             if wrapper_matched:
-                ranges.append((wrapper.start(), wrapper_end))
+                ranges.append((wrapper_start, wrapper_end))
         return matches, ranges
 
     def extract_tool_calls(

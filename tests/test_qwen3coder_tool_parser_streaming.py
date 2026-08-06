@@ -291,17 +291,151 @@ def test_marker_text_round_trips_when_complete_call_arrives_in_one_delta():
     assert json.loads("".join(_argument_fragments(deltas))) == {"body": value}
 
 
-def test_missing_optional_wrapper_close_still_finalizes_arguments():
-    """A max_tokens cut after ``</function>`` must not leave partial JSON."""
-    request = _request_with_tool("note_write", {"body": {"type": "string"}})
+def test_truncated_final_call_is_recovered_after_complete_call():
+    """A complete earlier call must not hide max-token recovery for the last."""
+    request = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {key: {"type": "string"}},
+                    },
+                },
+            }
+            for name, key in (("first", "one"), ("second", "two"))
+        ]
+    }
+    text = (
+        "<tool_call><function=first><parameter=one>1</parameter>"
+        "</function></tool_call>"
+        "<tool_call><function=second><parameter=two>2</parameter>"
+    )
+    result = Qwen3CoderToolParser(tokenizer=None).extract_tool_calls(text, request)
+    assert [call["name"] for call in result.tool_calls] == ["first", "second"]
+    assert [json.loads(call["arguments"]) for call in result.tool_calls] == [
+        {"one": "1"},
+        {"two": "2"},
+    ]
+
+
+def test_complete_multi_function_wrapper_in_one_delta_emits_every_call():
+    request = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {key: {"type": "string"}},
+                    },
+                },
+            }
+            for name, key in (("first", "one"), ("second", "two"))
+        ]
+    }
+    wire = (
+        "<tool_call><function=first><parameter=one>1</parameter></function>"
+        "<function=second><parameter=two>2</parameter></function></tool_call>"
+    )
+    deltas = _feed(Qwen3CoderToolParser(tokenizer=None), [wire], request)
+    calls = deltas[0]["tool_calls"]
+    assert [call["function"]["name"] for call in calls] == ["first", "second"]
+    assert [json.loads(call["function"]["arguments"]) for call in calls] == [
+        {"one": "1"},
+        {"two": "2"},
+    ]
+
+
+def test_complete_multi_function_wrapper_in_token_sized_deltas_emits_every_call():
+    request = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {key: {"type": "string"}},
+                    },
+                },
+            }
+            for name, key in (("first", "one"), ("second", "two"))
+        ]
+    }
     chunks = [
-        "<tool_call>\n",
-        "<function=note_write>\n",
-        "<parameter=body>hello</parameter>\n",
+        "<tool_call>",
+        "<function=first>",
+        "<parameter=one>1</parameter>",
         "</function>",
+        "<function=second>",
+        "<parameter=two>2</parameter>",
+        "</function>",
+        "</tool_call>",
     ]
     deltas = _feed(Qwen3CoderToolParser(tokenizer=None), chunks, request)
-    assert json.loads("".join(_argument_fragments(deltas))) == {"body": "hello"}
+    calls = [call for delta in deltas for call in delta.get("tool_calls", [])]
+    by_index: dict[int, str] = {}
+    names: dict[int, str] = {}
+    for call in calls:
+        index = call["index"]
+        function = call["function"]
+        if function.get("name"):
+            names[index] = function["name"]
+        by_index[index] = by_index.get(index, "") + function.get("arguments", "")
+    assert names == {0: "first", 1: "second"}
+    assert {index: json.loads(arguments) for index, arguments in by_index.items()} == {
+        0: {"one": "1"},
+        1: {"two": "2"},
+    }
+
+
+def test_separately_wrapped_calls_do_not_leak_second_wrapper_close():
+    request = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {key: {"type": "string"}},
+                    },
+                },
+            }
+            for name, key in (("first", "one"), ("second", "two"))
+        ]
+    }
+    chunks = [
+        "<tool_call>",
+        "<function=first><parameter=one>1</parameter></function>",
+        "</tool_call>",
+        "<tool_call>",
+        "<function=second><parameter=two>2</parameter></function>",
+        "</tool_call>",
+    ]
+    deltas = _feed(Qwen3CoderToolParser(tokenizer=None), chunks, request)
+    assert all("tool_call" not in delta.get("content", "") for delta in deltas)
+    calls = [call for delta in deltas for call in delta.get("tool_calls", [])]
+    names = {
+        call["index"]: call["function"]["name"]
+        for call in calls
+        if call["function"].get("name")
+    }
+    arguments: dict[int, str] = {}
+    for call in calls:
+        index = call["index"]
+        arguments[index] = arguments.get(index, "") + call["function"].get(
+            "arguments", ""
+        )
+    assert names == {0: "first", 1: "second"}
+    assert {index: json.loads(value) for index, value in arguments.items()} == {
+        0: {"one": "1"},
+        1: {"two": "2"},
+    }
 
 
 @pytest.mark.parametrize(
@@ -346,6 +480,92 @@ def test_literal_declared_parameter_opener_does_not_fabricate_argument():
     }
 
 
+def test_two_literal_declared_parameter_blocks_do_not_fabricate_arguments():
+    request = _request_with_tool(
+        "note_write",
+        {
+            "body": {"type": "string"},
+            "other": {"type": "string"},
+            "third": {"type": "string"},
+        },
+    )
+    value = (
+        "examples <parameter=other>one</parameter> and <parameter=third>two</parameter>"
+    )
+    text = (
+        "<tool_call><function=note_write><parameter=body>"
+        f"{value}</parameter></function></tool_call>"
+    )
+    result = Qwen3CoderToolParser(tokenizer=None).extract_tool_calls(text, request)
+    assert json.loads(result.tool_calls[0]["arguments"]) == {"body": value}
+
+
+def test_undeclared_outer_function_cannot_promote_declared_nested_call():
+    request = _request_with_tool("delete", {"path": {"type": "string"}})
+    text = (
+        "<tool_call><function=unknown><parameter=x>literal "
+        "<function=delete><parameter=path>/</parameter></function>"
+        "</parameter></function></tool_call>"
+    )
+    result = Qwen3CoderToolParser(tokenizer=None).extract_tool_calls(text, request)
+    assert not result.tools_called
+    assert result.content == text
+
+
+def test_undeclared_wrapper_does_not_hide_later_valid_wrapper():
+    request = _request_with_tool("read", {"path": {"type": "string"}})
+    text = (
+        "<tool_call><function=unknown><parameter=x>no</parameter>"
+        "</function></tool_call>"
+        "<tool_call><function=read><parameter=path>/ok</parameter>"
+        "</function></tool_call>"
+    )
+    result = Qwen3CoderToolParser(tokenizer=None).extract_tool_calls(text, request)
+    assert [call["name"] for call in result.tool_calls] == ["read"]
+    assert json.loads(result.tool_calls[0]["arguments"]) == {"path": "/ok"}
+
+
+def test_trailing_marker_prose_cannot_redefine_closed_wrapper():
+    request = _request_with_tool("get_weather", {"city": {"type": "string"}})
+    text = (
+        "<tool_call><function=get_weather><parameter=city>Paris</parameter>"
+        "</function></tool_call> Explain literal </parameter></function>."
+    )
+    result = Qwen3CoderToolParser(tokenizer=None).extract_tool_calls(text, request)
+    assert json.loads(result.tool_calls[0]["arguments"]) == {"city": "Paris"}
+
+
+def test_literal_wrapper_close_inside_string_round_trips_stream_and_batch():
+    request = _request_with_tool("note", {"body": {"type": "string"}})
+    value = "literal </tool_call> inside"
+    chunks = [
+        "<tool_call>",
+        "<function=note>",
+        "<parameter=body>literal ",
+        "</tool_call>",
+        " inside</parameter>",
+        "</function>",
+        "</tool_call>",
+    ]
+    wire = "".join(chunks)
+    batch = Qwen3CoderToolParser(tokenizer=None).extract_tool_calls(wire, request)
+    assert json.loads(batch.tool_calls[0]["arguments"]) == {"body": value}
+    deltas = _feed(Qwen3CoderToolParser(tokenizer=None), chunks, request)
+    assert json.loads("".join(_argument_fragments(deltas))) == {"body": value}
+    assert all("tool_call" not in delta.get("content", "") for delta in deltas)
+
+
+def test_first_non_string_parameter_stream_includes_opening_brace():
+    request = _request_with_tool("score", {"value": {"type": "integer"}})
+    chunks = [
+        "<tool_call>",
+        "<function=score><parameter=value>42</parameter></function>",
+        "</tool_call>",
+    ]
+    deltas = _feed(Qwen3CoderToolParser(tokenizer=None), chunks, request)
+    assert json.loads("".join(_argument_fragments(deltas))) == {"value": 42}
+
+
 def test_literal_function_close_at_chunk_boundary_does_not_finalize_early():
     """A payload marker can align exactly with a tokenizer delta boundary."""
     value = "text literal </function> still value"
@@ -376,6 +596,45 @@ def test_literal_undeclared_function_marker_does_not_corrupt_following_content()
         " trailing prose",
     ]
     deltas = _feed(Qwen3CoderToolParser(tokenizer=None), chunks, request)
+    assert json.loads("".join(_argument_fragments(deltas))) == {"body": value}
+    assert "".join(d.get("content", "") for d in deltas) == " trailing prose"
+
+
+def test_literal_declared_function_block_does_not_fabricate_stream_call():
+    request = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {key: {"type": "string"}},
+                    },
+                },
+            }
+            for name, key in (("note", "body"), ("delete", "path"))
+        ]
+    }
+    value = (
+        "before </parameter> literal <function=delete>"
+        "<parameter=path>/</parameter></function> after"
+    )
+    chunks = [
+        "<tool_call>",
+        "<function=note>",
+        f"<parameter=body>{value}",
+        "</parameter></function>",
+        "</tool_call>",
+        " trailing prose",
+    ]
+    deltas = _feed(Qwen3CoderToolParser(tokenizer=None), chunks, request)
+    calls = [call for delta in deltas for call in delta.get("tool_calls", [])]
+    assert [
+        call["function"].get("name")
+        for call in calls
+        if call["function"].get("name") is not None
+    ] == ["note"]
     assert json.loads("".join(_argument_fragments(deltas))) == {"body": value}
     assert "".join(d.get("content", "") for d in deltas) == " trailing prose"
 
@@ -427,13 +686,12 @@ def test_same_chunk_close_and_trailing_param_not_dropped():
     )
 
 
-def test_truncated_tool_call_closes_in_flight_string_at_tool_call_end():
-    """If the model truncates without ``</parameter>`` but reaches
-    ``</tool_call>``, the in-flight string must still finalize — not hang
-    with ``in_param=True``.
+def test_ambiguous_tool_call_close_waits_for_real_parameter_boundary():
+    """A lone ``</tool_call>`` inside an open value remains ambiguous.
 
-    Mirrors the existing complete-param fallback that already treats
-    ``</tool_call>`` as a defensive close boundary.
+    It may be literal user data followed by the real parameter/function
+    closers in later deltas. Keep the parameter open rather than irreversibly
+    truncating executable arguments at that marker.
     """
     parser = Qwen3CoderToolParser(tokenizer=None)
     request = _request_with_tool("echo", {"value": {"type": "string"}})
@@ -454,14 +712,13 @@ def test_truncated_tool_call_closes_in_flight_string_at_tool_call_end():
     deltas = _feed(parser, chunks, request)
     fragments = _argument_fragments(deltas)
     assert fragments, "no fragments emitted — parser hung in incremental mode"
-    # We don't require the truncated stream to produce strictly-valid JSON
-    # (the original buffered path also doesn't close ``}`` here); but the
-    # parser MUST have closed the string and emitted the buffered value.
+    # The definitely-safe prefix can still stream, but the marker and tail are
+    # held until an unambiguous outer/function/parameter boundary arrives.
     assert any('"value"' in f for f in fragments), (
-        f"in-flight string never closed; fragments={fragments!r}"
+        f"in-flight string never started; fragments={fragments!r}"
     )
-    assert not parser.in_param, (
-        "parser left in_param=True after </tool_call> truncation"
+    assert parser.in_param, (
+        "parser finalized at an ambiguous </tool_call> inside the value"
     )
 
 

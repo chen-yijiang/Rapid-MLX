@@ -1155,7 +1155,7 @@ class TestQwen3CoderUpstreamNonStreaming:
         assert result.tool_calls[0]["name"] == "get_current_weather"
 
     def test_missing_closing_parameter_tag(self, qwen3coder_parser, qwen3coder_request):
-        """Missing </parameter> tag — graceful handling."""
+        """Missing closer must not fabricate later marker-shaped arguments."""
         output = (
             "<tool_call>\n<function=get_current_weather>\n"
             "<parameter=city>\nDallas\n"
@@ -1168,8 +1168,10 @@ class TestQwen3CoderUpstreamNonStreaming:
         assert len(result.tool_calls) == 1
         args = json.loads(result.tool_calls[0]["arguments"])
         assert "city" in args
-        assert args["state"] == "TX"
-        assert args["unit"] == "fahrenheit"
+        assert "state" not in args
+        assert "<parameter=state>" in args["city"]
+        assert "unit" not in args
+        assert "<parameter=unit>" in args["city"]
 
     def test_multiline_object_param(self, qwen3coder_parser, qwen3coder_request):
         """Object parameter spanning multiple lines."""
