@@ -326,6 +326,26 @@ def test_missing_final_parameter_close_recovers_valid_stream_json(value_chunks):
     assert json.loads("".join(_argument_fragments(deltas))) == {"body": value}
 
 
+def test_literal_declared_parameter_opener_does_not_fabricate_argument():
+    parser = Qwen3CoderToolParser(tokenizer=None)
+    request = _request_with_tool(
+        "note_write",
+        {"body": {"type": "string"}, "other": {"type": "string"}},
+    )
+    text = (
+        "<tool_call><function=note_write>"
+        "<parameter=body>text <parameter=other> literal</parameter>"
+        "</function></tool_call>"
+    )
+
+    result = parser.extract_tool_calls(text, request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0]["arguments"]) == {
+        "body": "text <parameter=other> literal"
+    }
+
+
 def test_literal_function_close_at_chunk_boundary_does_not_finalize_early():
     """A payload marker can align exactly with a tokenizer delta boundary."""
     value = "text literal </function> still value"

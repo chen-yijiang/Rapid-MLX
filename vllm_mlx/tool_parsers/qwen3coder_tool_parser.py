@@ -32,7 +32,11 @@ from collections.abc import Sequence
 from typing import Any
 
 from ..api.tool_calling import _decode_json_like, _schema_type
-from ..tool_call_scan import split_marked_calls, split_marked_parameters
+from ..tool_call_scan import (
+    split_marked_calls,
+    split_marked_parameter_spans,
+    split_marked_parameters,
+)
 from .abstract_tool_parser import (
     ExtractedToolCallInformation,
     ToolParser,
@@ -317,12 +321,15 @@ class Qwen3CoderToolParser(ToolParser):
         parameters = function_call_str[end_index + 1 :]
         param_dict = {}
         declared_params = set(param_config) or None
-        parsed_parameters = split_marked_parameters(
+        parsed_spans = split_marked_parameter_spans(
             parameters,
             r"<parameter=([^>]+)>",
             self.parameter_end_token,
             valid_names=declared_params,
         )
+        parsed_parameters = [
+            (name, value) for name, value, _start, _end in parsed_spans
+        ]
 
         # Qwen occasionally omits one ``</parameter>`` before beginning the
         # next schema-declared parameter.  The literal-safe scanner correctly
@@ -336,6 +343,15 @@ class Qwen3CoderToolParser(ToolParser):
             for index, opener in enumerate(openers):
                 name = opener.group(1).strip()
                 if name not in declared_params or name in parsed_names:
+                    continue
+                if any(
+                    span_start < opener.start() < span_end
+                    for _parsed_name, _value, span_start, span_end in parsed_spans
+                ):
+                    # The literal-safe scanner already consumed this opener
+                    # as value text. Reinterpreting it as structure would
+                    # fabricate an argument when a string documents the wire
+                    # format and happens to name another declared property.
                     continue
                 next_start = len(parameters)
                 for sibling in openers[index + 1 :]:

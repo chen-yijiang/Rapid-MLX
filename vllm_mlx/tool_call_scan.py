@@ -40,6 +40,7 @@ __all__ = [
     "segment_by_next_opener",
     "declared_tool_names",
     "split_marked_calls",
+    "split_marked_parameter_spans",
     "split_marked_parameters",
 ]
 
@@ -107,9 +108,7 @@ def _next_sibling(
     Returns ``len(openers)`` when no sibling follows.
     """
     for j in range(index + 1, len(openers)):
-        current_is_closed = closer in text[
-            openers[index].end() : openers[j].start()
-        ]
+        current_is_closed = closer in text[openers[index].end() : openers[j].start()]
         if valid_names is not None and openers[j].group(1).strip() not in valid_names:
             # An unknown opener is normally literal payload. The one shape we
             # can disambiguate is a fully closed unknown element BETWEEN two
@@ -125,9 +124,11 @@ def _next_sibling(
                     ),
                     None,
                 )
-                if next_declared is not None and closer in text[
-                    openers[j].end() : openers[next_declared].start()
-                ]:
+                if (
+                    next_declared is not None
+                    and closer
+                    in text[openers[j].end() : openers[next_declared].start()]
+                ):
                     return j
             continue  # undeclared marker-shaped text inside the value
         if current_is_closed:
@@ -231,21 +232,22 @@ def split_marked_calls(
     return calls
 
 
-def split_marked_parameters(
+def split_marked_parameter_spans(
     block: str,
     opener: str,
     closer: str,
     valid_names: frozenset[str] | set[str] | None = None,
-) -> list[tuple[str, str]]:
-    """``(name, value)`` for each parameter in ``block``.
+) -> list[tuple[str, str, int, int]]:
+    """``(name, value, span_start, span_end)`` for each parameter.
 
     ``opener`` must capture the parameter name in group 1. Values are
     stripped of surrounding whitespace: in these formats the newlines and
     indentation around a value are layout, not payload. Whitespace *inside*
-    a value is preserved.
+    a value is preserved. Spans include the structural closer and, crucially,
+    any marker-shaped openers consumed as literal value text.
     """
     openers = list(re.finditer(opener, block))
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, int, int]] = []
     i = 0
     while i < len(openers):
         if valid_names is not None and openers[i].group(1).strip() not in valid_names:
@@ -255,10 +257,33 @@ def split_marked_parameters(
         segmented = segment_by_next_opener(block, openers, i, closer, valid_names)
         sibling = _next_sibling(block, openers, i, closer, valid_names)
         if segmented is not None:
-            out.append((openers[i].group(1).strip(), segmented[0].strip()))
+            body, span_end = segmented
+            out.append(
+                (
+                    openers[i].group(1).strip(),
+                    body.strip(),
+                    openers[i].start(),
+                    span_end,
+                )
+            )
         # Jump to the sibling, not i+1: the openers in between are literal
         # text inside the value just consumed. Advancing one at a time is
         # what turns a value containing "<parameter=x>" into a phantom
         # parameter named x, passed to the tool as if the model sent it.
         i = sibling if sibling > i else i + 1
     return out
+
+
+def split_marked_parameters(
+    block: str,
+    opener: str,
+    closer: str,
+    valid_names: frozenset[str] | set[str] | None = None,
+) -> list[tuple[str, str]]:
+    """``(name, value)`` for each parameter in ``block``."""
+    return [
+        (name, value)
+        for name, value, _start, _end in split_marked_parameter_spans(
+            block, opener, closer, valid_names
+        )
+    ]
