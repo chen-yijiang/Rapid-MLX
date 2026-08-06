@@ -242,8 +242,8 @@ def _inject_codex_progress_reminder(
                     "sed -i",
                     ".write_text(",
                     ".write_bytes(",
-                    "open(p,\"w\")",
-                    "open(p, \"w\")",
+                    'open(p,"w")',
+                    'open(p, "w")',
                     "open(p,'w')",
                     "open(p, 'w')",
                 )
