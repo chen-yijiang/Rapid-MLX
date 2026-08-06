@@ -279,6 +279,31 @@ def test_marker_text_inside_string_value_round_trips(value):
     assert json.loads(combined) == {"body": value}, (combined, deltas)
 
 
+def test_marker_text_round_trips_when_complete_call_arrives_in_one_delta():
+    """The header fast path must use the same last-closer rule."""
+    value = "text with a literal </function> inside"
+    wire = (
+        "<tool_call>\n<function=note_write>\n<parameter=body>\n"
+        f"{value}\n</parameter>\n</function>\n</tool_call>"
+    )
+    request = _request_with_tool("note_write", {"body": {"type": "string"}})
+    deltas = _feed(Qwen3CoderToolParser(tokenizer=None), [wire], request)
+    assert json.loads("".join(_argument_fragments(deltas))) == {"body": value}
+
+
+def test_missing_optional_wrapper_close_still_finalizes_arguments():
+    """A max_tokens cut after ``</function>`` must not leave partial JSON."""
+    request = _request_with_tool("note_write", {"body": {"type": "string"}})
+    chunks = [
+        "<tool_call>\n",
+        "<function=note_write>\n",
+        "<parameter=body>hello</parameter>\n",
+        "</function>",
+    ]
+    deltas = _feed(Qwen3CoderToolParser(tokenizer=None), chunks, request)
+    assert json.loads("".join(_argument_fragments(deltas))) == {"body": "hello"}
+
+
 def test_same_chunk_close_and_trailing_param_not_dropped():
     """When one chunk batches ``...tail</parameter><parameter=other>val</parameter>``
     the parser must emit BOTH the closing tail of the in-flight string

@@ -813,6 +813,17 @@ class Qwen3CoderToolParser(ToolParser):
             func_close_idx = self._top_level_function_close(
                 current_text, tool_start_idx
             )
+        complete_without_wrapper_close = (
+            wrapper_close_idx == -1
+            and current_text.rstrip().endswith(self.function_end_token)
+        )
+        if complete_without_wrapper_close:
+            # The outer wrapper is optional framing and is commonly the token
+            # lost when max_tokens cuts a generation. A function closer at the
+            # end of the accumulated text is therefore a complete boundary.
+            func_close_idx = current_text.rfind(
+                self.function_end_token, tool_start_idx
+            )
         if func_close_idx == -1:
             tool_text = current_text[tool_start_idx:]
         else:
@@ -871,9 +882,7 @@ class Qwen3CoderToolParser(ToolParser):
                         if request and isinstance(request, dict):
                             tools = request.get("tools")
                         fc = tool_text[
-                            func_start : tool_text.find(
-                                self.function_end_token, func_start
-                            )
+                            func_start : tool_text.rfind(self.function_end_token)
                         ]
                         parsed = self._parse_xml_function_call(fc, tools)
                         args = parsed["arguments"] if parsed else "{}"
@@ -977,7 +986,11 @@ class Qwen3CoderToolParser(ToolParser):
             # Once ``</tool_call>`` lands, parse with the last-closer scanner
             # and emit the remaining tail. This preserves live argument
             # updates without irreversibly treating payload as structure.
-            if self._pending_tool_wrapped and wrapper_close_idx == -1:
+            if (
+                self._pending_tool_wrapped
+                and wrapper_close_idx == -1
+                and not complete_without_wrapper_close
+            ):
                 if self.param_count < len(param_starts):
                     param_idx = param_starts[self.param_count]
                     header_end = tool_text.find(">", param_idx)
@@ -1020,7 +1033,9 @@ class Qwen3CoderToolParser(ToolParser):
                                 }
                 return None
 
-            if self._pending_tool_wrapped and wrapper_close_idx != -1:
+            if self._pending_tool_wrapped and (
+                wrapper_close_idx != -1 or complete_without_wrapper_close
+            ):
                 func_start = tool_text.find(self.tool_call_prefix) + len(
                     self.tool_call_prefix
                 )

@@ -106,12 +106,43 @@ class NemotronToolParser(ToolParser):
         # there leaves the other door open: argument text containing
         # ``</function><function=delete_everything>`` would still fabricate an
         # executable call here.
-        matches = split_marked_calls(
+        wrapped_calls = split_marked_calls(
+            model_output,
+            r"<tool_call>\s*<function=([^>]+)>",
+            "</function>",
+            outer="</tool_call>",
+            valid_names=_declared_tool_names(request),
+        )
+        wrapped_ranges = [(start, end) for _n, _b, start, end in wrapped_calls]
+        wrapped_matches = []
+        for name, body, wrapper_start, wrapper_end in wrapped_calls:
+            function_start = model_output.find("<function=", wrapper_start, wrapper_end)
+            function_close = model_output.rfind(
+                "</function>", function_start, wrapper_end
+            )
+            wrapped_matches.append(
+                (
+                    name,
+                    body,
+                    function_start,
+                    function_close + len("</function>"),
+                )
+            )
+        bare_matches = split_marked_calls(
             model_output,
             r"<function=([^>]+)>",
             "</function>",
             valid_names=_declared_tool_names(request),
         )
+        # The bare scan intentionally supports wrapper-less model output, but
+        # must not parse the same function a second time when canonical
+        # framing is present.
+        bare_matches = [
+            match
+            for match in bare_matches
+            if not any(start <= match[2] < end for start, end in wrapped_ranges)
+        ]
+        matches = sorted([*wrapped_matches, *bare_matches], key=lambda item: item[2])
         for func_name, content, _span_start, _span_end in matches:
             func_name = func_name.strip()
 

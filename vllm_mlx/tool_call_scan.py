@@ -181,25 +181,41 @@ def split_marked_calls(
         if valid_names is not None and openers[i].group(1).strip() not in valid_names:
             i += 1
             continue
-        segmented = segment_by_next_opener(text, openers, i, closer, valid_names)
         sibling = _next_sibling(text, openers, i, closer, valid_names)
+        segmented = segment_by_next_opener(text, openers, i, closer, valid_names)
+        outer_end: int | None = None
+        if outer:
+            # The enclosing marker is the strongest available boundary. Use
+            # its last occurrence before the next sibling, then select the
+            # last inner closer before it. This preserves marker-shaped text
+            # inside a value without allowing a later prose ``closer`` to
+            # swallow content that follows an already wrapped call.
+            limit = openers[sibling].start() if sibling < len(openers) else len(text)
+            outer_pos = text.rfind(outer, openers[i].end(), limit)
+            if outer_pos >= 0:
+                inner = text[openers[i].end() : outer_pos]
+                cut = inner.rfind(closer)
+                if cut >= 0:
+                    segmented = (
+                        inner[:cut],
+                        openers[i].end() + cut + len(closer),
+                    )
+                    outer_end = outer_pos + len(outer)
+                else:
+                    segmented = None
+            else:
+                segmented = None
         if segmented is not None:
             body, span_end = segmented
             emit = True
             if outer:
-                limit = (
-                    openers[sibling].start() if sibling < len(openers) else len(text)
-                )
-                tail = re.match(r"\s*" + re.escape(outer), text[span_end:limit])
-                if tail:
-                    span_end += tail.end()
+                # ``outer`` is REQUIRED when requested, not opportunistic.
+                # Callers that tolerate a missing wrapper simply do not pass
+                # it. ``outer_end`` was computed together with the matching
+                # inner closer above, so a later prose closer cannot move it.
+                if outer_end is not None:
+                    span_end = outer_end
                 else:
-                    # ``outer`` is REQUIRED when requested, not opportunistic.
-                    # The regex this replaced matched only with the enclosing
-                    # marker present, so accepting a call whose wrapper never
-                    # arrived would newly admit truncated emissions. Callers
-                    # that tolerate a missing wrapper (nemotron_tool_parser
-                    # documents that case) simply do not pass ``outer``.
                     emit = False
             if emit:
                 calls.append(
