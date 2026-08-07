@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -420,7 +420,10 @@ class TestCommon:
         bak = _common.backup_existing(target)
 
         assert bak is not None
-        if hasattr(os, "listxattr"):
+        # The widen path is Linux-only: only there do POSIX ACLs surface as
+        # ``system.posix_acl_*`` xattrs we can authoritatively enumerate. macOS
+        # (no os.listxattr) and every other platform keep the backup owner-only.
+        if sys.platform.startswith("linux"):
             assert bak.stat().st_mode & 0o777 == 0o644
         else:
             assert bak.stat().st_mode & 0o777 == 0o600, (

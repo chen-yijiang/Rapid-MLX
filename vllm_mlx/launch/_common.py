@@ -148,15 +148,24 @@ def backup_existing(path: Path) -> Path | None:
                 if os.fstat(fd).st_gid != src.st_gid:
                     mode &= 0o700
             # An ACL can DENY a principal the mode bits would otherwise admit,
-            # and a freshly created file carries none. Reproducing 0644
-            # without the deny entry hands the file to exactly the account the
-            # source shut out. There is no stdlib API to copy one, so when the
-            # source carries a security/ACL xattr — or when the list could not
-            # be read at all — the backup stays owner-only rather than
-            # pretending the numbers tell the whole story.
-            if src_xattrs is None or any(
-                x.startswith(("com.apple.system.Security", "system.posix_acl"))
-                for x in src_xattrs
+            # and a freshly created file carries none. Reproducing 0644 without
+            # the deny entry hands the file to exactly the account the source
+            # shut out. Reproducing the source's group/other bits is therefore
+            # only safe where we can AUTHORITATIVELY enumerate its ACLs: Linux,
+            # where a POSIX ACL surfaces as a ``system.posix_acl_*`` xattr that
+            # ``os.listxattr`` returns. Everywhere else the backup stays
+            # owner-only — macOS exposes no ``os.listxattr`` at all (its ACLs
+            # are not xattrs we can read), and any other OS's ACL model is
+            # unknown to us, so we never pretend the mode numbers tell the whole
+            # story. Keying on the platform (not merely on ``os.listxattr``
+            # being present) is deliberate: a non-Linux OS that happened to
+            # expose ``listxattr`` but represented ACLs some other way would
+            # otherwise reproduce group/other bits it could not vouch for.
+            acls_enumerable = (
+                sys.platform.startswith("linux") and src_xattrs is not None
+            )
+            if not acls_enumerable or any(
+                x.startswith("system.posix_acl") for x in (src_xattrs or ())
             ):
                 mode &= 0o700
         os.fchmod(fd, mode)
