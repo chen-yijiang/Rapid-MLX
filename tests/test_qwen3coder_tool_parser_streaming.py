@@ -201,7 +201,20 @@ def test_json_encoded_string_preserves_embedded_xml_closers():
     assert json.loads("".join(fragments)) == {"content": value}
 
 
-def test_json_string_after_split_formatting_space_drops_wrapper_quotes():
+@pytest.mark.parametrize(
+    ("tool_name", "param_name", "value"),
+    [
+        (
+            "read_file",
+            "path",
+            "/tmp/.hermes-read-0123456789abcdef0123456789abcdef.txt",
+        ),
+        ("browse", "url", "https://example.com"),
+    ],
+)
+def test_json_string_after_split_formatting_space_drops_wrapper_quotes(
+    tool_name: str, param_name: str, value: str
+):
     """Formatting whitespace arriving before a JSON quote stays wire-only.
 
     Real Qwen3.6 streams can split ``<parameter>\n \"value\"`` after the
@@ -209,13 +222,12 @@ def test_json_string_after_split_formatting_space_drops_wrapper_quotes():
     boundary and turn the JSON wrapper quotes into literal argument bytes.
     """
     parser = Qwen3CoderToolParser(tokenizer=None)
-    request = _request_with_tool("read_file", {"path": {"type": "string"}})
-    value = "/tmp/.hermes-read-0123456789abcdef0123456789abcdef.txt"
+    request = _request_with_tool(tool_name, {param_name: {"type": "string"}})
     encoded = json.dumps(value)
     chunks = [
         "<tool_call>\n",
-        "<function=read_file>\n",
-        "<parameter=path>\n ",
+        f"<function={tool_name}>\n",
+        f"<parameter={param_name}>\n ",
         encoded[:16],
         encoded[16:] + "\n</parameter>\n",
         "</function>\n",
@@ -223,7 +235,7 @@ def test_json_string_after_split_formatting_space_drops_wrapper_quotes():
     ]
 
     fragments = _argument_fragments(_feed(parser, chunks, request))
-    assert json.loads("".join(fragments)) == {"path": value}
+    assert json.loads("".join(fragments)) == {param_name: value}
 
 
 def test_streaming_json_matches_non_streaming():
