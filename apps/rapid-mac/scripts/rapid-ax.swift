@@ -18,7 +18,11 @@ let command = CommandLine.arguments[1]
 let application = AXUIElementCreateApplication(pid)
 let maxDepth = 40
 let recordCap = 12_000
-var visited = Set<CFHashCode>()
+// Hash-bucketed, but membership is decided by CFEqual. A bare hash set treats
+// two distinct elements that happen to collide as the same object and drops the
+// second one's whole subtree — silently, and with `complete: true`, which is the
+// exact failure this dump is supposed to have stopped being able to report.
+var visited = [CFHashCode: [AXUIElement]]()
 var records = [[String: Any]]()
 var match: AXUIElement?
 // The same contract as `windows.complete`, for the element array. A caller that
@@ -28,9 +32,20 @@ var match: AXUIElement?
 // `success: true`, so `length == 0` is satisfied by never having looked. Say so
 // instead. `complete: false` is not an error; it means "this dump cannot answer
 // a question about absence".
+//
+// The scope is the app's WINDOW forest, deliberately: the walk starts from the
+// root's window children and never enters the global menu bar, which would drag
+// unrelated macOS Recent Items into every artifact. `complete` therefore means
+// "every window and descendant was observed", not "every AX element the process
+// owns" — a menu-bar item is out of scope, not missing. It also cannot be an
+// atomic snapshot: a window opened after its parent's AXChildren was read is
+// simply not in this dump. Callers proving absence must have settled the UI
+// first; completeness is a floor, not a substitute for waiting.
 var walkComplete = true
 var walkUnreadableChildren = 0
 var walkLastChildrenError: AXError?
+var walkUnreadableFields = 0
+var walkLastFieldError: AXError?
 var walkHitDepthCap = false
 var walkHitRecordCap = false
 var walkRootReasons = [String]()
@@ -107,6 +122,62 @@ func children(_ element: AXUIElement) -> ChildrenRead {
     }
 }
 
+/// The four attributes the absence assertions actually search
+/// (`identifier`, `value`, `title`, `description`). A read that FAILED on one
+/// of them omits it from the record, and a filter testing that field then finds
+/// nothing — the same "absent, or never looked?" ambiguity as a missing
+/// subtree, one level down. The AXError is the only way to tell an attribute
+/// the element does not publish from one we could not obtain.
+enum SearchableRead {
+    /// Nothing searchable here: either the element does not publish the
+    /// attribute, or it published something that cannot spell an alias name
+    /// (`AXValue` carries CFRange and CGPoint as well as numbers). Both are
+    /// observations, not gaps.
+    case absent
+    case text(String)
+    case number(NSNumber)
+    case unreadable(AXError)
+}
+
+func searchable(_ element: AXUIElement, _ name: CFString) -> SearchableRead {
+    var value: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(element, name, &value)
+    switch status {
+    case .success:
+        if let text = value as? String { return .text(text) }
+        if let number = value as? NSNumber { return .number(number) }
+        return .absent
+    case .attributeUnsupported, .noValue:
+        return .absent
+    default:
+        return .unreadable(status)
+    }
+}
+
+/// Read a searchable attribute, and stop vouching for the dump if the read
+/// failed. `nil` means "nothing to record" — never "the read failed".
+func searchableText(_ element: AXUIElement, _ name: CFString) -> String? {
+    switch searchable(element, name) {
+    case .text(let text): return text
+    case .absent, .number: return nil
+    case .unreadable(let error):
+        walkUnreadableFields += 1
+        walkLastFieldError = error
+        walkComplete = false
+        return nil
+    }
+}
+
+/// True the first time this exact element is seen. Equality is `CFEqual`, not
+/// hash equality — see `visited`.
+func visit(_ element: AXUIElement) -> Bool {
+    let key = CFHash(element)
+    let bucket = visited[key] ?? []
+    if bucket.contains(where: { CFEqual($0, element) }) { return false }
+    visited[key] = bucket + [element]
+    return true
+}
+
 func walk(_ element: AXUIElement, depth: Int) {
     guard depth <= maxDepth else {
         walkHitDepthCap = true
@@ -118,10 +189,9 @@ func walk(_ element: AXUIElement, depth: Int) {
         walkComplete = false
         return
     }
-    let identity = CFHash(element)
-    guard visited.insert(identity).inserted else { return }
+    guard visit(element) else { return }
 
-    let identifier = string(element, kAXIdentifierAttribute as CFString)
+    let identifier = searchableText(element, kAXIdentifierAttribute as CFString)
     var record: [String: Any] = ["depth": depth]
     if let identifier { record["identifier"] = identifier }
     if let role = string(element, kAXRoleAttribute as CFString) { record["role"] = role }
@@ -143,10 +213,24 @@ func walk(_ element: AXUIElement, depth: Int) {
     if let selected = attribute(element, kAXSelectedAttribute as CFString) as? NSNumber {
         record["selected"] = selected.boolValue
     }
-    if let title = string(element, kAXTitleAttribute as CFString), !title.isEmpty { record["title"] = title }
-    if let description = string(element, kAXDescriptionAttribute as CFString), !description.isEmpty { record["description"] = description }
+    if let title = searchableText(element, kAXTitleAttribute as CFString), !title.isEmpty {
+        record["title"] = title
+    }
+    if let description = searchableText(element, kAXDescriptionAttribute as CFString), !description.isEmpty {
+        record["description"] = description
+    }
+    // `help` is not one of the searched fields, so a failed read here costs
+    // the dump nothing it claims to vouch for.
     if let help = string(element, kAXHelpAttribute as CFString), !help.isEmpty { record["help"] = help }
-    if let value = jsonValue(attribute(element, kAXValueAttribute as CFString)) { record["value"] = value }
+    switch searchable(element, kAXValueAttribute as CFString) {
+    case .text(let text): record["value"] = text
+    case .number(let number): record["value"] = number
+    case .absent: break
+    case .unreadable(let error):
+        walkUnreadableFields += 1
+        walkLastFieldError = error
+        walkComplete = false
+    }
     if let origin = point(element, kAXPositionAttribute as CFString),
        let extent = size(element, kAXSizeAttribute as CFString) {
         record["bounds"] = [
@@ -231,6 +315,12 @@ if walkUnreadableChildren > 0 {
     walkReasons.append(
         "AXChildren was unreadable on \(walkUnreadableChildren) element(s) (last AXError \(code))")
 }
+if walkUnreadableFields > 0 {
+    let code = walkLastFieldError.map { String($0.rawValue) } ?? "unknown"
+    walkReasons.append(
+        "a searched attribute (identifier/value/title/description) was unreadable on "
+            + "\(walkUnreadableFields) element(s) (last AXError \(code))")
+}
 if walkHitDepthCap { walkReasons.append("the depth cap of \(maxDepth) was reached") }
 if walkHitRecordCap { walkReasons.append("the record cap of \(recordCap) was reached") }
 
@@ -240,10 +330,17 @@ if command == "dump" {
         "data": [
             "pid": pid,
             "ui_elements": records,
-            // Does `ui_elements` cover the whole tree? Only a caller asking
-            // whether something is ABSENT needs this; a match is self-proving,
-            // but "no match" from a clipped walk is not an observation at all.
-            "walk": ["complete": walkComplete, "reasons": walkReasons],
+            // Does `ui_elements` cover everything in scope? Only a caller
+            // asking whether something is ABSENT needs this; a match is
+            // self-proving, but "no match" from a clipped walk is not an
+            // observation at all. `scope` is named rather than implied so
+            // `complete` cannot be read as a claim about the menu bar, which
+            // this walk deliberately never enters.
+            "walk": [
+                "complete": walkComplete,
+                "scope": "window-forest",
+                "reasons": walkReasons
+            ],
             // The authority for "is window X open?" — see the note above. Callers
             // must treat `complete: false` as "could not observe", never as an
             // answer in either direction.

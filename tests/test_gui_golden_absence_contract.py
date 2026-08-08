@@ -32,6 +32,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -73,7 +74,11 @@ def _dump(elements, *, complete=True, success=True, reasons=None, walk=True):
         },
     }
     if walk:
-        payload["data"]["walk"] = {"complete": complete, "reasons": reasons or []}
+        payload["data"]["walk"] = {
+            "complete": complete,
+            "scope": "window-forest",
+            "reasons": reasons or [],
+        }
     return payload
 
 
@@ -146,10 +151,42 @@ def test_a_broken_query_cannot_answer(tmp_path):
     assert _match(tmp_path, _dump([]), filter_=".data.ui_elements[") == 2
 
 
-def test_an_empty_element_array_is_still_a_real_absence(tmp_path):
-    """A complete walk that found nothing is a legitimate "absent" — the gate
-    must not be so strict that no flow can ever prove anything."""
-    assert _match(tmp_path, _dump([])) == 1
+def test_an_empty_element_array_cannot_answer(tmp_path):
+    """A complete dump always holds at least the application record, so an empty
+    array is not an app with nothing in it — it is a dump that is not one of
+    ours. Reading it as absence is outcome 2 collapsing into outcome 1."""
+    assert _match(tmp_path, _dump([])) == 2
+
+
+def test_a_complete_walk_that_found_no_match_is_a_real_absence(tmp_path):
+    """The gate must not be so strict that no flow can ever prove anything."""
+    assert (
+        _match(
+            tmp_path,
+            _dump([{"depth": 0}, {"identifier": "rapid.chat.compose"}]),
+        )
+        == 1
+    )
+
+
+def test_a_streaming_filter_cannot_hide_a_match(tmp_path):
+    """`jq -e` reports the LAST value a filter emits. A per-element filter over
+    [match, non-match] yields `true, false` and exits 1 — "absent", having just
+    matched. The helper requires exactly one boolean, so this is refused rather
+    than answered wrongly."""
+    per_element = '.data.ui_elements[]? | (.identifier == "fake-video-alias")'
+    payload = _dump(
+        [{"identifier": "fake-video-alias"}, {"identifier": "rapid.chat.compose"}]
+    )
+    assert _match(tmp_path, payload, filter_=per_element) == 2
+
+
+def test_a_filter_emitting_a_non_boolean_cannot_answer(tmp_path):
+    """`… | length` emits a number; jq calls 0 falsy, so a count of zero would
+    read as absence and any other count as presence — right by accident until
+    a filter emits a string or null."""
+    counting = "[.data.ui_elements[]?] | length"
+    assert _match(tmp_path, _dump([{"depth": 0}]), filter_=counting) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -157,20 +194,21 @@ def test_an_empty_element_array_is_still_a_real_absence(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _assert_absent(tmp_path, payload) -> subprocess.CompletedProcess:
+def _assert_absent(tmp_path, payload, *, driver="false") -> subprocess.CompletedProcess:
     dump = tmp_path / "dump.json"
     dump.write_text(json.dumps(payload))
-    # `sleep` is shadowed so the retry loop does not cost 5 s. AX_DRIVER is
-    # `false` — a driver that cannot observe, which is also the case that proves
-    # the retry does not destroy the caller's evidence.
+    # `set -euo pipefail` matches production: the retry loop and the helpers
+    # must not merely return the right status, they must not abort the run
+    # getting there. `sleep` is shadowed so the loop does not cost 5 s.
     script = textwrap.dedent(
         f"""
-        set -uo pipefail
+        set -euo pipefail
         sleep() {{ :; }}
         die() {{ echo "DIE: $*" >&2; exit 9; }}
-        AX_DRIVER=false
+        AX_DRIVER={driver}
         APP_PID=4242
         {_extract("ax_elements_match")}
+        {_extract("redump_evidence")}
         {_extract("assert_ax_absent")}
         {_extract("walk_reasons")}
         assert_ax_absent "$1" "$2" "a video-gen alias reached the chat surface"
@@ -213,34 +251,205 @@ def test_an_incomplete_dump_fails_loudly_rather_than_passing(tmp_path):
     assert not (tmp_path / "dump.json.retry").exists()
 
 
+def test_a_driver_that_succeeds_with_garbage_does_not_destroy_the_evidence(tmp_path):
+    """`true` exits 0 and writes nothing. Judging the retry by exit status
+    alone promotes that empty file over the only dump that carried a reason,
+    and the failure message then explains nothing."""
+    payload = _dump(
+        [{"depth": 0}],
+        complete=False,
+        reasons=["the record cap of 12000 was reached"],
+    )
+    result = _assert_absent(tmp_path, payload, driver="true")
+    assert result.returncode == 9
+    assert "record cap of 12000" in result.stderr
+    assert json.loads((tmp_path / "dump.json").read_text()) == payload
+    assert not (tmp_path / "dump.json.retry").exists()
+
+
 # ---------------------------------------------------------------------------
 # Lint: the raw idiom must not come back. It had already been copied to a third
 # assertion (#1673) between the issue being filed and being fixed.
 # ---------------------------------------------------------------------------
 
 
+# The shapes an "it is not there" claim takes when written by hand.
+#
+# A speed bump, not a proof. `| not` is deliberately NOT on this list: the flows
+# use it for ordinary per-element negation (`select(… | startswith("X") | not)`)
+# and flagging that would be noise, so `any(…) | not` gets through. So does a
+# count bound to a shell variable, or a filter assembled from pieces. What the
+# list covers is what people actually reach for, which is what let the same
+# assertion be copied to a third flow while #1670 was open.
+_ABSENCE_IDIOMS = (
+    r"length\s*(?:==|<=)\s*0",  # […] | length == 0
+    r"\)\s*==\s*0",  # (… | length) == 0
+    r"0\s*==\s*[(\[]",  # 0 == (… | length)
+    r"==\s*\[\s*\]",  # […] == []
+)
+
+# How far either side of a `ui_elements` reference the idiom may sit. Behind as
+# well as ahead, because `0 == (…)` puts the tell first.
+_LINT_LOOKBEHIND = 160
+_LINT_LOOKAHEAD = 400
+
+
+def _lint_offenders(source: str) -> list[str]:
+    offenders = []
+    for anchor in re.finditer(r"ui_elements", source):
+        start = max(0, anchor.start() - _LINT_LOOKBEHIND)
+        window = source[start : anchor.end() + _LINT_LOOKAHEAD]
+        for idiom in _ABSENCE_IDIOMS:
+            hit = re.search(idiom, window)
+            if hit:
+                offenders.append(window[: hit.end()][-140:])
+                break
+    return offenders
+
+
 def test_no_flow_proves_absence_by_counting_elements_itself():
-    source = _FLOWS.read_text()
-    # A jq program that reaches into `ui_elements` and then asserts a zero
-    # count — the two are within a few hundred characters of each other even
-    # when the filter is wrapped across lines.
-    offenders = [
-        m.group(0)[:120]
-        for m in re.finditer(r"ui_elements[\s\S]{0,400}?length\s*==\s*0", source)
-    ]
+    offenders = _lint_offenders(_FLOWS.read_text())
     assert not offenders, (
         "prove absence with assert_ax_absent, which refuses to answer from an "
-        "incomplete walk; `length == 0` on its own is satisfied by never having "
-        f"looked:\n{offenders}"
+        "incomplete walk; counting elements yourself is satisfied by never "
+        "having looked:\n" + "\n---\n".join(offenders)
     )
 
 
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "jq -e '[.data.ui_elements[]? | select(.identifier == \"X\")] | length == 0'",
+        "jq -e '([.data.ui_elements[]? | select(.identifier == \"X\")] | length) == 0'",
+        "jq -e '0 == ([.data.ui_elements[]? | select(.identifier == \"X\")] | length)'",
+        "jq -e '[.data.ui_elements[]? | select(.identifier == \"X\")] == []'",
+    ],
+)
+def test_the_lint_catches_the_idioms_people_actually_write(snippet):
+    """A lint nobody has aimed at its own target is decoration."""
+    assert _lint_offenders(snippet), snippet
+
+
+def test_the_lint_does_not_flag_ordinary_negation():
+    """`| not` inside a `select` is how the flows filter elements; treating it
+    as an absence claim would make the lint noise, and a noisy lint gets
+    disabled. The cost is that `any(…) | not` gets through — a known hole, not
+    an oversight."""
+    ordinary = (
+        'jq -e \'.data.ui_elements[]? | select((.identifier // "") '
+        '| startswith("Settings.Category.") | not)\''
+    )
+    assert not _lint_offenders(ordinary)
+
+
 def test_the_helper_gates_on_the_completeness_signal():
-    """Pin the premise. If the driver stops publishing `walk.complete`, or the
-    helper stops consulting it, every test above still passes while the flows go
-    back to proving absence from a walk that may be clipped."""
+    """Pin the premise. If the helper stops consulting `walk.complete`, every
+    test above still passes while the flows go back to proving absence from a
+    walk that may be clipped."""
     assert "data.walk.complete == true" in _extract("ax_elements_match")
-    driver = (
-        _REPO_ROOT / "apps" / "rapid-mac" / "scripts" / "rapid-ax.swift"
-    ).read_text()
-    assert '"walk": ["complete": walkComplete' in driver
+
+
+def test_the_catalog_flow_establishes_the_catalogue_loaded_before_denying_it():
+    """The absence assertions must be preceded by a positive one.
+
+    A surface still fetching its model list contains neither the video-gen
+    alias nor any other, so the absence check passes without the filter under
+    test having been exercised. This pins the ORDER: each `wait_ax_match` comes
+    before its `assert_ax_absent`."""
+    source = _FLOWS.read_text()
+    flow = source[source.index("flow_catalog_integrity() {") :]
+    flow = flow[: flow.index("\n}\n")]
+    calls = re.findall(r"^\s*(wait_ax_match|assert_ax_absent)\b", flow, re.MULTILINE)
+    assert calls == [
+        "wait_ax_match",
+        "assert_ax_absent",
+        "wait_ax_match",
+        "assert_ax_absent",
+    ], calls
+
+
+# ---------------------------------------------------------------------------
+# The producer. These run the real driver, so they need macOS and a Swift
+# toolchain; everything above is text and bash, and runs anywhere.
+# ---------------------------------------------------------------------------
+
+_DRIVER = _REPO_ROOT / "apps" / "rapid-mac" / "scripts" / "rapid-ax.swift"
+
+_needs_swift = pytest.mark.skipif(
+    not sys.platform.startswith("darwin") or shutil.which("swift") is None,
+    reason="the driver is a Swift script and only runs on macOS",
+)
+
+
+def _run_driver(pid: int) -> dict:
+    result = subprocess.run(
+        ["swift", str(_DRIVER), "dump", str(pid)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@_needs_swift
+def test_the_driver_refuses_to_vouch_for_a_process_it_cannot_read():
+    """pid 1 has no accessibility tree we can reach. The dump still reports
+    `success: true` with a single record — exactly the shape that used to
+    satisfy an absence assertion without one element having been observed."""
+    payload = _run_driver(1)
+    assert payload["success"] is True
+    walk = payload["data"]["walk"]
+    assert walk["complete"] is False
+    assert walk["reasons"], "a refusal with no reason is unfixable"
+    assert walk["scope"] == "window-forest"
+
+
+@_needs_swift
+def test_the_driver_vouches_for_an_ordinary_application():
+    """The other direction, and the one that decides whether this is usable at
+    all: a signal that goes false on a healthy app makes every flow die."""
+    pids = subprocess.run(
+        ["pgrep", "-x", "Finder"], capture_output=True, text=True
+    ).stdout.split()
+    if not pids:
+        pytest.skip("Finder is not running")
+    walk = _run_driver(int(pids[0]))["data"]["walk"]
+    assert walk["complete"] is True, walk["reasons"]
+
+
+# ---------------------------------------------------------------------------
+# A structural baseline is the same claim at a larger scale: everything in the
+# committed snapshot is here, and nothing else is.
+# ---------------------------------------------------------------------------
+
+
+def test_a_baseline_cannot_be_taken_from_an_incomplete_dump(tmp_path):
+    """Otherwise comparison passes on a clipped tree whose recorded prefix
+    happens to match, and `--update` commits the clipped tree as the truth."""
+    dump = tmp_path / "clipped.json"
+    dump.write_text(
+        json.dumps(
+            _dump(
+                [{"depth": 0, "role": "AXApplication"}],
+                complete=False,
+                reasons=["the record cap of 12000 was reached"],
+            )
+        )
+    )
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_REPO_ROOT / "apps" / "rapid-mac" / "scripts" / "ax-baseline.py"),
+            "check",
+            str(dump),
+            "--baseline",
+            str(baseline),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "not a complete observation" in result.stderr + result.stdout

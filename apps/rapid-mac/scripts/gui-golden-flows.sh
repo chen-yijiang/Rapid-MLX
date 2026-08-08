@@ -265,14 +265,24 @@ ax_window_present() {
 # saying whether it can vouch for `ui_elements` at all.
 ax_elements_match() {
     local dump="$1" filter="$2" status
-    # `ui_elements` must be an array as well as vouched-for: `[]?` inside the
-    # filters below swallows a structural failure, so without this a malformed
-    # dump would read as a confident "absent".
+    # `ui_elements` must be a NON-EMPTY array as well as vouched-for. `[]?`
+    # inside the filters below swallows a structural failure, so without the
+    # type check a malformed dump would read as a confident "absent" — and a
+    # complete dump always holds at least the application record, so an empty
+    # array is not an empty app, it is a dump that is not one of ours.
     jq -e '.success == true and .data.walk.complete == true
-           and (.data.ui_elements | type) == "array"' "$dump" >/dev/null 2>&1 || return 2
+           and (.data.ui_elements | type) == "array"
+           and (.data.ui_elements | length) > 0' "$dump" >/dev/null 2>&1 || return 2
     status=0
-    jq -e "$filter" "$dump" >/dev/null 2>&1 || status=$?
-    # jq exits 1 only for a well-formed query whose answer was false or empty;
+    # Wrapped, not run bare: `jq -e` reports the LAST value a filter emits, so a
+    # streaming filter that yields `true, false` exits 1 and reads as "absent"
+    # having just matched. Require exactly one boolean and make anything else an
+    # error, which lands in the third outcome where it belongs.
+    jq -e "[ $filter ] | if length == 1 and (.[0] | type) == \"boolean\"
+                         then .[0]
+                         else error(\"filter must emit exactly one boolean\") end" \
+        "$dump" >/dev/null 2>&1 || status=$?
+    # jq exits 1 only for a well-formed query whose answer was false or null;
     # anything else (2 usage, 3 compile, 5 runtime error) is a broken query, not
     # an answer, and must not be reported as "absent".
     case "$status" in
@@ -280,6 +290,44 @@ ax_elements_match() {
         1) return 1 ;;
         *) return 2 ;;
     esac
+}
+
+# Refresh a dump in place without destroying it on failure.
+#
+# The file a caller passes in is both the evidence a human debugs from and the
+# only place the driver's reason for giving up is written down, so a driver that
+# cannot produce a usable dump must leave the previous one alone. Exit status is
+# not enough on its own — a driver that exits 0 having written nothing would
+# still clobber it.
+redump_evidence() {
+    local dump="$1"
+    if "$AX_DRIVER" dump "$APP_PID" > "$dump.retry" 2>/dev/null \
+       && jq -e 'type == "object"' "$dump.retry" >/dev/null 2>&1; then
+        mv "$dump.retry" "$dump"
+    fi
+    rm -f "$dump.retry"
+}
+
+# Wait until the tree positively contains a match, and die if it never does.
+#
+# A positive match proves itself and needs no completeness gate. What this is
+# for is the assertion that comes AFTER it: "no video-gen alias in the
+# catalogue" observed while the catalogue is still a spinner is not an
+# observation of the filter under test, it is an observation of a spinner, and
+# it passes. Proving the fixture's ordinary alias has arrived first is what
+# makes the absence claim about the catalogue at all.
+wait_ax_match() {
+    local dump="$1" filter="$2" what="$3" attempts="${4:-80}" status i
+    for ((i=0; i<attempts; i++)); do
+        if (( i > 0 )); then
+            sleep 0.25
+            redump_evidence "$dump"
+        fi
+        status=0
+        ax_elements_match "$dump" "$filter" || status=$?
+        if [[ "$status" == 0 ]]; then return 0; fi
+    done
+    die "timed out waiting for $what ($dump: $(walk_reasons "$dump"))"
 }
 
 # Prove that nothing in the app's accessibility tree matches `filter`, and
@@ -296,13 +344,7 @@ assert_ax_absent() {
     for ((i=0; i<20; i++)); do
         if (( i > 0 )); then
             sleep 0.25
-            # Stage the retry: a driver that cannot run must not truncate the
-            # evidence the caller already captured, which is also the only place
-            # the reason for giving up is written down.
-            if "$AX_DRIVER" dump "$APP_PID" > "$dump.retry" 2>/dev/null; then
-                mv "$dump.retry" "$dump"
-            fi
-            rm -f "$dump.retry"
+            redump_evidence "$dump"
         fi
         status=0
         ax_elements_match "$dump" "$filter" || status=$?
@@ -1058,10 +1100,19 @@ flow_catalog_integrity() {
     local VIDEO_ALIAS_FILTER='[.data.ui_elements[]?
         | select([(.identifier // ""), (.value // ""), (.title // ""), (.description // "")]
                  | map(tostring) | join(" ") | test("fake-video-alias"))] | length > 0'
+    # The same search for the fixture's ORDINARY alias. Asserting this first is
+    # what makes the assertion after it mean something: a surface still
+    # fetching its model list contains neither alias, and would pass the
+    # absence check without the filter under test having been exercised once.
+    local PLAIN_ALIAS_FILTER='[.data.ui_elements[]?
+        | select([(.identifier // ""), (.value // ""), (.title // ""), (.description // "")]
+                 | map(tostring) | join(" ") | test("fake-alias"))] | length > 0'
     start_persona catalog-integrity
     dismiss_first_run
     see_main "$OUT/catalog-main.json"
 
+    wait_ax_match "$OUT/catalog-main.json" "$PLAIN_ALIAS_FILTER" \
+        "the chat surface to offer the fixture's chat-capable alias — until it does, it is not offering anything and proves nothing about the filter"
     assert_ax_absent "$OUT/catalog-main.json" "$VIDEO_ALIAS_FILTER" \
         "a video-gen alias reached the chat surface"
 
@@ -1070,9 +1121,11 @@ flow_catalog_integrity() {
     press "$OUT/catalog-settings.json" Settings.Category.modelManagement \
         "$OUT/catalog-open-mm.json"
     see_main "$OUT/catalog-model-management.json"
+    wait_ax_match "$OUT/catalog-model-management.json" "$PLAIN_ALIAS_FILTER" \
+        "Model Management to finish listing models — an empty or still-loading list contains no alias of any kind"
     assert_ax_absent "$OUT/catalog-model-management.json" "$VIDEO_ALIAS_FILTER" \
         "a video-gen alias reached Model Management"
-    log "  no video-gen alias on either catalog surface"
+    log "  both catalog surfaces listed models, and neither offered a video-gen alias"
     cleanup_persona
 }
 
