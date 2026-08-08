@@ -1,5 +1,22 @@
 import Foundation
 
+/// What a model is *for*. Drives the capability tabs in Model Management —
+/// chat models and image models are managed side by side but never mixed in
+/// one list (and are picked in different tabs). Video is reserved for when
+/// the video lane surfaces manageable aliases.
+enum ModelKind: String, Sendable, Hashable, CaseIterable, Identifiable {
+    case chat, image, video
+    var id: String { rawValue }
+    /// Tab label in Model Management.
+    var tabLabel: String {
+        switch self {
+        case .chat: return "Chat"
+        case .image: return "Image"
+        case .video: return "Video"
+        }
+    }
+}
+
 /// One model in the rapid-mlx catalog. The picker UI groups cached vs.
 /// uncached so the user knows which aliases boot instantly vs. which
 /// trigger an HF download on first ``serve``.
@@ -17,6 +34,10 @@ struct ModelEntry: Identifiable, Hashable, Sendable {
     /// Drives a green dot in the picker so the user can tell at a glance
     /// which models start in seconds vs. which trigger a 5-80 GB pull.
     let cached: Bool
+
+    /// What the model is for. Defaults to ``.chat`` so every existing
+    /// construction site keeps working; the image catalog tags ``.image``.
+    var kind: ModelKind = .chat
 
     var id: String { alias }
 }
@@ -325,7 +346,8 @@ enum ModelCatalog {
                 alias: row.alias,
                 hfRepo: row.hfRepo,
                 sizeOnDisk: row.size,
-                cached: row.hfRepo.map { cachedRepos.contains($0) } ?? false
+                cached: row.hfRepo.map { cachedRepos.contains($0) } ?? false,
+                kind: .image
             )
         }
     }
