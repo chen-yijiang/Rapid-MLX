@@ -200,7 +200,7 @@
     "Qwen/Qwen-Image": 57704572586,
     "Qwen/Qwen-Image-Edit-2509": 57720451254,
     "dhairyashil/FLUX.1-schnell-mflux-4bit": 9609155321,
-    "mlx-community/Qwen-Image-2512-4bit": 25907120736,
-    "ovedrive/Qwen-Image-Edit-2511-4bit": 16952630925
+    "OsaurusAI/Qwen-Image-mflux-4bit": 25907137020,
+    "OsaurusAI/Qwen-Image-Edit-mflux-q4": 27260308022
   }
 }

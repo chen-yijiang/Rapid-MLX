@@ -28,7 +28,7 @@ struct ImageCatalogTests {
       Alias                 Size       Kind        HF id
       ────────────────────────────
       flux-schnell-4bit     8.9 GiB    [image:gen] dhairyashil/FLUX.1-schnell-mflux-4bit
-      qwen-image-edit-4bit  15.8 GiB   [image:gen] ovedrive/Qwen-Image-Edit-2511-4bit
+      qwen-image-edit-4bit  25.4 GiB   [image:gen] OsaurusAI/Qwen-Image-Edit-mflux-q4
     """
 
     @Test("parseImageRows extracts only the [image:gen] rows")

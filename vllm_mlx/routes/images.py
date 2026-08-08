@@ -20,6 +20,14 @@ router = APIRouter()
 # unbounded body into memory before the size validators run.
 _MAX_EDIT_IMAGE_BYTES = 25 * 1024 * 1024
 
+# Default denoise steps for an instruction edit. Qwen-Image-Edit is a large,
+# non-distilled model (unlike the 4-step FLUX.1-schnell generator): its edit
+# structure needs ~20 steps to resolve, and — because output quality on the
+# 4-bit checkpoints is bounded by the quantized VAE rather than by step count —
+# pushing past this only costs wall-clock (≈1 min/step at the derived 1024²
+# canvas) without a visible gain. Callers can override via ``steps``.
+_DEFAULT_EDIT_STEPS = 20
+
 
 def _image_engine():
     """Return the loaded image engine or raise a 409 if this isn't an image server."""
@@ -131,14 +139,18 @@ async def create_image(request: ImageGenerationRequest = Body(...)):
     return {"created": int(time.time()), "data": data}
 
 
-def _generate_edit_one(engine, prompt, width, height, steps, seed, guidance,
+def _generate_edit_one(engine, prompt, steps, seed, guidance,
                        negative_prompt, image_path) -> bytes:
-    """Blocking single instruction-edit render — runs off the event loop."""
+    """Blocking single instruction-edit render — runs off the event loop.
+
+    No width/height is threaded: the edit family sizes its output canvas from
+    the input image (the engine passes ``None`` to mflux). Forcing a mismatched
+    size desyncs the conditioning latents and yields pure noise, so the request
+    ``size`` is accepted for OpenAI-API shape but deliberately not honored.
+    """
     return engine.generate(
         prompt=prompt,
-        width=width,
-        height=height,
-        num_inference_steps=steps if steps is not None else 4,
+        num_inference_steps=steps if steps is not None else _DEFAULT_EDIT_STEPS,
         seed=seed,
         guidance=guidance if guidance is not None else 4.0,
         negative_prompt=negative_prompt,
@@ -210,8 +222,13 @@ async def edit_image(
             detail={"error": {"message": "n must be between 1 and 4",
                               "type": "invalid_request_error", "param": "n"}},
         )
+    # ``size`` is accepted for OpenAI-API compatibility but the edit family
+    # derives its output canvas from the input image; a mismatched target size
+    # desyncs mflux's conditioning latents into pure noise. We still validate
+    # the value so a malformed ``size`` fails loud rather than being silently
+    # dropped, then discard it — the engine sizes the render from the image.
     try:
-        width, height = parse_image_size(size)
+        parse_image_size(size)
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
@@ -246,7 +263,7 @@ async def edit_image(
         for index in range(n):
             try:
                 png_bytes = await run_to_completion(
-                    _generate_edit_one, engine, prompt, width, height, steps,
+                    _generate_edit_one, engine, prompt, steps,
                     base_seed + index, guidance, negative_prompt, tmp_path,
                 )
             except ImageRuntimeError as exc:

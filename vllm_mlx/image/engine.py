@@ -163,13 +163,23 @@ class ImageGenerationEngine:
             model = self._ensure_loaded()
             try:
                 if self.is_edit:
+                    # Edit derives its output canvas from the input image and
+                    # must NOT be given an explicit width/height. mflux fixes the
+                    # VAE conditioning latents to a 1024²-area canvas of the input
+                    # aspect ratio (``_compute_dimensions``), while the denoised
+                    # latents use ``config.width/height``. Any mismatch between
+                    # the two — e.g. forcing 512×512 against 1024²-derived
+                    # conditioning — desyncs the RoPE position ids and the model
+                    # emits pure noise (a valid, correctly-sized PNG of static).
+                    # Passing ``None`` lets mflux size the target to match the
+                    # conditioning, exactly like its edit CLI.
                     result = model.generate_image(
                         seed=seed,
                         prompt=prompt,
                         image_paths=image_paths,
                         num_inference_steps=num_inference_steps,
-                        height=height,
-                        width=width,
+                        height=None,
+                        width=None,
                         guidance=guidance,
                         negative_prompt=negative_prompt,
                     )

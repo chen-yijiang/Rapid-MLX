@@ -1635,7 +1635,7 @@
     "min_memory_gb": 12
   },
   "qwen-image-4bit": {
-    "hf_path": "mlx-community/Qwen-Image-2512-4bit",
+    "hf_path": "OsaurusAI/Qwen-Image-mflux-4bit",
     "modality": "image-gen",
     "tool_call_parser": null,
     "reasoning_parser": null,
@@ -1647,7 +1647,7 @@
     "min_memory_gb": 32
   },
   "qwen-image-edit-4bit": {
-    "hf_path": "ovedrive/Qwen-Image-Edit-2511-4bit",
+    "hf_path": "OsaurusAI/Qwen-Image-Edit-mflux-q4",
     "modality": "image-gen",
     "tool_call_parser": null,
     "reasoning_parser": null,

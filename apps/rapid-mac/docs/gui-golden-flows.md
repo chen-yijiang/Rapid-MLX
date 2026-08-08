@@ -202,6 +202,29 @@ The switch between a text-to-image model (round 0) and an image-edit model
 (rounds 1+) reloads the sidecar — one model per process — so the flow also
 exercises the stop/start path, exactly as a chat model-switch does.
 
+### Model realities the UX has to design around
+
+Verified on an M2 Pro 32 GB with the 4-bit mflux checkpoints:
+
+* **Generate is fast, edit is not.** `flux-schnell-4bit` is step-distilled — a
+  512² image lands in ~27 s at 4 steps. `qwen-image-edit-4bit` is a large,
+  non-distilled 20B model and mflux fixes the edit canvas to a ~1024²-area
+  render, so each denoise step is ~1 min and a default 20-step edit is
+  **~20 minutes**. The edit round is a *batch* action on this hardware, not the
+  sub-second turnaround ChatGPT has; the compose bar must show a clearly
+  long-running, cancellable in-flight state and never imply instant results.
+* **Do not send a `size` on edits.** mflux derives the edit output canvas from
+  the input image (its VAE conditioning latents are pinned to a 1024²-area
+  grid). Forcing a mismatched `width`/`height` desyncs the RoPE position ids and
+  the model returns a valid-looking PNG of **pure noise**. The engine passes
+  `None` for edit dimensions and the route accepts `size` only for OpenAI-API
+  shape, then discards it. Round 1+ therefore inherits the round-0 framing.
+* **Edit quality is checkpoint-bound, not step-bound.** The q4 edit checkpoint
+  carries a persistent VAE speckle (40 steps looks the same as 20); a clean
+  edit needs a higher-precision repo (`OsaurusAI/Qwen-Image-Edit-mflux-q6` /
+  `-q8`), which costs proportionally more RAM/disk. Raising `steps` past ~20 on
+  q4 only burns wall-clock.
+
 The **model-vs-endpoint contract** is the load-bearing invariant here and is
 covered by pure Swift coverage rather than a live flow: a text-to-image alias
 must drive `/v1/images/generations` and an `*-image-edit` alias

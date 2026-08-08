@@ -64,11 +64,10 @@ def test_unknown_family_raises():
     [
         # ``<n>bit`` convention — the repos the -4bit aliases point at
         ("dhairyashil/FLUX.1-schnell-mflux-4bit", "flux-schnell"),
-        ("mlx-community/Qwen-Image-2512-4bit", "qwen-image"),
-        ("ovedrive/Qwen-Image-Edit-2511-4bit", "qwen-image-edit"),
+        ("OsaurusAI/Qwen-Image-mflux-4bit", "qwen-image"),
         ("filipstrand/Qwen-Image-mflux-6bit", "qwen-image"),
-        # ``q<n>`` convention
-        ("someorg/Qwen-Image-Edit-mflux-q4", "qwen-image-edit"),
+        # ``q<n>`` convention — the repo the qwen-image-edit-4bit alias points at
+        ("OsaurusAI/Qwen-Image-Edit-mflux-q4", "qwen-image-edit"),
     ],
 )
 def test_prequantized_repo_disables_onload_quantize(hf_path, family):
@@ -138,6 +137,32 @@ def test_edit_family_passes_image_paths_through():
     assert fake.calls[0]["image_paths"] == ["/tmp/in.png"]
 
 
+def test_edit_forces_none_dimensions_even_when_size_requested():
+    # Regression: mflux edit fixes the conditioning latents to a 1024²-area
+    # canvas of the input; forcing a mismatched width/height (e.g. 512×512)
+    # desyncs the RoPE ids and yields pure noise. The engine must hand mflux
+    # None so it sizes the target to match the conditioning.
+    engine = ImageGenerationEngine("Qwen/Qwen-Image-Edit-2509")
+    fake = _FakeModel()
+    engine._model = fake
+    engine.generate(
+        prompt="add a hat", image_paths=["/tmp/in.png"],
+        width=512, height=512, seed=3,
+    )
+    assert fake.calls[0]["width"] is None
+    assert fake.calls[0]["height"] is None
+
+
+def test_txt2img_family_honors_requested_dimensions():
+    # The noise trap is edit-only: text-to-image must still respect width/height.
+    engine = ImageGenerationEngine("Qwen/Qwen-Image")
+    fake = _FakeModel()
+    engine._model = fake
+    engine.generate(prompt="a cat", width=768, height=512, seed=3)
+    assert fake.calls[0]["width"] == 768
+    assert fake.calls[0]["height"] == 512
+
+
 def test_backend_failure_becomes_runtime_error():
     engine = ImageGenerationEngine("Qwen/Qwen-Image")
 
@@ -171,11 +196,17 @@ class _FakeImageEngine:
         self.is_edit = is_edit
         self.seeds = []
         self.image_paths_seen = []
+        self.dims_seen = []
+        self.steps_seen = []
 
-    def generate(self, *, prompt, width, height, num_inference_steps, seed,
-                 guidance, negative_prompt, image_paths=None):
+    def generate(self, *, prompt, num_inference_steps, seed, guidance,
+                 negative_prompt, width=None, height=None, image_paths=None):
+        # The edit route omits width/height (the engine derives them from the
+        # input image); the generations route always supplies them.
         self.seeds.append(seed)
         self.image_paths_seen.append(image_paths)
+        self.dims_seen.append((width, height))
+        self.steps_seen.append(num_inference_steps)
         buffer = io.BytesIO()
         Image.new("RGB", (4, 4), (10, 20, 30)).save(buffer, format="PNG")
         return buffer.getvalue()
@@ -305,6 +336,36 @@ def test_edit_happy_path_returns_b64_and_passes_image(client, monkeypatch):
     # The uploaded image was written to a temp file and passed to the engine.
     assert engine.image_paths_seen[0] is not None
     assert len(engine.image_paths_seen[0]) == 1
+    # Even though the request carried size=512x512, the edit route does NOT
+    # thread dimensions — the engine derives them from the input image.
+    assert engine.dims_seen[0] == (None, None)
+
+
+def test_edit_defaults_to_20_steps_when_unspecified(client, monkeypatch):
+    # FLUX.1-schnell generation defaults to 4 distilled steps, but a
+    # non-distilled edit needs ~20 to resolve structure; the edit route must
+    # not inherit the 4-step generation default.
+    engine = _FakeImageEngine(is_edit=True)
+    _patch_engine(monkeypatch, engine)
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "add a hat"},
+    )
+    assert resp.status_code == 200
+    assert engine.steps_seen == [20]
+
+
+def test_edit_honors_explicit_steps(client, monkeypatch):
+    engine = _FakeImageEngine(is_edit=True)
+    _patch_engine(monkeypatch, engine)
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "add a hat", "steps": "8"},
+    )
+    assert resp.status_code == 200
+    assert engine.steps_seen == [8]
 
 
 def test_edit_multi_offsets_seed(client, monkeypatch):
