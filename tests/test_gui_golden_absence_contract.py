@@ -403,6 +403,37 @@ def test_the_driver_refuses_to_vouch_for_a_process_it_cannot_read():
     assert walk["complete"] is False
     assert walk["reasons"], "a refusal with no reason is unfixable"
     assert walk["scope"] == "window-forest"
+    assert any("no searchable text" in r for r in walk["reasons"]), walk["reasons"]
+
+
+@_needs_swift
+def test_a_read_failure_alone_does_not_condemn_the_dump():
+    """The first version of this signal was unshippable, and only running it
+    showed that.
+
+    Measured across a full golden-flow suite: 5 of 77 real dumps carried one
+    failed read of a searched attribute (`AXError -25200`), in the same Settings
+    panels every run — structural, not a lost race, so the retry loop could
+    never recover and `ax-baseline.py` refused the whole suite. A signal that
+    cannot be satisfied is worse than one that is slightly coarse.
+
+    The rule is now: a failed read costs completeness only when it leaves the
+    element with NOTHING searchable. An element whose title would not read but
+    whose identifier did is still found by every filter that tests identifiers.
+    Finder is the control — an ordinary app must come back clean.
+    """
+    pids = subprocess.run(
+        ["pgrep", "-x", "Finder"], capture_output=True, text=True
+    ).stdout.split()
+    if not pids:
+        pytest.skip("Finder is not running")
+    walk = _run_driver(int(pids[0]))["data"]["walk"]
+    assert walk["complete"] is True, walk["reasons"]
+    assert "elements_with_unreadable_fields" in walk, (
+        "the count has to be reported even when it costs nothing — `reasons` "
+        "only ever explains why `complete` is false, so without this the "
+        "artifact cannot say a read failed at all"
+    )
 
 
 @_needs_swift

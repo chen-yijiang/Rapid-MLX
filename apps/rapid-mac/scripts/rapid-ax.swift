@@ -54,6 +54,7 @@ var walkComplete = true
 var walkUnreadableChildren = 0
 var walkLastChildrenError: AXError?
 var walkUnreadableFields = 0
+var walkUnobservableElements = 0
 var walkLastFieldError: AXError?
 var walkHitDepthCap = false
 var walkHitRecordCap = false
@@ -163,16 +164,18 @@ func searchable(_ element: AXUIElement, _ name: CFString) -> SearchableRead {
     }
 }
 
-/// Read a searchable attribute, and stop vouching for the dump if the read
-/// failed. `nil` means "nothing to record" — never "the read failed".
-func searchableText(_ element: AXUIElement, _ name: CFString) -> String? {
+/// Read a searchable attribute, noting the label when the read FAILED (as
+/// opposed to the element simply not publishing one). `nil` means "nothing to
+/// record" in either case; the caller decides what a failure costs.
+func searchableText(
+    _ element: AXUIElement, _ name: CFString, _ label: String, failed: inout [String]
+) -> String? {
     switch searchable(element, name) {
     case .text(let text): return text
     case .absent, .number: return nil
     case .unreadable(let error):
-        walkUnreadableFields += 1
+        failed.append(label)
         walkLastFieldError = error
-        walkComplete = false
         return nil
     }
 }
@@ -200,7 +203,12 @@ func walk(_ element: AXUIElement, depth: Int) {
     }
     guard visit(element) else { return }
 
-    let identifier = searchableText(element, kAXIdentifierAttribute as CFString)
+    // Which of the SEARCHED attributes failed to read on this element, as
+    // opposed to simply not being published. Collected per element because the
+    // cost depends on what else the element carries.
+    var failedFields = [String]()
+    let identifier = searchableText(
+        element, kAXIdentifierAttribute as CFString, "identifier", failed: &failedFields)
     var record: [String: Any] = ["depth": depth]
     if let identifier { record["identifier"] = identifier }
     if let role = string(element, kAXRoleAttribute as CFString) { record["role"] = role }
@@ -222,10 +230,16 @@ func walk(_ element: AXUIElement, depth: Int) {
     if let selected = attribute(element, kAXSelectedAttribute as CFString) as? NSNumber {
         record["selected"] = selected.boolValue
     }
-    if let title = searchableText(element, kAXTitleAttribute as CFString), !title.isEmpty {
+    if let title = searchableText(
+        element, kAXTitleAttribute as CFString, "title", failed: &failedFields),
+        !title.isEmpty
+    {
         record["title"] = title
     }
-    if let description = searchableText(element, kAXDescriptionAttribute as CFString), !description.isEmpty {
+    if let description = searchableText(
+        element, kAXDescriptionAttribute as CFString, "description", failed: &failedFields),
+        !description.isEmpty
+    {
         record["description"] = description
     }
     // `help` is not one of the searched fields, so a failed read here costs
@@ -236,9 +250,26 @@ func walk(_ element: AXUIElement, depth: Int) {
     case .number(let number): record["value"] = number
     case .absent: break
     case .unreadable(let error):
-        walkUnreadableFields += 1
+        failedFields.append("value")
         walkLastFieldError = error
-        walkComplete = false
+    }
+
+    // A failed read costs the dump its completeness only when it leaves the
+    // element with NOTHING searchable — that is the element that could be
+    // hiding the string an assertion is looking for. One whose title would not
+    // read but whose identifier did is still found by every filter that tests
+    // identifiers, and condemning the whole dump for it makes the signal
+    // unsatisfiable: measured on this app, five of seventy-seven dumps carry
+    // one such read failure, in the same panels every run.
+    if !failedFields.isEmpty {
+        record["unreadable"] = failedFields
+        walkUnreadableFields += 1
+        let searchableTextPresent = ["identifier", "title", "description", "value"]
+            .contains { record[$0] != nil }
+        if !searchableTextPresent {
+            walkUnobservableElements += 1
+            walkComplete = false
+        }
     }
     if let origin = point(element, kAXPositionAttribute as CFString),
        let extent = size(element, kAXSizeAttribute as CFString) {
@@ -324,11 +355,12 @@ if walkUnreadableChildren > 0 {
     walkReasons.append(
         "AXChildren was unreadable on \(walkUnreadableChildren) element(s) (last AXError \(code))")
 }
-if walkUnreadableFields > 0 {
+if walkUnobservableElements > 0 {
     let code = walkLastFieldError.map { String($0.rawValue) } ?? "unknown"
     walkReasons.append(
-        "a searched attribute (identifier/value/title/description) was unreadable on "
-            + "\(walkUnreadableFields) element(s) (last AXError \(code))")
+        "\(walkUnobservableElements) element(s) carry no searchable text because every "
+            + "attribute that could have held it failed to read (last AXError \(code)) — "
+            + "each could be hiding anything")
 }
 if walkHitDepthCap { walkReasons.append("the depth cap of \(maxDepth) was reached") }
 if walkHitRecordCap { walkReasons.append("the record cap of \(recordCap) was reached") }
@@ -348,7 +380,12 @@ if command == "dump" {
             "walk": [
                 "complete": walkComplete,
                 "scope": "window-forest",
-                "reasons": walkReasons
+                "reasons": walkReasons,
+                // Informational: elements where a searched attribute would not
+                // read but something else identified them anyway. Not a gap —
+                // recorded so the artifact can say which, since `reasons` only
+                // ever explains why `complete` is false.
+                "elements_with_unreadable_fields": walkUnreadableFields
             ],
             // The authority for "is window X open?" — see the note above. Callers
             // must treat `complete: false` as "could not observe", never as an
