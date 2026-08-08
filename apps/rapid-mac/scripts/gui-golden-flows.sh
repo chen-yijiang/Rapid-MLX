@@ -253,6 +253,78 @@ ax_window_present() {
     esac
 }
 
+# Does the element dump contain anything matching `filter`?
+#
+# Same three outcomes as ax_window_present, for the same reason: 0 = matched,
+# 1 = the dump is a complete observation and holds no match, 2 = could not
+# observe. A caller looking for something PRESENT can ignore the distinction —
+# a match proves itself. A caller proving something ABSENT cannot: the walk has
+# three silent ways to fall short of a full inventory (an AXChildren read that
+# failed, the depth cap, the record cap), and every one of them leaves
+# `success: true` with the subtree missing. `data.walk.complete` is the driver
+# saying whether it can vouch for `ui_elements` at all.
+ax_elements_match() {
+    local dump="$1" filter="$2" status
+    # `ui_elements` must be an array as well as vouched-for: `[]?` inside the
+    # filters below swallows a structural failure, so without this a malformed
+    # dump would read as a confident "absent".
+    jq -e '.success == true and .data.walk.complete == true
+           and (.data.ui_elements | type) == "array"' "$dump" >/dev/null 2>&1 || return 2
+    status=0
+    jq -e "$filter" "$dump" >/dev/null 2>&1 || status=$?
+    # jq exits 1 only for a well-formed query whose answer was false or empty;
+    # anything else (2 usage, 3 compile, 5 runtime error) is a broken query, not
+    # an answer, and must not be reported as "absent".
+    case "$status" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
+}
+
+# Prove that nothing in the app's accessibility tree matches `filter`, and
+# refuse to conclude anything from a dump that cannot support the claim.
+#
+# `[…] | length == 0` on its own is satisfied by never having looked, which is
+# how the guard against #1603 — eight video-generation aliases reaching the
+# picker and dead-ending after a 64 GB download — could go green without
+# observing the catalogue at all. An incomplete dump is usually a lost race, so
+# re-dump a few times before giving up; then fail loudly rather than issue a
+# clean bill of health that was not earned.
+assert_ax_absent() {
+    local dump="$1" filter="$2" present_message="$3" status=0 i
+    for ((i=0; i<20; i++)); do
+        if (( i > 0 )); then
+            sleep 0.25
+            # Stage the retry: a driver that cannot run must not truncate the
+            # evidence the caller already captured, which is also the only place
+            # the reason for giving up is written down.
+            if "$AX_DRIVER" dump "$APP_PID" > "$dump.retry" 2>/dev/null; then
+                mv "$dump.retry" "$dump"
+            fi
+            rm -f "$dump.retry"
+        fi
+        status=0
+        ax_elements_match "$dump" "$filter" || status=$?
+        if [[ "$status" != 2 ]]; then break; fi
+    done
+    case "$status" in
+        1) return 0 ;;
+        0) die "$present_message" ;;
+        *) die "no complete AX dump in 5s ($dump: $(walk_reasons "$dump")) — cannot rule out: $present_message" ;;
+    esac
+}
+
+# Why a dump cannot be trusted as an inventory, in the driver's own words —
+# never empty, because "it failed and I will not say why" is how a flake becomes
+# unfixable.
+walk_reasons() {
+    local reasons
+    reasons="$(jq -r '(.data.walk.reasons // []) | join("; ")' "$1" 2>/dev/null || true)"
+    [[ -n "$reasons" ]] || reasons="the dump could not be read at all"
+    printf '%s' "$reasons"
+}
+
 element_field() {
     local tree="$1" identifier="$2" field="$3"
     jq -r --arg id "$identifier" --arg field "$field" \
@@ -960,9 +1032,9 @@ flow_browse_all_destination() {
     fi
 
     wait_identifier Quickstart.BrowseAll "$OUT/ba-after.json"
-    jq -e '[.data.ui_elements[]? | select(.identifier == "Settings.BackToQuickstart")] | length == 0' \
-        "$OUT/ba-after.json" >/dev/null \
-        || die "Settings remained interactive after returning to setup"
+    assert_ax_absent "$OUT/ba-after.json" \
+        '[.data.ui_elements[]? | select(.identifier == "Settings.BackToQuickstart")] | length > 0' \
+        "Settings remained interactive after returning to setup"
     pb image --mode screen --screen-index 0 --path "$OUT/ba-after.png" --json \
         > "$OUT/ba-after-image.json"
     jq -e --arg id "$chosen" '.data.ui_elements[]? | select(.identifier == $id) | select(.selected == true)' \
@@ -980,22 +1052,26 @@ flow_catalog_integrity() {
     # again" forever, reachable AFTER downloading up to 64 GB (#1603). The
     # fake sidecar emits a `[video:gen]`-tagged row so this proves the FILTER,
     # not today's registry contents.
+    # Any surface at all: the alias could show up as a row identifier, a picker
+    # label, a menu title or an accessibility description, and all four are the
+    # bug.
+    local VIDEO_ALIAS_FILTER='[.data.ui_elements[]?
+        | select([(.identifier // ""), (.value // ""), (.title // ""), (.description // "")]
+                 | map(tostring) | join(" ") | test("fake-video-alias"))] | length > 0'
     start_persona catalog-integrity
     dismiss_first_run
     see_main "$OUT/catalog-main.json"
 
-    jq -e '[.data.ui_elements[]? | select([(.identifier // ""), (.value // ""), (.title // ""), (.description // "")] | map(tostring) | join(" ") | test("fake-video-alias"))] | length == 0' \
-        "$OUT/catalog-main.json" >/dev/null \
-        || die "a video-gen alias reached the chat surface"
+    assert_ax_absent "$OUT/catalog-main.json" "$VIDEO_ALIAS_FILTER" \
+        "a video-gen alias reached the chat surface"
 
     open_settings
     see_main "$OUT/catalog-settings.json"
     press "$OUT/catalog-settings.json" Settings.Category.modelManagement \
         "$OUT/catalog-open-mm.json"
     see_main "$OUT/catalog-model-management.json"
-    jq -e '[.data.ui_elements[]? | select([(.identifier // ""), (.value // ""), (.title // ""), (.description // "")] | map(tostring) | join(" ") | test("fake-video-alias"))] | length == 0' \
-        "$OUT/catalog-model-management.json" >/dev/null \
-        || die "a video-gen alias reached Model Management"
+    assert_ax_absent "$OUT/catalog-model-management.json" "$VIDEO_ALIAS_FILTER" \
+        "a video-gen alias reached Model Management"
     log "  no video-gen alias on either catalog surface"
     cleanup_persona
 }

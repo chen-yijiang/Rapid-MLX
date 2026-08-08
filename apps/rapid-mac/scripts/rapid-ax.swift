@@ -16,9 +16,24 @@ guard CommandLine.arguments.count >= 3,
 
 let command = CommandLine.arguments[1]
 let application = AXUIElementCreateApplication(pid)
+let maxDepth = 40
+let recordCap = 12_000
 var visited = Set<CFHashCode>()
 var records = [[String: Any]]()
 var match: AXUIElement?
+// The same contract as `windows.complete`, for the element array. A caller that
+// asserts something is ABSENT is reading `ui_elements` as an inventory, and the
+// walk has three silent ways to come up short of one: a child list it cannot
+// read, the depth cap, and the record cap. Each removes a subtree while leaving
+// `success: true`, so `length == 0` is satisfied by never having looked. Say so
+// instead. `complete: false` is not an error; it means "this dump cannot answer
+// a question about absence".
+var walkComplete = true
+var walkUnreadableChildren = 0
+var walkLastChildrenError: AXError?
+var walkHitDepthCap = false
+var walkHitRecordCap = false
+var walkRootReasons = [String]()
 // The window list is NOT a by-product of the tree walk, because every way the
 // walk can come up short is silent: it skips a root child whose AXRole read
 // failed, drops a title it could not read, and stops dead at the record cap.
@@ -64,8 +79,45 @@ func size(_ element: AXUIElement, _ name: CFString) -> CGSize? {
     return result
 }
 
+// A leaf and an element we failed to interrogate are the same shape to the
+// caller — both yield no children — but only one of them is an observation.
+// Most elements simply do not publish AXChildren; `attributeUnsupported` and
+// `noValue` are that, and nothing is missing from the dump because of them.
+// Every other error means there may be a subtree here that this dump does not
+// contain, and no assertion over `ui_elements` can rule anything out.
+enum ChildrenRead {
+    case children([AXUIElement])
+    case leaf
+    case unreadable(AXError)
+}
+
+func children(_ element: AXUIElement) -> ChildrenRead {
+    var value: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value)
+    switch status {
+    case .success:
+        // Success with a payload we cannot use is still a subtree we did not
+        // walk, so it counts against completeness rather than as a leaf.
+        guard let kids = value as? [AXUIElement] else { return .unreadable(.failure) }
+        return .children(kids)
+    case .attributeUnsupported, .noValue:
+        return .leaf
+    default:
+        return .unreadable(status)
+    }
+}
+
 func walk(_ element: AXUIElement, depth: Int) {
-    guard depth <= 40, records.count < 12_000 else { return }
+    guard depth <= maxDepth else {
+        walkHitDepthCap = true
+        walkComplete = false
+        return
+    }
+    guard records.count < recordCap else {
+        walkHitRecordCap = true
+        walkComplete = false
+        return
+    }
     let identity = CFHash(element)
     guard visited.insert(identity).inserted else { return }
 
@@ -114,14 +166,23 @@ func walk(_ element: AXUIElement, depth: Int) {
     // root owns as well. Traversing it captures unrelated macOS Recent Items in
     // artifacts and adds thousands of irrelevant nodes; golden flows only need
     // app windows, and sheets and popovers stay descendants of those.
-    let children: [AXUIElement]
+    let descendants: [AXUIElement]
     if depth == 0 {
-        children = windowElements
+        descendants = windowElements
     } else {
-        guard let kids = attribute(element, kAXChildrenAttribute as CFString) as? [AXUIElement] else { return }
-        children = kids
+        switch children(element) {
+        case .children(let kids):
+            descendants = kids
+        case .leaf:
+            return
+        case .unreadable(let error):
+            walkUnreadableChildren += 1
+            walkLastChildrenError = error
+            walkComplete = false
+            return
+        }
     }
-    for child in children {
+    for child in descendants {
         walk(child, depth: depth + 1)
     }
 }
@@ -129,16 +190,23 @@ func walk(_ element: AXUIElement, depth: Int) {
 // Enumerate the windows before walking, so the walk can be filtered against
 // the result. Every read that fails here marks the list incomplete instead of
 // quietly shortening it; a window we cannot name is still a window we saw.
+// The walk starts from this list, so a gap here is a gap in `ui_elements` too —
+// with one exception, called out below.
 if let rootChildren = attribute(application, kAXChildrenAttribute as CFString) as? [AXUIElement] {
     for child in rootChildren {
         guard let role = string(child, kAXRoleAttribute as CFString) else {
-            // We could not even establish whether this child is a window.
+            // We could not even establish whether this child is a window, so it
+            // is missing from both the window list and the element tree.
             windowListComplete = false
+            walkComplete = false
+            walkRootReasons.append("a top-level child's AXRole could not be read, so its subtree was skipped")
             continue
         }
         guard role == kAXWindowRole as String else { continue }
         // Recorded even when the title will not read: a window we cannot name
         // is still a window, and dropping it here would shorten the tree too.
+        // This is the exception — the element tree is whole, only the window
+        // list is short, so `walkComplete` is deliberately left alone.
         windowElements.append(child)
         guard let title = string(child, kAXTitleAttribute as CFString) else {
             windowListComplete = false
@@ -148,9 +216,23 @@ if let rootChildren = attribute(application, kAXChildrenAttribute as CFString) a
     }
 } else {
     windowListComplete = false
+    walkComplete = false
+    walkRootReasons.append("the application's AXChildren could not be read, so no window was walked")
 }
 
 walk(application, depth: 0)
+
+// Why the element array cannot be trusted as an inventory, in words, so the
+// harness log says what went wrong instead of only that something did. Empty
+// exactly when `walkComplete` is true.
+var walkReasons = walkRootReasons
+if walkUnreadableChildren > 0 {
+    let code = walkLastChildrenError.map { String($0.rawValue) } ?? "unknown"
+    walkReasons.append(
+        "AXChildren was unreadable on \(walkUnreadableChildren) element(s) (last AXError \(code))")
+}
+if walkHitDepthCap { walkReasons.append("the depth cap of \(maxDepth) was reached") }
+if walkHitRecordCap { walkReasons.append("the record cap of \(recordCap) was reached") }
 
 if command == "dump" {
     let payload: [String: Any] = [
@@ -158,6 +240,10 @@ if command == "dump" {
         "data": [
             "pid": pid,
             "ui_elements": records,
+            // Does `ui_elements` cover the whole tree? Only a caller asking
+            // whether something is ABSENT needs this; a match is self-proving,
+            // but "no match" from a clipped walk is not an observation at all.
+            "walk": ["complete": walkComplete, "reasons": walkReasons],
             // The authority for "is window X open?" — see the note above. Callers
             // must treat `complete: false` as "could not observe", never as an
             // answer in either direction.
