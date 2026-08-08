@@ -32,6 +32,7 @@ from __future__ import annotations
 import io
 import re
 import threading
+import time
 from pathlib import Path
 
 # A pre-quantized mflux repo carries a quant tag in its id — either the
@@ -52,6 +53,32 @@ _DEFAULT_QUANTIZE = 4
 
 class ImageRuntimeError(RuntimeError):
     """Safe, actionable generation error suitable for the public API."""
+
+
+class ImageGenerationCancelled(ImageRuntimeError):  # noqa: N818 — a cancel, not an error condition
+    """Raised when the user cancels an in-flight generation mid-denoise."""
+
+
+class _ProgressReporter:
+    """mflux in-loop callback that mirrors denoise progress onto the engine.
+
+    Diffusion has a fixed, known step count, so this yields a *true*
+    ``step / total`` signal (unlike an LLM token stream). Registered once per
+    loaded model; it also enforces cooperative cancellation by raising out of
+    the loop when the engine's cancel flag is set — the abort lands within one
+    step (a second or two), not after the whole render.
+    """
+
+    def __init__(self, engine: ImageGenerationEngine) -> None:
+        self._engine = engine
+
+    def call_in_loop(self, t, seed, prompt, latents, config, time_steps) -> None:  # noqa: ANN001
+        engine = self._engine
+        total = getattr(config, "num_inference_steps", 0) or engine._progress.get("total", 0)
+        engine._progress["step"] = int(t) + 1
+        engine._progress["total"] = int(total)
+        if engine._cancel:
+            raise ImageGenerationCancelled("Generation cancelled.")
 
 
 def _detect_family(model_name: str) -> str:
@@ -123,6 +150,14 @@ class ImageGenerationEngine:
         self._quantize = None if self._prequantized else quantize
         self._model = None
         self._lock = _PROCESS_GENERATION_LOCK
+        # Live denoise progress (single-flight under ``_lock``, so one snapshot
+        # is unambiguous). ``request_cancel`` flips ``_cancel``; the reporter
+        # reads it each step. ``_reporter`` is registered once per loaded model.
+        self._progress: dict[str, float | int | bool] = {
+            "running": False, "step": 0, "total": 0, "started_at": 0.0,
+        }
+        self._cancel = False
+        self._reporter = _ProgressReporter(self)
 
     def _build_model(self):
         """Instantiate the backing mflux model (import-lazy)."""
@@ -173,7 +208,29 @@ class ImageGenerationEngine:
                 raise ImageRuntimeError(
                     f"Failed to load image model '{self.model_name}': {exc}"
                 ) from exc
+            # Register the progress/cancel reporter on the model's mflux
+            # callback registry (present on every txt2img/edit variant).
+            registry = getattr(self._model, "callbacks", None)
+            if registry is not None and hasattr(registry, "register"):
+                registry.register(self._reporter)
         return self._model
+
+    def request_cancel(self) -> None:
+        """Ask an in-flight generation to stop at the next denoise step."""
+        self._cancel = True
+
+    def progress_snapshot(self) -> dict:
+        """A JSON-safe view of the current denoise progress (single-flight)."""
+        p = self._progress
+        started = float(p.get("started_at") or 0.0)
+        elapsed_ms = int((time.time() - started) * 1000) if started else 0
+        return {
+            "running": bool(p.get("running", False)),
+            "step": int(p.get("step", 0)),
+            "total": int(p.get("total", 0)),
+            "elapsed_ms": elapsed_ms,
+            "family": self.family,
+        }
 
     def generate(
         self,
@@ -205,6 +262,13 @@ class ImageGenerationEngine:
 
         with self._lock:
             model = self._ensure_loaded()
+            # Arm progress for this single-flight render (the lock guarantees no
+            # other generation is mutating the snapshot concurrently).
+            self._cancel = False
+            self._progress.update(
+                running=True, step=0, total=int(num_inference_steps),
+                started_at=time.time(),
+            )
             try:
                 if self.is_edit:
                     # Edit derives its output canvas from the input image and
@@ -238,9 +302,11 @@ class ImageGenerationEngine:
                         negative_prompt=negative_prompt,
                     )
             except ImageRuntimeError:
-                raise
+                raise  # cancellation + already-clean errors pass straight through
             except Exception as exc:  # noqa: BLE001 — surface a clean API error
                 raise ImageRuntimeError(f"Image generation failed: {exc}") from exc
+            finally:
+                self._progress["running"] = False
 
         return self._encode_png(result)
 

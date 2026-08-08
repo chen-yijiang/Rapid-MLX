@@ -121,12 +121,20 @@ async def create_image(request: ImageGenerationRequest = Body(...)):
     # vary; multi-image (``n``) requests offset per index off that base.
     base_seed = request.seed if request.seed is not None else int(time.time()) & 0x7FFFFFFF
 
+    from ..image.engine import ImageGenerationCancelled
+
     data = []
+    cancelled = False
     for index in range(request.n):
         try:
             png_bytes = await run_to_completion(
                 _generate_one, engine, request, base_seed + index
             )
+        except ImageGenerationCancelled:
+            # User stopped mid-render: return whatever finished rather than an
+            # error, so a cancelled multi-image batch keeps its earlier images.
+            cancelled = True
+            break
         except ImageRuntimeError as exc:
             raise HTTPException(
                 status_code=500,
@@ -140,7 +148,30 @@ async def create_image(request: ImageGenerationRequest = Body(...)):
             ) from exc
         data.append({"b64_json": base64.b64encode(png_bytes).decode("ascii")})
 
-    return {"created": int(time.time()), "data": data}
+    return {"created": int(time.time()), "data": data, "cancelled": cancelled}
+
+
+@router.get("/v1/images/progress")
+async def image_progress():
+    """Live denoise progress for the single in-flight render.
+
+    Diffusion has a fixed step count, so this is a *true* ``step / total``
+    signal the client polls to drive a determinate progress bar and ETA — no
+    streaming parser, and honest on slow hardware (the bar can't outrun the
+    real steps). Single-flight: the server renders one image at a time.
+    """
+    engine = _image_engine()
+    snap = engine.progress_snapshot() if hasattr(engine, "progress_snapshot") else {}
+    return snap
+
+
+@router.post("/v1/images/cancel")
+async def image_cancel():
+    """Ask the in-flight render to stop at the next denoise step."""
+    engine = _image_engine()
+    if hasattr(engine, "request_cancel"):
+        engine.request_cancel()
+    return {"ok": True}
 
 
 def _generate_edit_one(engine, prompt, steps, seed, guidance,

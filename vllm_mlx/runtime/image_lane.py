@@ -12,9 +12,18 @@ from __future__ import annotations
 import importlib.util
 import sys
 
-from ..image.engine import ImageGenerationEngine, ImageRuntimeError
+from ..image.engine import (
+    ImageGenerationCancelled,
+    ImageGenerationEngine,
+    ImageRuntimeError,
+)
 
-__all__ = ["ImageEngine", "ImageRuntimeError", "require_image_runtime_or_exit"]
+__all__ = [
+    "ImageEngine",
+    "ImageGenerationCancelled",
+    "ImageRuntimeError",
+    "require_image_runtime_or_exit",
+]
 
 
 def require_image_runtime_or_exit(model_name: str | None = None) -> None:
@@ -64,6 +73,14 @@ class ImageEngine:
     def default_steps(self) -> int:
         """Per-family default denoise steps when the request pins none."""
         return self._engine.default_steps
+
+    def request_cancel(self) -> None:
+        """Ask the in-flight generation to stop at the next denoise step."""
+        self._engine.request_cancel()
+
+    def progress_snapshot(self) -> dict:
+        """Live denoise progress for the single in-flight render."""
+        return self._engine.progress_snapshot()
 
     def generate(
         self,

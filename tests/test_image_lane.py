@@ -181,6 +181,46 @@ def test_txt2img_family_honors_requested_dimensions():
     assert fake.calls[0]["height"] == 512
 
 
+def test_progress_reporter_tracks_step_then_cancels():
+    from vllm_mlx.image.engine import ImageGenerationCancelled
+
+    engine = ImageGenerationEngine("Runpod/FLUX.2-klein-4B-mflux-4bit")
+    engine._progress.update(total=4)
+
+    class _Cfg:
+        num_inference_steps = 4
+
+    engine._reporter.call_in_loop(
+        t=0, seed=1, prompt="x", latents=None, config=_Cfg(), time_steps=None
+    )
+    assert engine._progress["step"] == 1
+    assert engine._progress["total"] == 4
+
+    # Once cancel is armed, the next step aborts the loop by raising.
+    engine.request_cancel()
+    with pytest.raises(ImageGenerationCancelled):
+        engine._reporter.call_in_loop(
+            t=1, seed=1, prompt="x", latents=None, config=_Cfg(), time_steps=None
+        )
+
+
+def test_progress_snapshot_shape():
+    engine = ImageGenerationEngine("Runpod/FLUX.2-klein-4B-mflux-4bit")
+    snap = engine.progress_snapshot()
+    assert set(snap) >= {"running", "step", "total", "elapsed_ms", "family"}
+    assert snap["running"] is False  # nothing running yet
+    assert snap["family"] == "flux2-klein"
+
+
+def test_generate_resets_progress_and_registers_reporter():
+    engine = ImageGenerationEngine("Runpod/FLUX.2-klein-4B-mflux-4bit")
+    engine._model = _FakeModel()  # no ``.callbacks`` — registration is skipped
+    engine.generate(prompt="a fox", num_inference_steps=4, seed=1)
+    # After a clean run the snapshot is idle but carries the step total.
+    assert engine._progress["running"] is False
+    assert engine._progress["total"] == 4
+
+
 def test_backend_failure_becomes_runtime_error():
     engine = ImageGenerationEngine("Qwen/Qwen-Image")
 
@@ -216,6 +256,14 @@ class _FakeImageEngine:
         self.image_paths_seen = []
         self.dims_seen = []
         self.steps_seen = []
+        self.cancelled = False
+
+    def progress_snapshot(self):
+        return {"running": True, "step": 2, "total": 4, "elapsed_ms": 1200,
+                "family": "flux2-klein"}
+
+    def request_cancel(self):
+        self.cancelled = True
 
     def generate(self, *, prompt, num_inference_steps, seed, guidance,
                  negative_prompt, width=None, height=None, image_paths=None):
@@ -296,6 +344,28 @@ def test_route_multi_image_offsets_seed(client, monkeypatch):
     assert resp.status_code == 200
     assert len(resp.json()["data"]) == 3
     assert engine.seeds == [100, 101, 102]  # per-index seed offset
+
+
+def test_progress_endpoint_returns_snapshot(client, monkeypatch):
+    _patch_engine(monkeypatch, _FakeImageEngine())
+    resp = client.get("/v1/images/progress")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["step"] == 2 and body["total"] == 4
+    assert body["family"] == "flux2-klein"
+
+
+def test_progress_endpoint_409_without_image_model(client, monkeypatch):
+    _patch_engine(monkeypatch, None)
+    assert client.get("/v1/images/progress").status_code == 409
+
+
+def test_cancel_endpoint_signals_engine(client, monkeypatch):
+    engine = _FakeImageEngine()
+    _patch_engine(monkeypatch, engine)
+    resp = client.post("/v1/images/cancel")
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    assert engine.cancelled is True
 
 
 @pytest.mark.parametrize("bad_size", ["1023x1024", "100x100", "3000x512", "oops"])
