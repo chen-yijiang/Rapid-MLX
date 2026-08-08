@@ -60,6 +60,11 @@ class ImageEngine:
     def family(self) -> str:
         return self._engine.family
 
+    @property
+    def default_steps(self) -> int:
+        """Per-family default denoise steps when the request pins none."""
+        return self._engine.default_steps
+
     def generate(
         self,
         *,

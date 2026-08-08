@@ -43,6 +43,10 @@ class _FakeModel:
 @pytest.mark.parametrize(
     "hf_path,expected_family,is_edit",
     [
+        # Fast tab defaults — the "klein" / "z-image" tokens must win even
+        # though the Klein repo id also contains "flux".
+        ("Runpod/FLUX.2-klein-4B-mflux-4bit", "flux2-klein", False),
+        ("filipstrand/Z-Image-Turbo-mflux-4bit", "z-image", False),
         ("black-forest-labs/FLUX.1-schnell", "flux-schnell", False),
         ("Qwen/Qwen-Image", "qwen-image", False),
         ("Qwen/Qwen-Image-Edit-2509", "qwen-image-edit", True),
@@ -54,6 +58,19 @@ def test_detect_family(hf_path, expected_family, is_edit):
     assert engine.is_edit is is_edit
 
 
+@pytest.mark.parametrize(
+    "hf_path,expected_default_steps",
+    [
+        ("Runpod/FLUX.2-klein-4B-mflux-4bit", 4),   # distilled turbo
+        ("filipstrand/Z-Image-Turbo-mflux-4bit", 8),  # turbo, 8-step sweet spot
+        ("black-forest-labs/FLUX.1-schnell", 4),
+        ("Qwen/Qwen-Image", 20),                    # non-distilled
+    ],
+)
+def test_default_steps_is_family_aware(hf_path, expected_default_steps):
+    assert ImageGenerationEngine(hf_path).default_steps == expected_default_steps
+
+
 def test_unknown_family_raises():
     with pytest.raises(ImageRuntimeError, match="Unsupported image model"):
         ImageGenerationEngine("stabilityai/some-unwired-model")
@@ -62,10 +79,11 @@ def test_unknown_family_raises():
 @pytest.mark.parametrize(
     "hf_path,family",
     [
-        # ``<n>bit`` convention — the repos the -4bit aliases point at
+        # ``<n>bit`` convention — the repos the fast-tab aliases point at
+        ("Runpod/FLUX.2-klein-4B-mflux-4bit", "flux2-klein"),
+        ("filipstrand/Z-Image-Turbo-mflux-4bit", "z-image"),
         ("dhairyashil/FLUX.1-schnell-mflux-4bit", "flux-schnell"),
         ("OsaurusAI/Qwen-Image-mflux-4bit", "qwen-image"),
-        ("filipstrand/Qwen-Image-mflux-6bit", "qwen-image"),
         # ``q<n>`` convention — the repo the qwen-image-edit-4bit alias points at
         ("OsaurusAI/Qwen-Image-Edit-mflux-q4", "qwen-image-edit"),
     ],

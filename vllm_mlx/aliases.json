@@ -1586,44 +1586,8 @@
     "suffix_decoding_tier": "unknown",
     "min_memory_gb": 24
   },
-  "flux-schnell": {
-    "hf_path": "black-forest-labs/FLUX.1-schnell",
-    "modality": "image-gen",
-    "tool_call_parser": null,
-    "reasoning_parser": null,
-    "is_hybrid": false,
-    "is_moe": false,
-    "supports_spec_decode": false,
-    "supports_dflash": false,
-    "suffix_decoding_tier": "unknown",
-    "min_memory_gb": 16
-  },
-  "qwen-image": {
-    "hf_path": "Qwen/Qwen-Image",
-    "modality": "image-gen",
-    "tool_call_parser": null,
-    "reasoning_parser": null,
-    "is_hybrid": false,
-    "is_moe": false,
-    "supports_spec_decode": false,
-    "supports_dflash": false,
-    "suffix_decoding_tier": "unknown",
-    "min_memory_gb": 24
-  },
-  "qwen-image-edit": {
-    "hf_path": "Qwen/Qwen-Image-Edit-2509",
-    "modality": "image-gen",
-    "tool_call_parser": null,
-    "reasoning_parser": null,
-    "is_hybrid": false,
-    "is_moe": false,
-    "supports_spec_decode": false,
-    "supports_dflash": false,
-    "suffix_decoding_tier": "unknown",
-    "min_memory_gb": 24
-  },
-  "flux-schnell-4bit": {
-    "hf_path": "dhairyashil/FLUX.1-schnell-mflux-4bit",
+  "flux2-klein-4b": {
+    "hf_path": "Runpod/FLUX.2-klein-4B-mflux-4bit",
     "modality": "image-gen",
     "tool_call_parser": null,
     "reasoning_parser": null,
@@ -1634,8 +1598,8 @@
     "suffix_decoding_tier": "unknown",
     "min_memory_gb": 12
   },
-  "qwen-image-4bit": {
-    "hf_path": "OsaurusAI/Qwen-Image-mflux-4bit",
+  "z-image-turbo": {
+    "hf_path": "filipstrand/Z-Image-Turbo-mflux-4bit",
     "modality": "image-gen",
     "tool_call_parser": null,
     "reasoning_parser": null,
@@ -1644,19 +1608,7 @@
     "supports_spec_decode": false,
     "supports_dflash": false,
     "suffix_decoding_tier": "unknown",
-    "min_memory_gb": 32
-  },
-  "qwen-image-edit-4bit": {
-    "hf_path": "OsaurusAI/Qwen-Image-Edit-mflux-q4",
-    "modality": "image-gen",
-    "tool_call_parser": null,
-    "reasoning_parser": null,
-    "is_hybrid": false,
-    "is_moe": false,
-    "supports_spec_decode": false,
-    "supports_dflash": false,
-    "suffix_decoding_tier": "unknown",
-    "min_memory_gb": 24
+    "min_memory_gb": 16
   },
   "embeddinggemma-300m-6bit": {
     "hf_path": "mlx-community/embeddinggemma-300m-6bit",

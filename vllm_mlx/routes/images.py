@@ -55,11 +55,15 @@ def _image_engine():
 def _generate_one(engine, request: ImageGenerationRequest, seed: int) -> bytes:
     """Blocking single-image render — runs off the event loop."""
     width, height = request.dimensions()
+    # Step count is family-aware: a distilled model (Klein/schnell, 4 steps)
+    # would waste wall-clock at 20 and a non-distilled one (Qwen, 20) would be
+    # noise at 4. The engine advertises the right default per family.
+    default_steps = getattr(engine, "default_steps", 4)
     return engine.generate(
         prompt=request.prompt,
         width=width,
         height=height,
-        num_inference_steps=request.steps if request.steps is not None else 4,
+        num_inference_steps=request.steps if request.steps is not None else default_steps,
         seed=seed,
         guidance=request.guidance if request.guidance is not None else 4.0,
         negative_prompt=request.negative_prompt,

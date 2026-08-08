@@ -10,9 +10,17 @@ the diffusion pipeline and weight loading.
 Only Apache-2.0-licensed families are wired here so the whole surface stays
 commercially clean:
 
-* ``flux-schnell``     — text→image (``black-forest-labs/FLUX.1-schnell``)
+* ``flux2-klein``      — text→image (``FLUX.2-klein-4B``), 4B/4-step, the fast
+  default: ~3 s @ 512² / ~10 s @ 1024² on an M3 Ultra, ~4 GB at 4-bit
+* ``z-image``          — text→image (``Z-Image-Turbo``), 6B/8-step, the quality
+  option (SOTA open-source photorealism), ~5.5 GB at 4-bit
+* ``flux-schnell``     — text→image (``black-forest-labs/FLUX.1-schnell``), 12B
 * ``qwen-image``       — text→image (``Qwen/Qwen-Image``), strongest text-in-image
 * ``qwen-image-edit``  — instruction edit (``Qwen/Qwen-Image-Edit-2509``)
+
+``flux2-klein`` and ``z-image`` supersede the older/larger families for the
+interactive tab: Klein is ~3× faster than schnell/z-image at the same
+resolution while staying smaller, and Qwen-Image (20B) is too slow to feature.
 
 The mflux model is loaded lazily on the first ``generate`` call: the canonical
 repos ship full-precision weights that mflux quantizes at load, so pulling them
@@ -49,6 +57,13 @@ class ImageRuntimeError(RuntimeError):
 def _detect_family(model_name: str) -> str:
     """Map an alias hf_path (or local dir) to a supported mflux family."""
     name = (model_name or "").casefold()
+    # Klein first — its repos ("FLUX.2-klein-4B-mflux-4bit") also contain
+    # "flux", so the distinctive "klein" / "flux2" token must win before the
+    # generic FLUX.1 checks below.
+    if "klein" in name or "flux2" in name or "flux.2" in name:
+        return "flux2-klein"
+    if "z-image" in name or "z_image" in name or "zimage" in name:
+        return "z-image"
     if "qwen-image-edit" in name or "qwen_image_edit" in name:
         return "qwen-image-edit"
     if "qwen-image" in name or "qwen_image" in name:
@@ -59,8 +74,20 @@ def _detect_family(model_name: str) -> str:
         return "flux-dev"
     raise ImageRuntimeError(
         f"Unsupported image model '{model_name}'. Supported families: "
-        "flux-schnell, qwen-image, qwen-image-edit."
+        "flux2-klein, z-image, flux-schnell, qwen-image, qwen-image-edit."
     )
+
+
+# Per-family default denoise steps when the request pins none. Distilled/turbo
+# models converge in a handful of steps; a non-distilled model needs many more.
+_DEFAULT_STEPS_BY_FAMILY = {
+    "flux2-klein": 4,   # distilled turbo
+    "z-image": 8,       # turbo, but 8 is the sweet spot for its quality
+    "flux-schnell": 4,  # distilled
+    "flux-dev": 20,     # non-distilled
+    "qwen-image": 20,   # non-distilled 20B
+    "qwen-image-edit": 20,
+}
 
 
 def _looks_like_prequantized(model_name: str) -> bool:
@@ -89,6 +116,7 @@ class ImageGenerationEngine:
         self.model_name = model_name
         self.family = _detect_family(model_name)
         self.is_edit = self.family == "qwen-image-edit"
+        self.default_steps = _DEFAULT_STEPS_BY_FAMILY.get(self.family, 4)
         self._prequantized = _looks_like_prequantized(model_name)
         # ``None`` when the repo is already quantized — passing a quantize width
         # for a pre-quantized checkpoint makes mflux re-quantize and error.
@@ -105,6 +133,22 @@ class ImageGenerationEngine:
         # so mflux downloads the official weights and quantizes on load.
         model_path = self.model_name if self._prequantized else None
 
+        if self.family == "flux2-klein":
+            from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
+
+            return Flux2Klein(
+                quantize=self._quantize,
+                model_path=model_path,
+                model_config=ModelConfig.flux2_klein_4b(),
+            )
+        if self.family == "z-image":
+            from mflux.models.z_image.variants.z_image import ZImage
+
+            return ZImage(
+                quantize=self._quantize,
+                model_path=model_path,
+                model_config=ModelConfig.z_image_turbo(),
+            )
         if self.family == "qwen-image-edit":
             from mflux.models.qwen.variants.edit.qwen_image_edit import QwenImageEdit
 

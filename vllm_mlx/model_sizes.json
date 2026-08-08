@@ -196,11 +196,7 @@
     "unsloth/Qwen3.6-27B-UD-MLX-4bit": 26210992727,
     "unsloth/Qwen3.6-27B-UD-MLX-6bit": 30522606211,
     "unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit": 21655301364,
-    "black-forest-labs/FLUX.1-schnell": 57843734078,
-    "Qwen/Qwen-Image": 57704572586,
-    "Qwen/Qwen-Image-Edit-2509": 57720451254,
-    "dhairyashil/FLUX.1-schnell-mflux-4bit": 9609155321,
-    "OsaurusAI/Qwen-Image-mflux-4bit": 25907137020,
-    "OsaurusAI/Qwen-Image-Edit-mflux-q4": 27260308022
+    "Runpod/FLUX.2-klein-4B-mflux-4bit": 4617089843,
+    "filipstrand/Z-Image-Turbo-mflux-4bit": 5905580032
   }
 }

@@ -27,8 +27,8 @@ struct ImageCatalogTests {
       ────────────────────────────
       Alias                 Size       Kind        HF id
       ────────────────────────────
-      flux-schnell-4bit     8.9 GiB    [image:gen] dhairyashil/FLUX.1-schnell-mflux-4bit
-      qwen-image-edit-4bit  25.4 GiB   [image:gen] OsaurusAI/Qwen-Image-Edit-mflux-q4
+      flux2-klein-4b        4.3 GiB    [image:gen] Runpod/FLUX.2-klein-4B-mflux-4bit
+      z-image-turbo         5.5 GiB    [image:gen] filipstrand/Z-Image-Turbo-mflux-4bit
     """
 
     @Test("parseImageRows extracts only the [image:gen] rows")
@@ -37,22 +37,22 @@ struct ImageCatalogTests {
         #expect(rows.count == 2)
 
         let aliases = rows.map(\.alias)
-        #expect(aliases.contains("flux-schnell-4bit"))
-        #expect(aliases.contains("qwen-image-edit-4bit"))
+        #expect(aliases.contains("flux2-klein-4b"))
+        #expect(aliases.contains("z-image-turbo"))
         // No chat / video alias leaks in.
         #expect(!aliases.contains("qwen3.6-27b-4bit"))
         #expect(!aliases.contains("ltx-2.3-mlx-q4"))
 
-        let flux = rows.first { $0.alias == "flux-schnell-4bit" }
-        #expect(flux?.hfRepo == "dhairyashil/FLUX.1-schnell-mflux-4bit")
-        #expect(flux?.size == "8.9 GiB")
+        let klein = rows.first { $0.alias == "flux2-klein-4b" }
+        #expect(klein?.hfRepo == "Runpod/FLUX.2-klein-4B-mflux-4bit")
+        #expect(klein?.size == "4.3 GiB")
     }
 
     @Test("[image:gen] rows are excluded from the chat catalog")
     func imageRowsExcludedFromChat() {
         // hasNonChatKindTag now drops image alongside audio/video.
         #expect(ModelCatalog.hasNonChatKindTag(
-            "flux-schnell-4bit  8.9 GiB  [image:gen] dhairyashil/FLUX.1-schnell-mflux-4bit"))
+            "flux2-klein-4b  4.3 GiB  [image:gen] Runpod/FLUX.2-klein-4B-mflux-4bit"))
         #expect(ModelCatalog.hasNonChatKindTag(
             "ltx-2.3-mlx-q4  24.0 GiB  [video:gen] repo/ltx"))
         // A plain chat row is not dropped.
@@ -61,7 +61,7 @@ struct ImageCatalogTests {
 
         // The chat parser drops the image alias entirely.
         let excluded = ModelCatalog.parseExcludedAliases(Self.sample)
-        #expect(excluded.contains("flux-schnell-4bit"))
-        #expect(excluded.contains("qwen-image-edit-4bit"))
+        #expect(excluded.contains("flux2-klein-4b"))
+        #expect(excluded.contains("z-image-turbo"))
     }
 }
