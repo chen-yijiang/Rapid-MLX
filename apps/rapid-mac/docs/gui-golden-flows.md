@@ -21,6 +21,14 @@ covered, and each one names the defect it would have caught:
 7. `update-state` — Settings → App must name the version the app actually is.
 8. `no-dead-controls` — every Settings panel must expose controls of its own.
 9. `catalog-integrity` — a model that cannot chat must never be offered as one.
+   Now covers **image-gen** aliases too: `rapid-mlx models` tags them
+   `[image:gen]` in their own section (mirroring `[video:gen]`), and the
+   chat catalog's `hasNonChatKindTag` drops `image` alongside `audio`/`video`,
+   so a 24 GB FLUX/Qwen-Image checkpoint can never surface in the chat picker.
+
+10. `image-conversation` — the Images tab holds a multi-round image chat:
+    generate, then edit the result, then edit *that* result (see **Image
+    generation** below).
 
 The distinction matters. A journey answers *"can someone do this?"*; an
 invariant answers *"is this still true everywhere?"*. The three defects below
@@ -149,6 +157,62 @@ the original live-memory snapshot against the fallback footprint and exposes
 85% danger line. Under heavier pressure the button is absent, avoiding a false
 promise or a warning loop; **Cancel** still returns to the chooser where the
 low-memory category remains visible.
+
+## Image generation
+
+The Images tab is a dedicated text→image / image-edit surface, reached from
+`Sidebar.Images`. It is decoupled from chat on purpose: rapid-mlx serves **one
+model per process**, so an image-gen alias (e.g. `flux-schnell-4bit`) cannot be
+loaded alongside the chat LLM — selecting one reloads the sidecar, exactly the
+stop/start path a chat model-switch already takes.
+
+**The golden flow is the multi-round conversation, not a single generate.**
+The product this tab imitates is ChatGPT's image loop: make a picture, then
+*keep talking to it* — "put a hat on the dog", "now change the background",
+"make it night" — each turn editing the **previous turn's output**, not the
+original. `image-conversation` walks that N-round chain through AX identifiers,
+no real diffusion weights required (the fake sidecar answers `/v1/images/*`
+with a 1×1 PNG). Demonstrated live with real weights below.
+
+1. open the Images tab via `Sidebar.Images`; assert `Images.EmptyState` is
+   present (no results yet) and its copy invites a prompt + model;
+2. pick an image model in `Images.ModelPicker` (the list is the `[image:gen]`
+   rows from `rapid-mlx models`, never a chat alias — see `catalog-integrity`);
+   optionally set `Images.SizePicker`;
+3. **Round 0 — generate.** Type into `Images.Prompt`, press `Images.Generate`;
+   assert the button shows the in-flight state while the request is open, then
+   that a result card appears under `Images.Gallery` (and `Images.EmptyState`
+   is gone);
+4. **Round 1 — edit that result.** Press `Images.Result.Edit` on the card;
+   assert the compose bar enters edit mode (`Images.CancelEdit` present, the
+   button relabels to **Edit**). Type an instruction, press `Images.Generate`,
+   assert a second card appears tagged **edited**;
+5. **Round 2+ — keep editing the newest result.** Press `Images.Result.Edit`
+   on the *edited* card and run another instruction. This is the load-bearing
+   assertion: the edit source is the previous **output**, so each round
+   compounds on the last (`ImageGenViewModel.beginEdit` re-stages whichever
+   card the user points at, `runEdit` feeds its bytes back as the next
+   `image_paths`). The chain has no fixed length — the test asserts three
+   distinct cards, each derived from the one before.
+6. `Images.Result.Save` opens the standard save panel on any card (not
+   asserted through the panel itself — a modal `NSSavePanel` is out of AX
+   scope, like every other file-picker in the app).
+
+The switch between a text-to-image model (round 0) and an image-edit model
+(rounds 1+) reloads the sidecar — one model per process — so the flow also
+exercises the stop/start path, exactly as a chat model-switch does.
+
+The **model-vs-endpoint contract** is the load-bearing invariant here and is
+covered by pure Swift coverage rather than a live flow: a text-to-image alias
+must drive `/v1/images/generations` and an `*-image-edit` alias
+`/v1/images/edits`; the server answers the wrong pairing with a 409 rather than
+a silent wrong result (`ImageGenViewModel.selectedIsEditModel` gates which one
+the compose bar offers, and the routes enforce it server-side).
+
+> Status: the AX identifiers and states above are **defined and shipped** in
+> product code; the runnable `gui-golden-flows.sh --flow image-conversation`
+> journey and its structural baseline are the next increment (added the same way
+> every other flow was — identifiers first, then the scripted journey).
 
 ## Run
 
