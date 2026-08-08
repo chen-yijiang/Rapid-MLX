@@ -74,6 +74,7 @@ struct ImageClient {
     private struct ImageResponse: Decodable {
         struct Item: Decodable { let b64_json: String? }
         let data: [Item]
+        let cancelled: Bool?
     }
 
     private struct ErrorEnvelope: Decodable {
@@ -176,8 +177,13 @@ struct ImageClient {
                 .error?.message
             throw ImageClientError.http(status: http.statusCode, message: message)
         }
-        guard let decoded = try? JSONDecoder().decode(ImageResponse.self, from: data),
-              !decoded.data.isEmpty else {
+        guard let decoded = try? JSONDecoder().decode(ImageResponse.self, from: data) else {
+            throw ImageClientError.emptyResponse
+        }
+        // A cancel that lands before the first image finishes returns an empty,
+        // non-error batch — surface it as "no images" rather than a failure.
+        if decoded.data.isEmpty {
+            if decoded.cancelled == true { return [] }
             throw ImageClientError.emptyResponse
         }
         let blobs = decoded.data.compactMap { item -> Data? in
@@ -186,6 +192,52 @@ struct ImageClient {
         }
         guard !blobs.isEmpty else { throw ImageClientError.emptyResponse }
         return blobs
+    }
+
+    // MARK: - Progress & cancel
+
+    /// A live snapshot of the single in-flight render. `running` is false
+    /// during the cold model-load phase (before the denoise loop starts) and
+    /// after it finishes; `step`/`total` drive a determinate progress bar.
+    struct ImageProgress: Decodable, Sendable {
+        let running: Bool
+        let step: Int
+        let total: Int
+        let elapsedMs: Int
+        enum CodingKeys: String, CodingKey {
+            case running, step, total, elapsedMs = "elapsed_ms"
+        }
+        /// Fraction complete in [0, 1], or nil when the step total is unknown.
+        var fraction: Double? {
+            total > 0 ? min(1, Double(step) / Double(total)) : nil
+        }
+    }
+
+    /// ``GET /v1/images/progress`` — polled during a render. Returns nil on any
+    /// transport hiccup so the caller simply keeps its last known state.
+    func fetchProgress(port: Int, bearer: String?) async -> ImageProgress? {
+        let url = Self.loopbackURL(port: port).appendingPathComponent("v1/images/progress")
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 5
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyBearer(&req, bearer)
+        guard let (data, response) = try? await session.data(for: req),
+              let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              let progress = try? JSONDecoder().decode(ImageProgress.self, from: data)
+        else { return nil }
+        return progress
+    }
+
+    /// ``POST /v1/images/cancel`` — best-effort; the render stops at its next
+    /// denoise step and its in-flight ``generate`` returns the finished images.
+    func cancel(port: Int, bearer: String?) async {
+        let url = Self.loopbackURL(port: port).appendingPathComponent("v1/images/cancel")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 5
+        applyBearer(&req, bearer)
+        _ = try? await session.data(for: req)
     }
 
     /// Assemble a multipart/form-data body from text fields + one file part.

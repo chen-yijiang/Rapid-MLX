@@ -1,132 +1,296 @@
 import AppKit
 import SwiftUI
 
-/// The Images tab — a dedicated text→image / image-edit surface, decoupled
-/// from chat (rapid-mlx serves one model per process, so image generation
-/// runs against an image-gen alias rather than the chat model). Layout
-/// mirrors ``ChatView``: a results area on top, a compose bar on the bottom.
+/// The Images tab — a local text→image surface designed around three jobs:
+/// get a good image with the least friction, riff on it, and never feel stuck
+/// during a 10–40 s render. Layout: a Fast/Best quality bar, a big focal stage
+/// that shows the render's live step progress, a session filmstrip, and a
+/// prompt composer with one-tap starters.
 struct ImagesView: View {
     @Bindable var viewModel: ImageGenViewModel
     @Bindable var server: ServerManager
 
-    /// Curated output sizes. Kept small (all multiples of 16, within the
-    /// engine's 256–2048 bounds) so the picker can't produce a 400.
-    private let sizeOptions = ["512x512", "768x768", "1024x1024", "1024x768", "768x1024"]
-
     var body: some View {
         VStack(spacing: 0) {
-            gallery
+            qualityBar
             Divider()
-            composeBar
+            stageAndHistory
+            Divider()
+            composer
         }
         .background(RapidTheme.surfaceCanvas)
         .task { await viewModel.refreshCatalog() }
     }
 
-    // MARK: - Gallery
+    // MARK: - Quality bar
 
-    @ViewBuilder
-    private var gallery: some View {
-        if viewModel.results.isEmpty {
-            EmptyState(
-                symbol: "photo.on.rectangle.angled",
-                title: "Generate an image",
-                message: "Describe what you want to see, pick an image model, and press Generate.",
-                hint: viewModel.imageModels.isEmpty && viewModel.catalogLoaded
-                    ? "No image models found — install one from the model list."
-                    : nil
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .accessibilityIdentifier("Images.EmptyState")
-        } else {
-            ScrollView {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 220), spacing: 16)],
-                    spacing: 16
-                ) {
-                    ForEach(viewModel.results) { image in
-                        resultCard(image)
-                    }
-                }
-                .padding(16)
+    private var qualityBar: some View {
+        HStack(spacing: 12) {
+            ForEach(ImageGenViewModel.Quality.allCases) { q in
+                qualityChip(q)
             }
-            .accessibilityIdentifier("Images.Gallery")
+            Spacer()
+            if let active = viewModel.activeImage, !viewModel.isGenerating {
+                Button {
+                    save(active)
+                } label: {
+                    Label("Save", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.rapidSecondary)
+                .accessibilityIdentifier("Images.Result.Save")
+            }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(RapidTheme.surfaceSidebar)
     }
 
-    private func resultCard(_ image: GeneratedImage) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let nsImage = NSImage(data: image.pngData) {
+    private func qualityChip(_ q: ImageGenViewModel.Quality) -> some View {
+        let selected = viewModel.quality == q
+        return Button {
+            viewModel.setQuality(q)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: q.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(q.title).font(.system(size: 13, weight: .semibold))
+                    Text("\(q.subtitle) · \(q.etaHint)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(selected ? Color.black.opacity(0.65) : .secondary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(selected ? RapidTheme.brandAmber : RapidTheme.card)
+            .foregroundStyle(selected ? Color.black : Color.primary)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(RapidTheme.hairline, lineWidth: selected ? 0 : 1)
+            )
+            .opacity(viewModel.catalogLoaded && !viewModel.hasModel(for: q) ? 0.45 : 1)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("Images.Quality.\(q.title)")
+    }
+
+    // MARK: - Stage + history
+
+    private var stageAndHistory: some View {
+        VStack(spacing: 12) {
+            stage
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if !viewModel.results.isEmpty {
+                filmstrip
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var stage: some View {
+        ZStack {
+            if let active = viewModel.activeImage, let nsImage = NSImage(data: active.pngData) {
                 Image(nsImage: nsImage)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(RapidTheme.hairline, lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 14).stroke(RapidTheme.hairline, lineWidth: 1)
                     )
+                    .accessibilityIdentifier("Images.Stage")
+            } else if !viewModel.isGenerating {
+                emptyStage
             }
-            Text(image.prompt)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-            HStack(spacing: 8) {
-                Button("Edit") { viewModel.beginEdit(image) }
-                    .buttonStyle(.rapidSecondary)
-                    .accessibilityIdentifier("Images.Result.Edit")
-                Button("Save") { save(image) }
-                    .buttonStyle(.rapidSecondary)
-                    .accessibilityIdentifier("Images.Result.Save")
-                Spacer()
-                if image.isEdit {
-                    Text("edited")
-                        .font(.caption2)
-                        .foregroundStyle(RapidTheme.brandAmber)
-                }
+
+            if viewModel.isGenerating {
+                progressHUD
+                    .transition(.opacity)
             }
         }
-        .padding(10)
-        .background(RapidTheme.card)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: - Compose bar
+    private var emptyStage: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text("Type a thought below and press Generate.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Text(noModelHint ?? "Runs entirely on this Mac — private, offline, unlimited.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .multilineTextAlignment(.center)
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("Images.EmptyState")
+    }
 
-    private var composeBar: some View {
-        VStack(spacing: 8) {
-            if viewModel.editSource != nil {
-                editingBanner
+    private var noModelHint: String? {
+        guard viewModel.catalogLoaded, viewModel.imageModels.isEmpty else { return nil }
+        return "No image models found — install one from the model list."
+    }
+
+    // MARK: - Progress HUD (the wait, designed)
+
+    private var progressHUD: some View {
+        // A live clock that keeps moving even during the cold model-load phase.
+        TimelineView(.periodic(from: .now, by: 0.1)) { context in
+            let elapsed = viewModel.genStartedAt.map { context.date.timeIntervalSince($0) } ?? 0
+            VStack {
+                Spacer()
+                VStack(alignment: .leading, spacing: 10) {
+                    if viewModel.phase == .denoising, let p = viewModel.progress {
+                        denoiseBody(p, elapsed: elapsed)
+                    } else {
+                        preparingBody(elapsed: elapsed)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
             }
+            .padding(2)
+        }
+    }
+
+    private func preparingBody(elapsed: TimeInterval) -> some View {
+        HStack(spacing: 12) {
+            ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(viewModel.cancelling ? "Stopping…" : "Warming up \(viewModel.quality.subtitle)…")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("First run loads the model — this only happens once.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            clock(elapsed)
+            cancelButton
+        }
+    }
+
+    private func denoiseBody(_ p: ImageClient.ImageProgress, elapsed: TimeInterval) -> some View {
+        let total = max(p.total, viewModel.estimatedSteps)
+        let fraction = total > 0 ? min(1, Double(p.step) / Double(total)) : 0
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text(viewModel.cancelling
+                     ? "Stopping…"
+                     : "Step \(max(1, p.step)) / \(total) · denoising")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                clock(elapsed)
+                cancelButton
+            }
+            ProgressBar(fraction: fraction)
+                .frame(height: 6)
+            if let eta = etaText(step: p.step, total: total, elapsed: elapsed) {
+                Text(eta).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func clock(_ elapsed: TimeInterval) -> some View {
+        Text(String(format: "%.1fs", max(0, elapsed)))
+            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            .foregroundStyle(.secondary)
+    }
+
+    private var cancelButton: some View {
+        Button {
+            viewModel.cancel()
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(.plain)
+        .background(Color.primary.opacity(0.08))
+        .clipShape(Circle())
+        .disabled(viewModel.cancelling)
+        .help("Cancel")
+        .accessibilityIdentifier("Images.Cancel")
+    }
+
+    /// ETA from uniform step time; nil until there's a step to extrapolate from.
+    private func etaText(step: Int, total: Int, elapsed: TimeInterval) -> String? {
+        guard step > 0, total > step, elapsed > 0 else { return nil }
+        let perStep = elapsed / Double(step)
+        let remaining = perStep * Double(total - step)
+        return "~\(Int(remaining.rounded()))s left"
+    }
+
+    // MARK: - Filmstrip
+
+    private var filmstrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(viewModel.results) { image in
+                    filmstripThumb(image)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        .frame(height: 64)
+        .accessibilityIdentifier("Images.Gallery")
+    }
+
+    private func filmstripThumb(_ image: GeneratedImage) -> some View {
+        let selected = viewModel.activeImage?.id == image.id
+        return Button {
+            viewModel.select(image)
+        } label: {
+            Group {
+                if let nsImage = NSImage(data: image.pngData) {
+                    Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    Rectangle().fill(RapidTheme.card)
+                }
+            }
+            .frame(width: 56, height: 56)
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(selected ? RapidTheme.brandAmber : RapidTheme.hairline,
+                            lineWidth: selected ? 2 : 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Composer
+
+    private var composer: some View {
+        VStack(spacing: 10) {
             if let error = viewModel.errorMessage {
                 InlineNotice(message: error, tone: .error)
             }
-            HStack(spacing: 12) {
-                modelPicker
-                sizePicker
-                Spacer()
+            if viewModel.prompt.isEmpty {
+                starters
             }
-            HStack(spacing: 10) {
-                TextField(
-                    viewModel.editSource != nil
-                        ? "Describe the change…"
-                        : "Describe the image…",
-                    text: $viewModel.prompt,
-                    axis: .vertical
-                )
-                .textFieldStyle(.plain)
-                .lineLimit(1...4)
-                .padding(10)
-                .background(RapidTheme.composePill)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .accessibilityIdentifier("Images.Prompt")
-                .onSubmit { runSubmit() }
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("Describe the image you want…", text: $viewModel.prompt, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...4)
+                    .padding(10)
+                    .background(RapidTheme.composePill)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .accessibilityIdentifier("Images.Prompt")
+                    .onSubmit(runSubmit)
+
+                aspectPicker
 
                 Button(action: runSubmit) {
                     if viewModel.isGenerating {
                         ProgressView().controlSize(.small)
                     } else {
-                        Text(viewModel.editSource != nil ? "Edit" : "Generate")
+                        Text("Generate")
                     }
                 }
                 .buttonStyle(.rapidPrimary)
@@ -138,39 +302,51 @@ struct ImagesView: View {
         .background(RapidTheme.surfaceSidebar)
     }
 
-    private var editingBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "wand.and.stars")
-                .foregroundStyle(RapidTheme.brandAmber)
-            Text("Editing an image")
-                .font(.callout)
-            Spacer()
-            Button("Cancel") { viewModel.cancelEdit() }
-                .buttonStyle(.rapidSecondary)
-                .accessibilityIdentifier("Images.CancelEdit")
-        }
-        .padding(.horizontal, 4)
-    }
-
-    private var modelPicker: some View {
-        Picker("Model", selection: $viewModel.selectedAlias) {
-            ForEach(viewModel.imageModels) { entry in
-                Text(entry.cached ? "\(entry.alias) ✓" : entry.alias)
-                    .tag(entry.alias)
+    private var starters: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
+                ForEach(ImageGenViewModel.starters, id: \.self) { starter in
+                    Button {
+                        viewModel.use(starter: starter)
+                    } label: {
+                        Text(starter)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 6)
+                            .background(RapidTheme.card)
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(RapidTheme.hairline, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("Images.Starter")
+                }
             }
         }
-        .labelsHidden()
-        .frame(maxWidth: 260)
-        .accessibilityIdentifier("Images.ModelPicker")
     }
 
-    private var sizePicker: some View {
-        Picker("Size", selection: $viewModel.size) {
-            ForEach(sizeOptions, id: \.self) { Text($0).tag($0) }
+    private var aspectPicker: some View {
+        HStack(spacing: 4) {
+            ForEach(ImageGenViewModel.Aspect.allCases) { ar in
+                let on = viewModel.aspect == ar
+                Button {
+                    viewModel.aspect = ar
+                } label: {
+                    Text(ar.label)
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(on ? RapidTheme.card : Color.clear)
+                        .foregroundStyle(on ? Color.primary : Color.secondary)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .labelsHidden()
-        .frame(maxWidth: 120)
-        .accessibilityIdentifier("Images.SizePicker")
+        .padding(3)
+        .background(RapidTheme.composePill)
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .accessibilityIdentifier("Images.Aspect")
     }
 
     // MARK: - Actions
@@ -180,7 +356,6 @@ struct ImagesView: View {
         Task { await viewModel.submit() }
     }
 
-    /// Write the PNG to a user-chosen location via the standard save panel.
     private func save(_ image: GeneratedImage) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
@@ -188,5 +363,24 @@ struct ImagesView: View {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try? image.pngData.write(to: url)
+    }
+}
+
+/// A determinate capsule progress bar with the brand fill. Kept tiny and
+/// local — the only progress bar in the app that shows a true diffusion
+/// step fraction.
+private struct ProgressBar: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.15))
+                Capsule()
+                    .fill(RapidTheme.brandAmber)
+                    .frame(width: max(0, min(1, fraction)) * geo.size.width)
+                    .animation(.easeOut(duration: 0.3), value: fraction)
+            }
+        }
     }
 }
