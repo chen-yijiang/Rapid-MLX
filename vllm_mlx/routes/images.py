@@ -3,16 +3,22 @@
 
 import base64
 import logging
+import os
+import tempfile
 import time
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
-from ..api.models import ImageGenerationRequest
+from ..api.models import ImageGenerationRequest, parse_image_size
 from ._async_utils import run_to_completion
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Cap the uploaded init image so a single edit request can't buffer an
+# unbounded body into memory before the size validators run.
+_MAX_EDIT_IMAGE_BYTES = 25 * 1024 * 1024
 
 
 def _image_engine():
@@ -121,5 +127,140 @@ async def create_image(request: ImageGenerationRequest = Body(...)):
                 },
             ) from exc
         data.append({"b64_json": base64.b64encode(png_bytes).decode("ascii")})
+
+    return {"created": int(time.time()), "data": data}
+
+
+def _generate_edit_one(engine, prompt, width, height, steps, seed, guidance,
+                       negative_prompt, image_path) -> bytes:
+    """Blocking single instruction-edit render — runs off the event loop."""
+    return engine.generate(
+        prompt=prompt,
+        width=width,
+        height=height,
+        num_inference_steps=steps if steps is not None else 4,
+        seed=seed,
+        guidance=guidance if guidance is not None else 4.0,
+        negative_prompt=negative_prompt,
+        image_paths=[image_path],
+    )
+
+
+@router.post("/v1/images/edits")
+async def edit_image(
+    image: UploadFile = File(...),
+    prompt: str = Form(...),
+    model: str = Form(""),
+    n: int = Form(1),
+    size: str = Form("1024x1024"),
+    response_format: str = Form("b64_json"),
+    seed: int | None = Form(None),
+    steps: int | None = Form(None),
+    guidance: float | None = Form(None),
+    negative_prompt: str | None = Form(None),
+):
+    """Instruction-edit an input image (OpenAI ``/v1/images/edits`` compatible).
+
+    Requires a server running an image-**edit** model (e.g.
+    ``rapid-mlx serve qwen-image-edit-4bit``); the uploaded image plus the
+    prompt drive a global instruction edit (no mask). Returns the same
+    ``{created, data:[{b64_json}]}`` envelope as generations.
+    """
+    from ..image.engine import ImageRuntimeError
+
+    engine = _image_engine()
+
+    # /v1/images/edits requires the edit family; a txt2img server points the
+    # caller at /v1/images/generations instead of silently ignoring the image.
+    if not getattr(engine, "is_edit", False):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "message": (
+                        "This server is running a text-to-image model; use "
+                        "/v1/images/generations, or start an image-edit model "
+                        "(e.g. `rapid-mlx serve qwen-image-edit-4bit`)."
+                    ),
+                    "type": "invalid_request_error",
+                    "code": "wrong_image_endpoint",
+                    "param": "model",
+                }
+            },
+        )
+
+    if not prompt or not prompt.strip():
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "prompt must not be empty",
+                              "type": "invalid_request_error", "param": "prompt"}},
+        )
+    if response_format == "url":
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "The local image lane only returns base64 "
+                              "data; request response_format='b64_json'.",
+                              "type": "invalid_request_error",
+                              "code": "unsupported_response_format",
+                              "param": "response_format"}},
+        )
+    if not 1 <= n <= 4:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "n must be between 1 and 4",
+                              "type": "invalid_request_error", "param": "n"}},
+        )
+    try:
+        width, height = parse_image_size(size)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": str(exc),
+                              "type": "invalid_request_error", "param": "size"}},
+        ) from exc
+
+    raw = await image.read()
+    if not raw:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "image file is empty",
+                              "type": "invalid_request_error", "param": "image"}},
+        )
+    if len(raw) > _MAX_EDIT_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={"error": {"message": f"image exceeds "
+                              f"{_MAX_EDIT_IMAGE_BYTES // (1024 * 1024)} MB limit",
+                              "type": "invalid_request_error", "param": "image"}},
+        )
+
+    suffix = os.path.splitext(image.filename or "")[1] or ".png"
+    base_seed = seed if seed is not None else int(time.time()) & 0x7FFFFFFF
+    data = []
+    # One temp file for the whole request; the process lock in the engine keeps
+    # generations serial, so a shared init image is safe across the n renders.
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(raw)
+        tmp_path = tmp.name
+    try:
+        for index in range(n):
+            try:
+                png_bytes = await run_to_completion(
+                    _generate_edit_one, engine, prompt, width, height, steps,
+                    base_seed + index, guidance, negative_prompt, tmp_path,
+                )
+            except ImageRuntimeError as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail={"error": {"message": str(exc),
+                                      "type": "image_generation_error",
+                                      "code": "image_generation_failed"}},
+                ) from exc
+            data.append({"b64_json": base64.b64encode(png_bytes).decode("ascii")})
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
     return {"created": int(time.time()), "data": data}

@@ -170,12 +170,21 @@ class _FakeImageEngine:
     def __init__(self, is_edit=False):
         self.is_edit = is_edit
         self.seeds = []
+        self.image_paths_seen = []
 
-    def generate(self, *, prompt, width, height, num_inference_steps, seed, guidance, negative_prompt):
+    def generate(self, *, prompt, width, height, num_inference_steps, seed,
+                 guidance, negative_prompt, image_paths=None):
         self.seeds.append(seed)
+        self.image_paths_seen.append(image_paths)
         buffer = io.BytesIO()
         Image.new("RGB", (4, 4), (10, 20, 30)).save(buffer, format="PNG")
         return buffer.getvalue()
+
+
+def _png_upload_bytes():
+    buffer = io.BytesIO()
+    Image.new("RGB", (16, 16), (90, 90, 90)).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _patch_engine(monkeypatch, engine):
@@ -254,3 +263,88 @@ def test_request_model_rejects_nonfinite_guidance(bad_guidance):
     # NaN/inf fail the ge=0 / le=20 comparisons, so the bounds reject them.
     with pytest.raises(ValueError):
         ImageGenerationRequest(prompt="x", guidance=bad_guidance)
+
+
+# --------------------------------------------------------------------------- #
+# Route: /v1/images/edits
+# --------------------------------------------------------------------------- #
+def test_edit_409_when_no_image_model(client, monkeypatch):
+    _patch_engine(monkeypatch, None)
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "add a hat"},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "image_model_not_loaded"
+
+
+def test_edit_409_when_txt2img_model_loaded(client, monkeypatch):
+    _patch_engine(monkeypatch, _FakeImageEngine(is_edit=False))
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "add a hat"},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "wrong_image_endpoint"
+
+
+def test_edit_happy_path_returns_b64_and_passes_image(client, monkeypatch):
+    engine = _FakeImageEngine(is_edit=True)
+    _patch_engine(monkeypatch, engine)
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "make the sky blue", "size": "512x512", "seed": "5"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["data"]) == 1
+    assert base64.b64decode(body["data"][0]["b64_json"]).startswith(_PNG_MAGIC)
+    # The uploaded image was written to a temp file and passed to the engine.
+    assert engine.image_paths_seen[0] is not None
+    assert len(engine.image_paths_seen[0]) == 1
+
+
+def test_edit_multi_offsets_seed(client, monkeypatch):
+    engine = _FakeImageEngine(is_edit=True)
+    _patch_engine(monkeypatch, engine)
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "x", "n": "2", "seed": "50"},
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()["data"]) == 2
+    assert engine.seeds == [50, 51]
+
+
+def test_edit_400_empty_prompt(client, monkeypatch):
+    _patch_engine(monkeypatch, _FakeImageEngine(is_edit=True))
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "   "},
+    )
+    assert resp.status_code == 400
+
+
+def test_edit_400_bad_size(client, monkeypatch):
+    _patch_engine(monkeypatch, _FakeImageEngine(is_edit=True))
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "x", "size": "100x100"},
+    )
+    assert resp.status_code == 400
+
+
+def test_edit_400_empty_image(client, monkeypatch):
+    _patch_engine(monkeypatch, _FakeImageEngine(is_edit=True))
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", b"", "image/png")},
+        data={"prompt": "x"},
+    )
+    assert resp.status_code == 400
