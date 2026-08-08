@@ -41,6 +41,15 @@ var match: AXUIElement?
 // atomic snapshot: a window opened after its parent's AXChildren was read is
 // simply not in this dump. Callers proving absence must have settled the UI
 // first; completeness is a floor, not a substitute for waiting.
+//
+// The sharpest case: with the screen LOCKED, every read succeeds and every app
+// reports zero windows. `complete: true` is then honest — the accessibility API
+// really is showing us the whole of what this session has — and still useless
+// for proving a control is gone, because everything is. Measured on a locked
+// Mac: `records: 1`, `windows.titles: []`, both `complete: true`. No flag in
+// this dump can separate that from an app that closed its windows; what does is
+// asserting positively that the thing you expect IS there before concluding
+// anything about what is not.
 var walkComplete = true
 var walkUnreadableChildren = 0
 var walkLastChildrenError: AXError?
