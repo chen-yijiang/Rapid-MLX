@@ -1207,7 +1207,10 @@ private struct ToolCallChip: View {
     }
 }
 
-private struct ComposeField: View {
+/// The chat/image compose text editor: an autosizing NSTextView with a
+/// placeholder, ⏎-to-submit and Esc-to-cancel. Shared by ChatView and
+/// ImagesView so both tabs get an identical input field.
+struct ComposeField: View {
     @Binding var text: String
     /// Counter the parent bumps when it wants the editor to grab
     /// keyboard focus. See ``ChatView.composeFocusToken``.
@@ -1365,7 +1368,7 @@ final class AutosizingTextView: NSTextView {
 /// Smart-substitutions are explicitly off — chat with an LLM is
 /// code-heavy enough that auto-quoting / dash substitution corrupts
 /// snippets the user pastes.
-private struct ComposeTextEditor: NSViewRepresentable {
+struct ComposeTextEditor: NSViewRepresentable {
     @Binding var text: String
     var focusToken: Int
     var isStreaming: Bool

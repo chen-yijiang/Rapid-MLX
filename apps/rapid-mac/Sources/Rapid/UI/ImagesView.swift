@@ -1,111 +1,26 @@
 import AppKit
 import SwiftUI
 
-/// The Images tab — a local text→image surface designed around three jobs:
-/// get a good image with the least friction, riff on it, and never feel stuck
-/// during a 10–40 s render. Layout: a Fast/Best quality bar, a big focal stage
-/// that shows the render's live step progress, a session filmstrip, and a
-/// prompt composer with one-tap starters.
+/// The Images tab. Deliberately mirrors ``ChatView``: a scrollable results
+/// area on top and, at the bottom, the *same* compose box — a `surfaceRaised`
+/// rounded field with the model picker + submit button clustered at its
+/// bottom-right — so model selection and input feel identical across tabs.
 struct ImagesView: View {
     @Bindable var viewModel: ImageGenViewModel
     @Bindable var server: ServerManager
 
+    private let contentMaxWidth: CGFloat = RapidTheme.Layout.contentMaxWidth
+
+    @State private var composeFocusToken = 0
+    @State private var pickerHovering = false
+
     var body: some View {
         VStack(spacing: 0) {
-            topBar
-            Divider()
             stageAndHistory
-            Divider()
             composer
         }
         .background(RapidTheme.surfaceCanvas)
         .task { await viewModel.refreshCatalog() }
-    }
-
-    // MARK: - Top bar (model picker + Save)
-
-    private var topBar: some View {
-        HStack(spacing: 10) {
-            Text("Model").font(.caption).foregroundStyle(.secondary)
-            modelPicker
-                .frame(minWidth: 220, maxWidth: 320)
-            Spacer()
-            if let active = viewModel.activeImage, !viewModel.isGenerating {
-                Button {
-                    save(active)
-                } label: {
-                    Label("Save", systemImage: "square.and.arrow.down")
-                }
-                .buttonStyle(.rapidSecondary)
-                .accessibilityIdentifier("Images.Result.Save")
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(RapidTheme.surfaceSidebar)
-    }
-
-    /// A dropdown listing every image model — the same shape as the chat
-    /// picker (one Menu, a cache glyph per row) so it scales to any number of
-    /// models instead of the fixed Fast/Best boxes. Manage/download/delete
-    /// live in Settings → Model Management (Image tab).
-    private var modelPicker: some View {
-        Menu {
-            if viewModel.imageModels.isEmpty {
-                Text(viewModel.catalogLoaded ? "No image models available" : "Loading…")
-            } else {
-                ForEach(viewModel.imageModels) { entry in
-                    Button {
-                        viewModel.selectedAlias = entry.alias
-                    } label: {
-                        Label(
-                            modelRowTitle(entry),
-                            systemImage: ModelPickerBar.cacheGlyph(cached: entry.cached)
-                        )
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "photo")
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                Text(viewModel.selectedAlias.isEmpty ? "Choose a model" : viewModel.selectedAlias)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(viewModel.selectedAlias.isEmpty ? .secondary : .primary)
-                Spacer(minLength: 4)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.secondary.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(RapidTheme.hairline, lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .accessibilityIdentifier("Images.ModelPicker")
-    }
-
-    /// "flux2-klein-4b · 4.3 GiB" — alias plus size when known. The green
-    /// check / download glyph (from ``ModelPickerBar.cacheGlyph``) carries
-    /// installed state, exactly as in the chat picker.
-    private func modelRowTitle(_ entry: ModelEntry) -> String {
-        if let size = entry.sizeOnDisk, !size.isEmpty {
-            return "\(entry.alias) · \(size)"
-        }
-        return entry.alias
     }
 
     // MARK: - Stage + history
@@ -133,17 +48,35 @@ struct ImagesView: View {
                     .overlay(
                         RoundedRectangle(cornerRadius: 14).stroke(RapidTheme.hairline, lineWidth: 1)
                     )
+                    .overlay(alignment: .topTrailing) { saveOverlay(active) }
                     .accessibilityIdentifier("Images.Stage")
             } else if !viewModel.isGenerating {
                 emptyStage
             }
 
             if viewModel.isGenerating {
-                progressHUD
-                    .transition(.opacity)
+                progressHUD.transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func saveOverlay(_ image: GeneratedImage) -> some View {
+        if !viewModel.isGenerating {
+            Button {
+                save(image)
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .padding(10)
+            .help("Save image")
+            .accessibilityIdentifier("Images.Result.Save")
+        }
     }
 
     private var emptyStage: some View {
@@ -166,13 +99,12 @@ struct ImagesView: View {
 
     private var noModelHint: String? {
         guard viewModel.catalogLoaded, viewModel.imageModels.isEmpty else { return nil }
-        return "No image models found — install one from the model list."
+        return "No image models found — install one from Settings → Model Management."
     }
 
     // MARK: - Progress HUD (the wait, designed)
 
     private var progressHUD: some View {
-        // A live clock that keeps moving even during the cold model-load phase.
         TimelineView(.periodic(from: .now, by: 0.1)) { context in
             let elapsed = viewModel.genStartedAt.map { context.date.timeIntervalSince($0) } ?? 0
             VStack {
@@ -221,8 +153,7 @@ struct ImagesView: View {
                 clock(elapsed)
                 cancelButton
             }
-            ProgressBar(fraction: fraction)
-                .frame(height: 6)
+            ProgressBar(fraction: fraction).frame(height: 6)
             if let eta = etaText(step: p.step, total: total, elapsed: elapsed) {
                 Text(eta).font(.caption).foregroundStyle(.secondary)
             }
@@ -251,12 +182,10 @@ struct ImagesView: View {
         .accessibilityIdentifier("Images.Cancel")
     }
 
-    /// ETA from uniform step time; nil until there's a step to extrapolate from.
     private func etaText(step: Int, total: Int, elapsed: TimeInterval) -> String? {
         guard step > 0, total > step, elapsed > 0 else { return nil }
         let perStep = elapsed / Double(step)
-        let remaining = perStep * Double(total - step)
-        return "~\(Int(remaining.rounded()))s left"
+        return "~\(Int((perStep * Double(total - step)).rounded()))s left"
     }
 
     // MARK: - Filmstrip
@@ -297,42 +226,60 @@ struct ImagesView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Composer
+    // MARK: - Composer (mirrors ChatView's compose box)
 
     private var composer: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: RapidTheme.Space.sm) {
             if let error = viewModel.errorMessage {
                 InlineNotice(message: error, tone: .error)
+                    .frame(maxWidth: contentMaxWidth)
+                    .frame(maxWidth: .infinity)
             }
             if viewModel.prompt.isEmpty {
                 starters
+                    .frame(maxWidth: contentMaxWidth)
+                    .frame(maxWidth: .infinity)
             }
-            HStack(alignment: .bottom, spacing: 10) {
-                TextField("Describe the image you want…", text: $viewModel.prompt, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...4)
-                    .padding(10)
-                    .background(RapidTheme.composePill)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .accessibilityIdentifier("Images.Prompt")
-                    .onSubmit(runSubmit)
-
-                aspectPicker
-
-                Button(action: runSubmit) {
-                    if viewModel.isGenerating {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Text("Generate")
-                    }
-                }
-                .buttonStyle(.rapidPrimary)
-                .disabled(!viewModel.canSubmit)
-                .accessibilityIdentifier("Images.Generate")
+            VStack(spacing: RapidTheme.Space.sm - 2) {
+                ComposeField(
+                    text: $viewModel.prompt,
+                    focusToken: composeFocusToken,
+                    isStreaming: viewModel.isGenerating,
+                    placeholder: "Describe the image you want…",
+                    onSubmit: runSubmit,
+                    onCancel: { viewModel.cancel() }
+                )
+                .accessibilityIdentifier("Images.Prompt")
+                composerControls
             }
+            .padding(.horizontal, RapidTheme.Space.md - 2)
+            .padding(.vertical, RapidTheme.Space.sm)
+            .background(
+                RoundedRectangle(cornerRadius: RapidTheme.Radius.input, style: .continuous)
+                    .fill(RapidTheme.surfaceRaised)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: RapidTheme.Radius.input, style: .continuous)
+                    .strokeBorder(RapidTheme.hairlineStrong, lineWidth: 1)
+            )
+            .frame(maxWidth: contentMaxWidth)
+            .frame(maxWidth: .infinity)
         }
-        .padding(12)
-        .background(RapidTheme.surfaceSidebar)
+        .padding(.horizontal, RapidTheme.Space.xl)
+        .padding(.top, RapidTheme.Space.md)
+        .padding(.bottom, RapidTheme.Space.lg)
+    }
+
+    /// Bottom row of the compose box: aspect on the left, then the inline
+    /// model picker + submit clustered on the right — the same
+    /// `model ▾  ⬆` grouping ChatView uses.
+    private var composerControls: some View {
+        HStack(spacing: RapidTheme.Space.sm) {
+            aspectPicker
+            Spacer(minLength: 0)
+            modelPicker
+            sendOrStopButton
+        }
     }
 
     private var starters: some View {
@@ -367,19 +314,113 @@ struct ImagesView: View {
                 } label: {
                     Text(ar.label)
                         .font(.system(size: 11, weight: .medium))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
-                        .background(on ? RapidTheme.card : Color.clear)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(on ? RapidTheme.hoverFill : Color.clear)
                         .foregroundStyle(on ? Color.primary : Color.secondary)
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(3)
-        .background(RapidTheme.composePill)
-        .clipShape(RoundedRectangle(cornerRadius: 9))
         .accessibilityIdentifier("Images.Aspect")
+    }
+
+    /// The inline model picker — same composer-embedded chip as chat
+    /// (``ModelPickerBar`` in `composerStyle`): borderless, a fill on hover,
+    /// a cache glyph per row, scaling to any number of image models.
+    private var modelPicker: some View {
+        Menu {
+            if viewModel.imageModels.isEmpty {
+                Text(viewModel.catalogLoaded ? "No image models available" : "Loading…")
+            } else {
+                ForEach(viewModel.imageModels) { entry in
+                    Button {
+                        viewModel.selectedAlias = entry.alias
+                    } label: {
+                        Label(
+                            modelRowTitle(entry),
+                            systemImage: ModelPickerBar.cacheGlyph(cached: entry.cached)
+                        )
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text(viewModel.selectedAlias.isEmpty ? "Choose a model" : viewModel.selectedAlias)
+                    .font(RapidFont.secondary)
+                    .foregroundStyle(viewModel.selectedAlias.isEmpty ? .secondary : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(pickerHovering ? .primary : .secondary)
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, RapidTheme.Space.sm)
+            .frame(height: RapidTheme.ControlHeight.small)
+            .background(
+                RoundedRectangle(cornerRadius: RapidTheme.Radius.row, style: .continuous)
+                    .fill(pickerHovering ? RapidTheme.hoverFill : .clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: RapidTheme.Radius.row, style: .continuous)
+                    .strokeBorder(pickerHovering ? RapidTheme.hairlineStrong : .clear, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { pickerHovering = $0 }
+        .help(viewModel.selectedAlias.isEmpty ? "Choose a model" : "Model: \(viewModel.selectedAlias)")
+        .accessibilityIdentifier("Images.ModelPicker")
+    }
+
+    private func modelRowTitle(_ entry: ModelEntry) -> String {
+        if let size = entry.sizeOnDisk, !size.isEmpty {
+            return "\(entry.alias) · \(size)"
+        }
+        return entry.alias
+    }
+
+    /// Submit / stop, styled exactly like ChatView's send button: an amber
+    /// disc when there's something to run, a stop disc while generating.
+    @ViewBuilder
+    private var sendOrStopButton: some View {
+        if viewModel.isGenerating {
+            Button { viewModel.cancel() } label: {
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(RapidTheme.sendButtonIcon)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(RapidTheme.sendButton))
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.cancelling)
+            .help("Cancel")
+            .accessibilityIdentifier("Images.Generate")
+        } else {
+            Button(action: runSubmit) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(viewModel.canSubmit ? RapidTheme.onBrandPrimary : Color.secondary)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(viewModel.canSubmit ? RapidTheme.brandPrimary : Color.clear))
+                    .overlay(
+                        Circle().strokeBorder(
+                            viewModel.canSubmit ? .clear : RapidTheme.hairlineStrong, lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(!viewModel.canSubmit)
+            .help("Generate")
+            .accessibilityIdentifier("Images.Generate")
+        }
     }
 
     // MARK: - Actions
@@ -399,9 +440,8 @@ struct ImagesView: View {
     }
 }
 
-/// A determinate capsule progress bar with the brand fill. Kept tiny and
-/// local — the only progress bar in the app that shows a true diffusion
-/// step fraction.
+/// A determinate capsule progress bar with the brand fill — the only bar in
+/// the app that shows a true diffusion step fraction.
 private struct ProgressBar: View {
     let fraction: Double
 
