@@ -317,9 +317,11 @@ async def edit_image(
     # enforces on the JSON path, so a negative seed, non-finite guidance, or an
     # enormous step count could otherwise reach — and monopolize/crash — the
     # inference server. Validate the numeric knobs to the same bounds here.
+    # 1..50 matches the JSON generations contract (ImageGenerationRequest:
+    # ge=1, le=50) so an edit can't run for twice the documented maximum.
     _reject(
-        steps is not None and not (1 <= steps <= 100),
-        "steps must be between 1 and 100",
+        steps is not None and not (1 <= steps <= 50),
+        "steps must be between 1 and 50",
         "steps",
     )
     _reject(
@@ -373,13 +375,17 @@ async def edit_image(
     # layer. mflux/PIL sniff the real format from content, not the extension.
     base_seed = seed if seed is not None else int(time.time()) & 0x7FFFFFFF
     data = []
+    cancelled = False
     # One temp file for the whole request; the process lock in the engine keeps
     # generations serial, so a shared init image is safe across the n renders.
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        tmp.write(raw)
-        tmp_path = tmp.name
-    cancelled = False
+    # Creation + write live inside the try so a partial-write / close failure
+    # can't leak the file — ``tmp_path`` is captured before the write, and the
+    # finally unlinks whatever path was created on every exit.
+    tmp_path: str | None = None
     try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = tmp.name
+            tmp.write(raw)
         for index in range(n):
             try:
                 png_bytes = await run_to_completion(
@@ -410,9 +416,10 @@ async def edit_image(
                 ) from exc
             data.append({"b64_json": base64.b64encode(png_bytes).decode("ascii")})
     finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     return {"created": int(time.time()), "data": data, "cancelled": cancelled}

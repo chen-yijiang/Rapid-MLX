@@ -79,6 +79,10 @@ class _ProgressReporter:
         total = getattr(config, "num_inference_steps", 0) or engine._progress.get(
             "total", 0
         )
+        # ``running`` flips true only once the denoise loop actually fires, so
+        # the client shows "warming up" during the cold load and "denoising"
+        # (with a real step count) only while stepping — not step 1 mid-download.
+        engine._progress["running"] = True
         engine._progress["step"] = int(t) + 1
         engine._progress["total"] = int(total)
         if engine._is_cancelled():
@@ -304,8 +308,11 @@ class ImageGenerationEngine:
             # The lock guarantees single-flight, so one snapshot is unambiguous.
             self._run_seq += 1
             self._active_seq = self._run_seq
+            # ``running`` stays False through the cold load — the reporter flips
+            # it true on the first denoise step — so the client renders the
+            # "warming up" phase during load, not a bogus "denoising step 1".
             self._progress.update(
-                running=True,
+                running=False,
                 step=0,
                 total=int(num_inference_steps),
                 started_at=time.time(),
