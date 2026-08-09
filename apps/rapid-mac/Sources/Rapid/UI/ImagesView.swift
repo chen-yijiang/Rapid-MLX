@@ -33,7 +33,11 @@ struct ImagesView: View {
             stage
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             if !viewModel.results.isEmpty {
+                // Centered on the same column as the composer so the strip
+                // reads as part of the layout rather than floating far-left.
                 filmstrip
+                    .frame(maxWidth: contentMaxWidth)
+                    .frame(maxWidth: .infinity)
             }
         }
         .padding(16)
@@ -145,7 +149,12 @@ struct ImagesView: View {
             break  // the composer's model picker owns this step
         case .downloadAndStart(let target), .start(let target), .retry(let target):
             let hf = viewModel.imageModels.first { $0.alias == target }?.hfRepo
-            Task { await server.start(alias: target, hfPath: hf) }
+            // ``ensureServing`` (not ``start``): the user is almost always
+            // switching FROM a running chat model TO the image model. Plain
+            // ``start`` is cold-start only — it no-ops when a child is already
+            // serving — so it would silently do nothing here; ``ensureServing``
+            // stops the current model and brings the target up.
+            Task { _ = await server.ensureServing(alias: target, hfPath: hf) }
         }
     }
 
