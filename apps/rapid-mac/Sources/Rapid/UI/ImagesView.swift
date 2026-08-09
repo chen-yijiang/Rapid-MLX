@@ -165,81 +165,87 @@ struct ImagesView: View {
     // MARK: - Progress HUD (the wait, designed)
 
     private var progressHUD: some View {
-        TimelineView(.periodic(from: .now, by: 0.1)) { context in
+        TimelineView(.periodic(from: .now, by: 0.08)) { context in
             let elapsed = viewModel.genStartedAt.map { context.date.timeIntervalSince($0) } ?? 0
-            VStack {
-                Spacer()
-                VStack(alignment: .leading, spacing: 10) {
-                    if viewModel.phase == .denoising, let p = viewModel.progress {
-                        denoiseBody(p, elapsed: elapsed)
-                    } else {
-                        preparingBody(elapsed: elapsed)
+            // A 0→1 loop driving the shimmer sweep + status-dot pulse, derived
+            // from the frame's date so it animates without stored state.
+            let phase = (context.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 1.6)) / 1.6
+            let denoising = viewModel.phase == .denoising && viewModel.progress != nil
+            let total = max(viewModel.progress?.total ?? 0, viewModel.estimatedSteps)
+            let step = max(1, viewModel.progress?.step ?? 0)
+            let fraction = (denoising && total > 0) ? min(1, Double(step) / Double(total)) : 0
+
+            ZStack {
+                // Soft scrim so the card reads cleanly over any prior image.
+                LinearGradient(colors: [.black.opacity(0.06), .black.opacity(0.34)],
+                               startPoint: .top, endPoint: .bottom)
+                    .allowsHitTesting(false)
+
+                VStack(spacing: 14) {
+                    HStack(spacing: 10) {
+                        if denoising {
+                            Circle()
+                                .fill(RapidTheme.brandAmber)
+                                .frame(width: 9, height: 9)
+                                .shadow(color: RapidTheme.brandAmber.opacity(0.9), radius: 5)
+                                .scaleEffect(0.65 + 0.35 * (0.5 + 0.5 * sin(phase * .pi * 2)))
+                            Text(viewModel.cancelling ? "Stopping…" : "Generating")
+                                .font(.system(size: 14, weight: .semibold))
+                        } else {
+                            ProgressView().controlSize(.small)
+                            Text(viewModel.cancelling
+                                 ? "Stopping…"
+                                 : "Warming up \(viewModel.selectedDisplayName)")
+                                .font(.system(size: 14, weight: .semibold))
+                                .lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer(minLength: 8)
+                        if denoising {
+                            Text("\(step) / \(total)")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Button { viewModel.cancel() } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .frame(width: 22, height: 22)
+                                .background(Color.primary.opacity(0.08), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.cancelling)
+                        .help("Cancel")
+                        .accessibilityIdentifier("Images.Cancel")
+                    }
+
+                    ShimmerProgressBar(fraction: fraction, indeterminate: !denoising, phase: phase)
+                        .frame(height: 10)
+
+                    HStack {
+                        Text(String(format: "%.1fs", max(0, elapsed)))
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                        Spacer()
+                        Text(denoising
+                             ? (etaText(step: step, total: total, elapsed: elapsed) ?? "finishing…")
+                             : "First run — only happens once")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
                     }
                 }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-            }
-            .padding(2)
-        }
-    }
-
-    private func preparingBody(elapsed: TimeInterval) -> some View {
-        HStack(spacing: 12) {
-            ProgressView().controlSize(.small)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(viewModel.cancelling ? "Stopping…" : "Warming up \(viewModel.selectedDisplayName)…")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("First run loads the model — this only happens once.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            clock(elapsed)
-            cancelButton
-        }
-    }
-
-    private func denoiseBody(_ p: ImageClient.ImageProgress, elapsed: TimeInterval) -> some View {
-        let total = max(p.total, viewModel.estimatedSteps)
-        let fraction = total > 0 ? min(1, Double(p.step) / Double(total)) : 0
-        return VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Text(viewModel.cancelling
-                     ? "Stopping…"
-                     : "Step \(max(1, p.step)) / \(total) · denoising")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                clock(elapsed)
-                cancelButton
-            }
-            ProgressBar(fraction: fraction).frame(height: 6)
-            if let eta = etaText(step: p.step, total: total, elapsed: elapsed) {
-                Text(eta).font(.caption).foregroundStyle(.secondary)
+                .padding(18)
+                .frame(width: 340)
+                .background(.ultraThinMaterial,
+                            in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.28), radius: 22, y: 10)
             }
         }
-    }
-
-    private func clock(_ elapsed: TimeInterval) -> some View {
-        Text(String(format: "%.1fs", max(0, elapsed)))
-            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-            .foregroundStyle(.secondary)
-    }
-
-    private var cancelButton: some View {
-        Button {
-            viewModel.cancel()
-        } label: {
-            Image(systemName: "xmark")
-                .font(.system(size: 11, weight: .bold))
-                .frame(width: 22, height: 22)
-        }
-        .buttonStyle(.plain)
-        .background(Color.primary.opacity(0.08))
-        .clipShape(Circle())
-        .disabled(viewModel.cancelling)
-        .help("Cancel")
-        .accessibilityIdentifier("Images.Cancel")
     }
 
     private func etaText(step: Int, total: Int, elapsed: TimeInterval) -> String? {
@@ -515,19 +521,44 @@ struct ImagesView: View {
     }
 }
 
-/// A determinate capsule progress bar with the brand fill — the only bar in
-/// the app that shows a true diffusion step fraction.
-private struct ProgressBar: View {
-    let fraction: Double
+/// The diffusion progress bar: a rounded amber→gold gradient fill with a soft
+/// glow and a sheen that sweeps across it, over a faint track. Determinate
+/// (true step fraction) while denoising; a sliding segment while the model
+/// warms up. The only bar in the app that shows a real diffusion step count.
+private struct ShimmerProgressBar: View {
+    var fraction: Double
+    var indeterminate: Bool
+    var phase: Double  // 0→1, loops to drive the sheen
+
+    private var fillGradient: LinearGradient {
+        LinearGradient(
+            colors: [RapidTheme.brandAmber, Color(red: 1.0, green: 0.85, blue: 0.47)],
+            startPoint: .leading, endPoint: .trailing)
+    }
 
     var body: some View {
         GeometryReader { geo in
+            let w = geo.size.width
+            let fillW = indeterminate ? max(1, w * 0.34)
+                                      : max(10, w * min(1, max(0, fraction)))
+            let slideX = indeterminate ? (w + fillW) * phase - fillW : 0
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.15))
-                Capsule()
-                    .fill(RapidTheme.brandAmber)
-                    .frame(width: max(0, min(1, fraction)) * geo.size.width)
-                    .animation(.easeOut(duration: 0.3), value: fraction)
+                Capsule().fill(Color.primary.opacity(0.12))
+                ZStack(alignment: .leading) {
+                    Capsule().fill(fillGradient)
+                    // A narrow highlight sweeping the filled portion.
+                    Capsule()
+                        .fill(LinearGradient(
+                            colors: [.clear, .white.opacity(0.55), .clear],
+                            startPoint: .leading, endPoint: .trailing))
+                        .frame(width: 64)
+                        .offset(x: (fillW + 64) * phase - 64)
+                }
+                .frame(width: fillW)
+                .clipShape(Capsule())
+                .shadow(color: RapidTheme.brandAmber.opacity(0.55), radius: 6)
+                .offset(x: slideX)
+                .animation(indeterminate ? nil : .easeOut(duration: 0.3), value: fraction)
             }
         }
     }
