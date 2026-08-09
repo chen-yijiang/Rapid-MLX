@@ -6694,40 +6694,36 @@ async def stream_chat_completion(
             # path, which a reasoning parser bypasses. Both duplicate the
             # wire.
             #
-            # Detect the replay by PROVENANCE, not content equality alone
-            # (codex): the model's clean content buffer
-            # (``tool_accumulated_text``) was ALREADY fully streamed, so there
-            # is provably no un-emitted tail and any terminal content equal to
-            # it is a cumulative snapshot. Compare every operand on ONE footing
-            # — each run through ``sanitize_content_for_stream`` as a whole
-            # string. ``_wire_content`` re-sanitizes the accumulated wire text
-            # so a removable special token (e.g. ``<|im_end|>``) split across
-            # two deltas — which the per-delta sanitize could not strip alone —
-            # collapses to the same form as the once-sanitized buffer; without
-            # this the two would never match and the snapshot would replay. A
-            # genuinely parser-held suffix — streamed ``"ha"`` with buffer
-            # ``"haha"``, releasing a held ``"ha"`` → ``"haha"`` — leaves the
-            # sanitized buffer LONGER than the wire text, so it does not match
-            # and is left untouched. When there is no tool parser the buffer is
-            # empty and no hold-back mechanism exists, so a terminal value
-            # equal to everything streamed is still a snapshot.
+            # Detect the replay by AFFIRMATIVE PROVENANCE, not content equality
+            # alone (codex): require the parser's clean content buffer
+            # (``tool_accumulated_text``) to exist AND, sanitized, equal the
+            # wire content already streamed. That proves it was fully emitted
+            # with no un-streamed tail, so a terminal payload re-streaming it is
+            # a cumulative snapshot. Both operands are sanitized, matching the
+            # per-delta sanitization the wire content already carries. A genuine
+            # parser-held suffix — streamed ``"ha"`` with buffer ``"haha"``,
+            # releasing a held ``"ha"`` → ``"haha"`` — has a sanitized buffer
+            # LONGER than the wire, fails this check, and is left untouched. An
+            # empty/absent buffer is NOT taken as evidence of a replay: with no
+            # tool parser there is no hold-back mechanism to have withheld a
+            # tail, but there is also no affirmative proof, so we leave the
+            # terminal content alone rather than risk suppressing a real tail.
             content_buffer = getattr(processor, "tool_accumulated_text", "") or ""
-            _wire_content = sanitize_content_for_stream(streamed_content)
-            _content_fully_streamed = bool(streamed_content) and (
-                not content_buffer
-                or sanitize_content_for_stream(content_buffer) == _wire_content
+            _content_fully_streamed = (
+                bool(streamed_content)
+                and bool(content_buffer)
+                and sanitize_content_for_stream(content_buffer) == streamed_content
             )
             if (
                 _content_fully_streamed
                 and sanitize_content_for_stream(finish_content + finalize_content)
-                == _wire_content
+                == streamed_content
             ):
                 # The buffer was fully streamed (no un-emitted tail) AND the
                 # COMBINED terminal payload re-streams exactly that wire
                 # content — a cumulative snapshot, whether it arrived on
                 # ``finish_event.content``, the finalize flush, or split across
-                # both fields. Drop the whole replay. (A genuine held suffix
-                # never reaches here: buffer != streamed ⇒ not fully streamed.)
+                # both fields. Drop the whole replay.
                 finish_content = ""
                 finalize_content = ""
             terminal_content = (
