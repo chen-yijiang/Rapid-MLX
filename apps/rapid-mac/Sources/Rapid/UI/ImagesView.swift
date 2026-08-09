@@ -228,8 +228,12 @@ struct ImagesView: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                         Spacer()
+                        // ETA from the denoise-phase clock, not total elapsed —
+                        // otherwise cold-load time inflates the per-step estimate.
+                        let denoiseElapsed = viewModel.denoiseStartedAt
+                            .map { context.date.timeIntervalSince($0) } ?? elapsed
                         Text(denoising
-                             ? (etaText(step: step, total: total, elapsed: elapsed) ?? "finishing…")
+                             ? (etaText(step: step, total: total, elapsed: denoiseElapsed) ?? "finishing…")
                              : "First run — only happens once")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)

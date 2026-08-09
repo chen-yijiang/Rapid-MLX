@@ -77,6 +77,10 @@ final class ImageGenViewModel {
     /// When the current run started — drives a live elapsed clock in the HUD
     /// that keeps moving even during the cold model-load phase.
     private(set) var genStartedAt: Date?
+    /// When denoising actually began (first `running` step). ETA is computed
+    /// from THIS, not ``genStartedAt`` — otherwise minutes of cold model load
+    /// inflate the per-step estimate.
+    private(set) var denoiseStartedAt: Date?
 
     /// Steps the bar should assume before the server reports a live total.
     /// Derived from the selected model family (turbo Z-Image wants ~8, the
@@ -140,6 +144,11 @@ final class ImageGenViewModel {
     // MARK: - Generate
 
     func submit() async {
+        // Claim the run synchronously (on the MainActor, before any await) so
+        // two rapid submits can't both slip past the gate and launch concurrent
+        // renders. ``withRequest`` clears it when the run ends.
+        guard !isGenerating else { return }
+        isGenerating = true
         if let source = editSource {
             await runEdit(source: source)
         } else {
@@ -221,6 +230,9 @@ final class ImageGenViewModel {
                 if let snap = await self?.client.fetchProgress(port: port, bearer: bearer) {
                     self?.progress = snap
                     self?.phase = snap.running ? .denoising : .preparing
+                    if snap.running, self?.denoiseStartedAt == nil {
+                        self?.denoiseStartedAt = Date()
+                    }
                 }
                 try? await Task.sleep(for: .milliseconds(300))
             }
@@ -247,12 +259,14 @@ final class ImageGenViewModel {
         phase = .preparing
         progress = nil
         genStartedAt = Date()
+        denoiseStartedAt = nil
         errorMessage = nil
         defer {
             isGenerating = false
             cancelling = false
             progress = nil
             genStartedAt = nil
+            denoiseStartedAt = nil
         }
         do {
             try await body()
