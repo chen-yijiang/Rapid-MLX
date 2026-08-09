@@ -115,6 +115,12 @@ struct ContentViewReadinessActionTests {
                 }
                 continue
             }
+            // Extended regex literal (`#/…/#`). Its contents can hold `//`,
+            // braces, and call-shaped text, so it is skipped like a literal.
+            if c == "#", let end = Self.endOfExtendedRegex(in: swift, at: i) {
+                i = end
+                continue
+            }
             // String literal, including raw (`#"…"#`) and multiline (`"""`).
             if c == "\"" || c == "#" {
                 if let end = Self.endOfStringLiteral(in: swift, at: i) {
@@ -145,15 +151,25 @@ struct ContentViewReadinessActionTests {
         }
         guard cursor < source.endIndex, source[cursor] == "\"" else { return nil }
 
-        // A run of three or more opening quotes is a multiline literal; `""`
-        // on its own is just an empty one.
+        // `"""` opens a multiline literal only when a newline follows it —
+        // that is the grammar, and it is what separates it from a raw
+        // single-line literal whose contents happen to start with quotes.
+        // `#"""foo"#` is the latter: three quotes, no newline, value `""foo`.
+        // Treating it as multiline pairs its close with a LATER literal's
+        // open and erases the executable source in between.
         var quoteRun = 0
         var probe = cursor
         while probe < source.endIndex, source[probe] == "\"" {
             quoteRun += 1
             probe = source.index(after: probe)
         }
-        let delimiter = quoteRun >= 3 ? 3 : 1
+        var delimiter = 1
+        if quoteRun >= 3 {
+            let afterOpener = source.index(cursor, offsetBy: 3)
+            if afterOpener < source.endIndex, source[afterOpener].isNewline {
+                delimiter = 3
+            }
+        }
 
         var scan = source.index(cursor, offsetBy: delimiter)
         while scan < source.endIndex {
@@ -193,6 +209,47 @@ struct ContentViewReadinessActionTests {
             scan = source.index(after: scan)
         }
         return nil  // Unterminated: treat as "not a literal" and keep scanning.
+    }
+
+    /// The index just past the closing delimiter of the extended regex
+    /// literal starting at `start` (`#/…/#`, with any number of hashes), or
+    /// nil if no such literal starts there.
+    ///
+    /// Bare `/…/` regex literals are deliberately NOT recognised: telling one
+    /// from division needs real parsing, and guessing wrong would mangle
+    /// ordinary arithmetic. `ContentView.swift` contains none, and the shape
+    /// this gate defends against — a cold-start call reintroduced by a
+    /// refactor — does not arrive hidden inside a regex.
+    private static func endOfExtendedRegex(
+        in source: String,
+        at start: String.Index
+    ) -> String.Index? {
+        var cursor = start
+        var hashes = 0
+        while cursor < source.endIndex, source[cursor] == "#" {
+            hashes += 1
+            cursor = source.index(after: cursor)
+        }
+        guard hashes > 0, cursor < source.endIndex, source[cursor] == "/" else { return nil }
+
+        var scan = source.index(after: cursor)
+        while scan < source.endIndex {
+            if source[scan] == "\\" {
+                scan = source.index(scan, offsetBy: 2, limitedBy: source.endIndex) ?? source.endIndex
+                continue
+            }
+            if source[scan] == "/" {
+                var probe = source.index(after: scan)
+                var seen = 0
+                while seen < hashes, probe < source.endIndex, source[probe] == "#" {
+                    seen += 1
+                    probe = source.index(after: probe)
+                }
+                if seen == hashes { return probe }
+            }
+            scan = source.index(after: scan)
+        }
+        return nil
     }
 
     /// The source text of the block whose opening `{` is at `start`, up to
