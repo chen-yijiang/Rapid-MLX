@@ -6071,19 +6071,28 @@ async def stream_chat_completion(
             escaped = json.dumps(_sanitize(text))
             return f'{_sse_prefix}"{field}":{escaped}{_sse_suffix}'
 
+        # Wire truth for content already delivered before the terminal chunk.
+        # Some tool parsers expose the complete response again on their finish
+        # event, so ``processor.accumulated_text`` is not suitable here (it can
+        # also contain raw reasoning/parser input).  Track the sanitized text
+        # at the single content-serialization seam instead.
+        _streamed_content_parts: list[str] = []
+
         def _content_sse_chunk(
             text: str, chunk_logprobs: ChoiceLogProbs | None = None
         ) -> str:
             """Serialize one content delta, preserving requested logprobs."""
+            wire_text = sanitize_content_for_stream(text)
+            _streamed_content_parts.append(wire_text)
             if not want_logprobs:
-                return _fast_sse_chunk(text, "content")
+                return _fast_sse_chunk(wire_text, "content")
             chunk = ChatCompletionChunk(
                 id=response_id,
                 created=_sse_created,
                 model=_resolve_model_name(request.model),
                 choices=[
                     ChatCompletionChunkChoice(
-                        delta=ChatCompletionChunkDelta(content=text),
+                        delta=ChatCompletionChunkDelta(content=wire_text),
                         logprobs=chunk_logprobs,
                     )
                 ],
@@ -6669,10 +6678,12 @@ async def stream_chat_completion(
             # finish_event.content path is normally None for non-tool
             # plain-text streams (deltas already drained content during
             # the loop), so this typically just adds the held suffix.
+            finish_content = finish_event.content or ""
+            streamed_content = "".join(_streamed_content_parts)
             terminal_content = (
                 ""
                 if _forced_terminal_content_consumed
-                else (finish_event.content or "") + finalize_content
+                else finish_content + finalize_content
             )
 
             # Issue #569 streaming rescue: if NOTHING was streamed as
@@ -6957,6 +6968,19 @@ async def stream_chat_completion(
                 # dedicated trailing usage chunk is suppressed too.
                 usage=None,
             )
+            if streamed_content:
+                # Issue #1709: auto tool-choice parsers can attach a snapshot
+                # of the complete answer during terminal finalization. Compare
+                # the actual serialized representation after all terminal
+                # rescue/sanitization logic, not parser-internal raw text.
+                _terminal_dump = final_chunk.model_dump(exclude_none=True)
+                _terminal_wire_content = (
+                    _terminal_dump.get("choices", [{}])[0]
+                    .get("delta", {})
+                    .get("content")
+                )
+                if _terminal_wire_content == streamed_content:
+                    final_chunk.choices[0].delta.content = None
             yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
         elif fallback_tool_calls or finalize_content:
             # Defensive: stream ended without a "finish" event but

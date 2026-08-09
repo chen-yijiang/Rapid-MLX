@@ -589,6 +589,106 @@ def test_streaming_terminal_chunk_does_not_duplicate_already_streamed_content():
     )
 
 
+@pytest.mark.parametrize("snapshot_source", ["finish", "finalize"])
+def test_terminal_finish_snapshot_does_not_replay_streamed_content(
+    monkeypatch, snapshot_source
+):
+    """#1709: a parser finish snapshot must not become a second response.
+
+    Auto tool-choice parser paths can attach the complete plain-text answer to
+    the finish event after the same answer was emitted as ordinary content
+    deltas.  The terminal chunk may still release genuinely held parser bytes,
+    but it must suppress a verbatim snapshot of content already on the wire.
+    """
+    from vllm_mlx.domain.events import StreamEvent
+    from vllm_mlx.service import postprocessor as pp_mod
+
+    original_process_chunk = pp_mod.StreamingPostProcessor.process_chunk
+
+    def finish_with_full_response(self, output):
+        for event in original_process_chunk(self, output):
+            if event.type == "finish":
+                event.content = output.text
+            yield event
+
+    if snapshot_source == "finish":
+        monkeypatch.setattr(
+            pp_mod.StreamingPostProcessor,
+            "process_chunk",
+            finish_with_full_response,
+        )
+    else:
+        monkeypatch.setattr(
+            pp_mod.StreamingPostProcessor,
+            "finalize",
+            lambda self: [StreamEvent(type="content", content="hello world")],
+        )
+
+    class _SeparateFinishEngine(_PlainStreamEngine):
+        async def stream_chat(self, messages, **kwargs):
+            accumulated = ""
+            for i, delta in enumerate(["hello", " world"]):
+                accumulated += delta
+                yield GenerationOutput(
+                    text=accumulated,
+                    new_text=delta,
+                    prompt_tokens=4,
+                    completion_tokens=i + 1,
+                    finished=False,
+                    channel=None,
+                )
+            yield GenerationOutput(
+                text=accumulated,
+                new_text="",
+                prompt_tokens=4,
+                completion_tokens=2,
+                finished=True,
+                finish_reason="stop",
+                channel=None,
+            )
+
+    cfg = reset_config()
+    cfg.engine = _SeparateFinishEngine()
+    cfg.model_name = "test-model"
+    cfg.model_registry = None
+    cfg.no_thinking = True
+    cfg.enable_auto_tool_choice = True
+    cfg.tool_call_parser = "hermes"
+
+    app = FastAPI()
+    app.include_router(chat_router)
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "stream": True,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "say hello world"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    events, saw_done = _parse_sse_events(resp.text)
+    assert saw_done
+
+    content_parts = [
+        choice["delta"]["content"]
+        for event in events
+        for choice in event.get("choices", [])
+        if (choice.get("delta") or {}).get("content")
+    ]
+    assert "".join(content_parts) == "hello world"
+
+    terminal_choices = [
+        choice
+        for event in events
+        for choice in event.get("choices", [])
+        if choice.get("finish_reason") is not None
+    ]
+    assert len(terminal_choices) == 1
+    assert "content" not in terminal_choices[0]["delta"]
+
+
 def test_synthetic_terminal_chunk_does_not_replay_accumulated_text(monkeypatch):
     """Defense-in-depth: the synthetic-chunk fallback (reached when
     ``buffered_finish`` is None but ``finalize_content`` is present)
