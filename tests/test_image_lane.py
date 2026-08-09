@@ -193,6 +193,7 @@ def test_progress_reporter_tracks_step_then_cancels():
 
     engine = ImageGenerationEngine("Runpod/FLUX.2-klein-4B-mflux-4bit")
     engine._progress.update(total=4)
+    engine._active_seq = 1  # simulate an in-flight run (set under the lock)
 
     class _Cfg:
         num_inference_steps = 4
@@ -203,7 +204,7 @@ def test_progress_reporter_tracks_step_then_cancels():
     assert engine._progress["step"] == 1
     assert engine._progress["total"] == 4
 
-    # Once cancel is armed, the next step aborts the loop by raising.
+    # A cancel targets the active run's seq; the next step then aborts by raising.
     engine.request_cancel()
     with pytest.raises(ImageGenerationCancelled):
         engine._reporter.call_in_loop(
@@ -221,8 +222,25 @@ def test_progress_snapshot_shape():
 
 def test_generate_resets_progress_and_registers_reporter():
     engine = ImageGenerationEngine("Runpod/FLUX.2-klein-4B-mflux-4bit")
-    engine._model = _FakeModel()  # no ``.callbacks`` — registration is skipped
+
+    class _FakeRegistry:
+        def __init__(self):
+            self.registered = []
+
+        def register(self, callback):
+            self.registered.append(callback)
+
+    class _ModelWithCallbacks(_FakeModel):
+        def __init__(self):
+            super().__init__()
+            self.callbacks = _FakeRegistry()
+
+    built = _ModelWithCallbacks()
+    engine._build_model = lambda: built  # type: ignore[assignment]
     engine.generate(prompt="a fox", num_inference_steps=4, seed=1)
+    # The progress/cancel reporter was registered on the model's mflux registry —
+    # without this, live progress and cancellation would silently never fire.
+    assert engine._reporter in built.callbacks.registered
     # After a clean run the snapshot is idle but carries the step total.
     assert engine._progress["running"] is False
     assert engine._progress["total"] == 4
@@ -609,7 +627,7 @@ def test_generate_honors_cancel_after_cold_load():
     built = _FakeModel()
 
     def _load_then_cancel():
-        engine._cancel = True  # simulate Cancel pressed during the load
+        engine.request_cancel()  # simulate Cancel pressed during the load
         return built
 
     engine._build_model = _load_then_cancel  # type: ignore[assignment]

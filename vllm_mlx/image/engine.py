@@ -81,7 +81,7 @@ class _ProgressReporter:
         )
         engine._progress["step"] = int(t) + 1
         engine._progress["total"] = int(total)
-        if engine._cancel:
+        if engine._is_cancelled():
             raise ImageGenerationCancelled("Generation cancelled.")
 
 
@@ -171,8 +171,19 @@ class ImageGenerationEngine:
             "total": 0,
             "started_at": 0.0,
         }
-        self._cancel = False
+        # Cancellation is scoped by a monotonic run sequence rather than a bare
+        # boolean, so a cancel is tied to a specific render and can never be
+        # clobbered by the next request arming itself. ``_active_seq`` is the
+        # in-flight run (0 = none); ``_cancel_seq`` is the highest run a cancel
+        # was requested for. A run is cancelled iff ``_cancel_seq >= its seq``.
+        self._run_seq = 0
+        self._active_seq = 0
+        self._cancel_seq = 0
         self._reporter = _ProgressReporter(self)
+
+    def _is_cancelled(self) -> bool:
+        """True when the in-flight run has an outstanding cancel request."""
+        return self._active_seq > 0 and self._cancel_seq >= self._active_seq
 
     def _build_model(self):
         """Instantiate the backing mflux model (import-lazy)."""
@@ -237,8 +248,13 @@ class ImageGenerationEngine:
         return self._model
 
     def request_cancel(self) -> None:
-        """Ask an in-flight generation to stop at the next denoise step."""
-        self._cancel = True
+        """Ask the in-flight generation to stop at the next denoise step.
+
+        Targets the currently-active run; a cancel with no render in flight is a
+        no-op (``_active_seq == 0``), and one armed while a render is starting is
+        preserved because the seq is only advanced under the lock.
+        """
+        self._cancel_seq = max(self._cancel_seq, self._active_seq)
 
     def progress_snapshot(self) -> dict:
         """A JSON-safe view of the current denoise progress (single-flight)."""
@@ -282,11 +298,12 @@ class ImageGenerationEngine:
             )
 
         with self._lock:
-            # Arm cancellation + progress BEFORE loading, so a Cancel pressed
-            # during the (possibly multi-gigabyte) cold model load is honored
-            # instead of being reset away once the load finishes. The lock
-            # guarantees no other generation is mutating the snapshot.
-            self._cancel = False
+            # Claim a run sequence and arm progress BEFORE loading, so a Cancel
+            # pressed during the (possibly multi-gigabyte) cold model load is
+            # honored — its seq already matches this run — instead of being lost.
+            # The lock guarantees single-flight, so one snapshot is unambiguous.
+            self._run_seq += 1
+            self._active_seq = self._run_seq
             self._progress.update(
                 running=True,
                 step=0,
@@ -297,7 +314,7 @@ class ImageGenerationEngine:
                 model = self._ensure_loaded()
                 # Honor a cancel that landed during the warm-up load before we
                 # commit to the denoise loop.
-                if self._cancel:
+                if self._is_cancelled():
                     raise ImageGenerationCancelled("Generation cancelled.")
                 if self.is_edit:
                     # Edit derives its output canvas from the input image and
@@ -332,6 +349,7 @@ class ImageGenerationEngine:
                 raise ImageRuntimeError(f"Image generation failed: {exc}") from exc
             finally:
                 self._progress["running"] = False
+                self._active_seq = 0
 
         return self._encode_png(result)
 

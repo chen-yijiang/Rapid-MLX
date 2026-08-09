@@ -54,6 +54,10 @@ final class ImageGenViewModel {
     var selectedAlias: String = ""
 
     // MARK: - Results
+    /// Cap on the in-memory session gallery. Each result holds a full-resolution
+    /// PNG (multiple MB), so an unbounded list would grow app memory without
+    /// limit across a long session; older results roll off the end.
+    static let maxResults = 30
     /// Newest-first session gallery (the filmstrip).
     var results: [GeneratedImage] = []
     /// The focal image the stage shows; nil ⇒ newest, or empty state.
@@ -169,6 +173,9 @@ final class ImageGenViewModel {
             )
             if let first = images.first {
                 self.results.insert(contentsOf: images, at: 0)
+                if self.results.count > Self.maxResults {
+                    self.results.removeLast(self.results.count - Self.maxResults)
+                }
                 self.activeID = first.id
             }
             // Empty (cancelled before the first image) leaves the gallery as-is.
@@ -193,6 +200,9 @@ final class ImageGenViewModel {
             )
             if let first = images.first {
                 self.results.insert(contentsOf: images, at: 0)
+                if self.results.count > Self.maxResults {
+                    self.results.removeLast(self.results.count - Self.maxResults)
+                }
                 self.activeID = first.id
             }
         }

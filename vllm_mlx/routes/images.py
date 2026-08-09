@@ -368,12 +368,14 @@ async def edit_image(
         )
     raw = bytes(raw)
 
-    suffix = os.path.splitext(image.filename or "")[1] or ".png"
+    # A fixed suffix — never the attacker-controlled upload filename, whose
+    # length/bytes could otherwise raise an uncaught OSError from the temp-file
+    # layer. mflux/PIL sniff the real format from content, not the extension.
     base_seed = seed if seed is not None else int(time.time()) & 0x7FFFFFFF
     data = []
     # One temp file for the whole request; the process lock in the engine keeps
     # generations serial, so a shared init image is safe across the n renders.
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp.write(raw)
         tmp_path = tmp.name
     cancelled = False

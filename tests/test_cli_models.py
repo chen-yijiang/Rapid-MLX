@@ -60,9 +60,8 @@ def test_models_command_lists_all_aliases():
 
     text_profiles, video_profiles, image_profiles = _split_by_modality()
     assert f"({len(text_profiles)} aliases)" in out
-    assert (
-        len(text_profiles) + len(video_profiles) + len(image_profiles)
-        == len(profiles)
+    assert len(text_profiles) + len(video_profiles) + len(image_profiles) == len(
+        profiles
     )
 
 

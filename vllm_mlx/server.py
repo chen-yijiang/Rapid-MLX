@@ -1846,9 +1846,13 @@ def load_model(
         _engine = VideoEngine(model_name=_video_hf_path)
         logger.info(f"Video model ready for lazy generation: {model_name}")
     elif _profile_modality == "image-gen":
-        from .runtime.image_lane import ImageEngine
+        from .runtime.image_lane import ImageEngine, require_image_runtime_or_exit
 
         _image_hf_path = _profile.hf_path if _profile is not None else model_name
+        # Preflight the optional image stack (Python ≥3.11 + mflux) BEFORE
+        # advertising a ready server, so a missing runtime fails at startup with
+        # an actionable diagnostic instead of a generic HTTP 500 on first request.
+        require_image_runtime_or_exit(_image_hf_path)
         logger.info(
             f"Loading model with ImageEngine (modality=image-gen): {_image_hf_path}"
         )
