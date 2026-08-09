@@ -683,6 +683,93 @@ def test_terminal_finish_snapshot_does_not_replay_streamed_content(
     assert "content" not in terminal_choices[0]["delta"]
 
 
+def test_terminal_replay_guard_suppresses_snapshot_split_across_fields(monkeypatch):
+    """#1709 (codex): a cumulative snapshot can arrive split across BOTH
+    terminal fields — part on ``finish_event.content`` and part on the
+    finalize flush — whose concatenation equals everything streamed. Checking
+    the fields separately would miss it; the guard compares the COMBINED
+    terminal payload. finish ``"hello"`` + finalize ``" world"`` over a fully
+    streamed ``"hello world"`` → suppressed (no ``"hello worldhello world"``).
+    """
+    from vllm_mlx.domain.events import StreamEvent
+    from vllm_mlx.service import postprocessor as pp_mod
+
+    original_process_chunk = pp_mod.StreamingPostProcessor.process_chunk
+
+    def finish_with_first_half(self, output):
+        for event in original_process_chunk(self, output):
+            if event.type == "finish":
+                event.content = "hello"  # first half of the snapshot
+            yield event
+
+    monkeypatch.setattr(
+        pp_mod.StreamingPostProcessor, "process_chunk", finish_with_first_half
+    )
+    monkeypatch.setattr(
+        pp_mod.StreamingPostProcessor,
+        "finalize",
+        lambda self: [StreamEvent(type="content", content=" world")],
+    )
+
+    class _SplitFieldEngine(_PlainStreamEngine):
+        async def stream_chat(self, messages, **kwargs):
+            accumulated = ""
+            for i, delta in enumerate(["hello", " world"]):
+                accumulated += delta
+                yield GenerationOutput(
+                    text=accumulated,
+                    new_text=delta,
+                    prompt_tokens=4,
+                    completion_tokens=i + 1,
+                    finished=False,
+                    channel=None,
+                )
+            yield GenerationOutput(
+                text=accumulated,
+                new_text="",
+                prompt_tokens=4,
+                completion_tokens=2,
+                finished=True,
+                finish_reason="stop",
+                channel=None,
+            )
+
+    cfg = reset_config()
+    cfg.engine = _SplitFieldEngine()
+    cfg.model_name = "test-model"
+    cfg.model_registry = None
+    cfg.no_thinking = True
+    cfg.enable_auto_tool_choice = True
+    cfg.tool_call_parser = "auto"
+
+    app = FastAPI()
+    app.include_router(chat_router)
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "stream": True,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "say hello world"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    events, saw_done = _parse_sse_events(resp.text)
+    assert saw_done
+
+    content_parts = [
+        choice["delta"]["content"]
+        for event in events
+        for choice in event.get("choices", [])
+        if (choice.get("delta") or {}).get("content")
+    ]
+    assert "".join(content_parts) == "hello world", (
+        "a snapshot split across finish + finalize must be suppressed as a "
+        f"combined replay; got {''.join(content_parts)!r}"
+    )
+
+
 def test_terminal_finalize_flush_snapshot_does_not_replay_streamed_content(monkeypatch):
     """#1709 real manifestation (auto parser + reasoning model): the
     end-of-stream ``flush_held_content`` returns the ENTIRE content buffer

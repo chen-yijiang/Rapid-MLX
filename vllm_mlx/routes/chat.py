@@ -6072,20 +6072,20 @@ async def stream_chat_completion(
             return f'{_sse_prefix}"{field}":{escaped}{_sse_suffix}'
 
         # Wire truth for content already delivered before the terminal chunk:
-        # the exact SANITIZED bytes the client received, accumulated at the
-        # single content-serialization seam. ``processor.accumulated_text`` is
-        # unsuitable (it also holds raw reasoning/parser input). One running
-        # string, not a per-delta parts list plus a joined copy (CPython
-        # optimizes in-place ``+=`` on a refcount-1 str, so this stays O(n)).
-        _streamed_content = ""
+        # the exact SANITIZED bytes the client received, collected at the
+        # single content-serialization seam and joined once at the terminal
+        # replay check below. Appending to a list and joining once is O(n)
+        # regardless of interpreter (str ``+=`` in a loop is not).
+        # ``processor.accumulated_text`` is unsuitable (it also holds raw
+        # reasoning/parser input).
+        _streamed_content_parts: list[str] = []
 
         def _content_sse_chunk(
             text: str, chunk_logprobs: ChoiceLogProbs | None = None
         ) -> str:
             """Serialize one content delta, preserving requested logprobs."""
-            nonlocal _streamed_content
             wire_text = sanitize_content_for_stream(text)
-            _streamed_content += wire_text
+            _streamed_content_parts.append(wire_text)
             if not want_logprobs:
                 return _fast_sse_chunk(wire_text, "content")
             chunk = ChatCompletionChunk(
@@ -6681,7 +6681,7 @@ async def stream_chat_completion(
             # plain-text streams (deltas already drained content during
             # the loop), so this typically just adds the held suffix.
             finish_content = finish_event.content or ""
-            streamed_content = _streamed_content
+            streamed_content = "".join(_streamed_content_parts)
             # Issue #1709: the terminal chunk can replay the WHOLE answer that
             # was already emitted as content deltas during the loop. Two
             # channels do it: some parsers attach a cumulative snapshot to
@@ -6717,11 +6717,19 @@ async def stream_chat_completion(
                 not content_buffer
                 or sanitize_content_for_stream(content_buffer) == _wire_content
             )
-            if _content_fully_streamed:
-                if sanitize_content_for_stream(finish_content) == _wire_content:
-                    finish_content = ""
-                if sanitize_content_for_stream(finalize_content) == _wire_content:
-                    finalize_content = ""
+            if (
+                _content_fully_streamed
+                and sanitize_content_for_stream(finish_content + finalize_content)
+                == _wire_content
+            ):
+                # The buffer was fully streamed (no un-emitted tail) AND the
+                # COMBINED terminal payload re-streams exactly that wire
+                # content — a cumulative snapshot, whether it arrived on
+                # ``finish_event.content``, the finalize flush, or split across
+                # both fields. Drop the whole replay. (A genuine held suffix
+                # never reaches here: buffer != streamed ⇒ not fully streamed.)
+                finish_content = ""
+                finalize_content = ""
             terminal_content = (
                 ""
                 if _forced_terminal_content_consumed
