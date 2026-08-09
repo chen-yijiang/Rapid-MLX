@@ -40,7 +40,9 @@ from pathlib import Path
 # ``q<n>`` convention (``Qwen-Image-Edit-mflux-q4``). Anchored to a separator
 # so a base repo like ``Qwen/Qwen-Image`` (no tag) is never misread — the
 # leading ``q`` of "Qwen" is not followed by a quant digit.
-_QUANT_TAG_RE = re.compile(r"(?:^|[-_./])(?:q[2-8]|[2-8]-?bit)(?:[-_./]|$)", re.IGNORECASE)
+_QUANT_TAG_RE = re.compile(
+    r"(?:^|[-_./])(?:q[2-8]|[2-8]-?bit)(?:[-_./]|$)", re.IGNORECASE
+)
 
 # mflux/Metal graphs are not re-entrant — a single process-wide lock serializes
 # every generation exactly like the video lane's ``_PROCESS_GENERATION_LOCK``.
@@ -74,7 +76,9 @@ class _ProgressReporter:
 
     def call_in_loop(self, t, seed, prompt, latents, config, time_steps) -> None:  # noqa: ANN001
         engine = self._engine
-        total = getattr(config, "num_inference_steps", 0) or engine._progress.get("total", 0)
+        total = getattr(config, "num_inference_steps", 0) or engine._progress.get(
+            "total", 0
+        )
         engine._progress["step"] = int(t) + 1
         engine._progress["total"] = int(total)
         if engine._cancel:
@@ -113,11 +117,11 @@ _NO_NEGATIVE_PROMPT_FAMILIES = frozenset({"flux2-klein"})
 # Per-family default denoise steps when the request pins none. Distilled/turbo
 # models converge in a handful of steps; a non-distilled model needs many more.
 _DEFAULT_STEPS_BY_FAMILY = {
-    "flux2-klein": 4,   # distilled turbo
-    "z-image": 8,       # turbo, but 8 is the sweet spot for its quality
+    "flux2-klein": 4,  # distilled turbo
+    "z-image": 8,  # turbo, but 8 is the sweet spot for its quality
     "flux-schnell": 4,  # distilled
-    "flux-dev": 20,     # non-distilled
-    "qwen-image": 20,   # non-distilled 20B
+    "flux-dev": 20,  # non-distilled
+    "qwen-image": 20,  # non-distilled 20B
     "qwen-image-edit": 20,
 }
 
@@ -144,7 +148,9 @@ class ImageGenerationEngine:
     the transport never has to touch the filesystem.
     """
 
-    def __init__(self, model_name: str, *, quantize: int | None = _DEFAULT_QUANTIZE) -> None:
+    def __init__(
+        self, model_name: str, *, quantize: int | None = _DEFAULT_QUANTIZE
+    ) -> None:
         self.model_name = model_name
         self.family = _detect_family(model_name)
         self.is_edit = self.family == "qwen-image-edit"
@@ -160,7 +166,10 @@ class ImageGenerationEngine:
         # is unambiguous). ``request_cancel`` flips ``_cancel``; the reporter
         # reads it each step. ``_reporter`` is registered once per loaded model.
         self._progress: dict[str, float | int | bool] = {
-            "running": False, "step": 0, "total": 0, "started_at": 0.0,
+            "running": False,
+            "step": 0,
+            "total": 0,
+            "started_at": 0.0,
         }
         self._cancel = False
         self._reporter = _ProgressReporter(self)
@@ -201,8 +210,14 @@ class ImageGenerationEngine:
 
         from mflux.models.flux.variants.txt2img.flux import Flux1
 
-        config = ModelConfig.schnell() if self.family == "flux-schnell" else ModelConfig.dev()
-        return Flux1(quantize=self._quantize, model_path=model_path, model_config=config)
+        config = (
+            ModelConfig.schnell()
+            if self.family == "flux-schnell"
+            else ModelConfig.dev()
+        )
+        return Flux1(
+            quantize=self._quantize, model_path=model_path, model_config=config
+        )
 
     def _ensure_loaded(self):
         if self._model is None:
@@ -267,15 +282,23 @@ class ImageGenerationEngine:
             )
 
         with self._lock:
-            model = self._ensure_loaded()
-            # Arm progress for this single-flight render (the lock guarantees no
-            # other generation is mutating the snapshot concurrently).
+            # Arm cancellation + progress BEFORE loading, so a Cancel pressed
+            # during the (possibly multi-gigabyte) cold model load is honored
+            # instead of being reset away once the load finishes. The lock
+            # guarantees no other generation is mutating the snapshot.
             self._cancel = False
             self._progress.update(
-                running=True, step=0, total=int(num_inference_steps),
+                running=True,
+                step=0,
+                total=int(num_inference_steps),
                 started_at=time.time(),
             )
             try:
+                model = self._ensure_loaded()
+                # Honor a cancel that landed during the warm-up load before we
+                # commit to the denoise loop.
+                if self._cancel:
+                    raise ImageGenerationCancelled("Generation cancelled.")
                 if self.is_edit:
                     # Edit derives its output canvas from the input image and
                     # must NOT be given an explicit width/height. mflux fixes the
@@ -288,15 +311,20 @@ class ImageGenerationEngine:
                     # Passing ``None`` lets mflux size the target to match the
                     # conditioning, exactly like its edit CLI.
                     result = model.generate_image(
-                        image_paths=image_paths, height=None, width=None,
-                        **self._gen_kwargs(seed, prompt, num_inference_steps,
-                                           guidance, negative_prompt),
+                        image_paths=image_paths,
+                        height=None,
+                        width=None,
+                        **self._gen_kwargs(
+                            seed, prompt, num_inference_steps, guidance, negative_prompt
+                        ),
                     )
                 else:
                     result = model.generate_image(
-                        height=height, width=width,
-                        **self._gen_kwargs(seed, prompt, num_inference_steps,
-                                           guidance, negative_prompt),
+                        height=height,
+                        width=width,
+                        **self._gen_kwargs(
+                            seed, prompt, num_inference_steps, guidance, negative_prompt
+                        ),
                     )
             except ImageRuntimeError:
                 raise  # cancellation + already-clean errors pass straight through
@@ -307,7 +335,9 @@ class ImageGenerationEngine:
 
         return self._encode_png(result)
 
-    def _gen_kwargs(self, seed, prompt, num_inference_steps, guidance, negative_prompt) -> dict:
+    def _gen_kwargs(
+        self, seed, prompt, num_inference_steps, guidance, negative_prompt
+    ) -> dict:
         """Build ``generate_image`` kwargs, omitting params a family rejects.
 
         FLUX.2 Klein has no ``negative_prompt`` parameter (passing it raises),

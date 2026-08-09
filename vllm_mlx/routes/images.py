@@ -3,6 +3,7 @@
 
 import base64
 import logging
+import math
 import os
 import tempfile
 import time
@@ -63,7 +64,9 @@ def _generate_one(engine, request: ImageGenerationRequest, seed: int) -> bytes:
         prompt=request.prompt,
         width=width,
         height=height,
-        num_inference_steps=request.steps if request.steps is not None else default_steps,
+        num_inference_steps=request.steps
+        if request.steps is not None
+        else default_steps,
         seed=seed,
         # None → each model uses its own trained default guidance (Klein is
         # guidance-distilled; forcing 4.0 washes it out).
@@ -121,7 +124,9 @@ async def create_image(request: ImageGenerationRequest = Body(...)):
 
     # When no seed is pinned, derive one from wall-clock so successive calls
     # vary; multi-image (``n``) requests offset per index off that base.
-    base_seed = request.seed if request.seed is not None else int(time.time()) & 0x7FFFFFFF
+    base_seed = (
+        request.seed if request.seed is not None else int(time.time()) & 0x7FFFFFFF
+    )
 
     from ..image.engine import ImageGenerationCancelled
 
@@ -176,8 +181,24 @@ async def image_cancel():
     return {"ok": True}
 
 
-def _generate_edit_one(engine, prompt, steps, seed, guidance,
-                       negative_prompt, image_path) -> bytes:
+def _reject(condition: bool, message: str, param: str) -> None:
+    """Raise a 400 invalid_request_error when ``condition`` holds."""
+    if condition:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": message,
+                    "type": "invalid_request_error",
+                    "param": param,
+                }
+            },
+        )
+
+
+def _generate_edit_one(
+    engine, prompt, steps, seed, guidance, negative_prompt, image_path
+) -> bytes:
     """Blocking single instruction-edit render — runs off the event loop.
 
     No width/height is threaded: the edit family sizes its output canvas from
@@ -215,7 +236,7 @@ async def edit_image(
     prompt drive a global instruction edit (no mask). Returns the same
     ``{created, data:[{b64_json}]}`` envelope as generations.
     """
-    from ..image.engine import ImageRuntimeError
+    from ..image.engine import ImageGenerationCancelled, ImageRuntimeError
 
     engine = _image_engine()
 
@@ -241,23 +262,37 @@ async def edit_image(
     if not prompt or not prompt.strip():
         raise HTTPException(
             status_code=400,
-            detail={"error": {"message": "prompt must not be empty",
-                              "type": "invalid_request_error", "param": "prompt"}},
+            detail={
+                "error": {
+                    "message": "prompt must not be empty",
+                    "type": "invalid_request_error",
+                    "param": "prompt",
+                }
+            },
         )
     if response_format == "url":
         raise HTTPException(
             status_code=400,
-            detail={"error": {"message": "The local image lane only returns base64 "
-                              "data; request response_format='b64_json'.",
-                              "type": "invalid_request_error",
-                              "code": "unsupported_response_format",
-                              "param": "response_format"}},
+            detail={
+                "error": {
+                    "message": "The local image lane only returns base64 "
+                    "data; request response_format='b64_json'.",
+                    "type": "invalid_request_error",
+                    "code": "unsupported_response_format",
+                    "param": "response_format",
+                }
+            },
         )
     if not 1 <= n <= 4:
         raise HTTPException(
             status_code=400,
-            detail={"error": {"message": "n must be between 1 and 4",
-                              "type": "invalid_request_error", "param": "n"}},
+            detail={
+                "error": {
+                    "message": "n must be between 1 and 4",
+                    "type": "invalid_request_error",
+                    "param": "n",
+                }
+            },
         )
     # ``size`` is accepted for OpenAI-API compatibility but the edit family
     # derives its output canvas from the input image; a mismatched target size
@@ -269,24 +304,69 @@ async def edit_image(
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail={"error": {"message": str(exc),
-                              "type": "invalid_request_error", "param": "size"}},
+            detail={
+                "error": {
+                    "message": str(exc),
+                    "type": "invalid_request_error",
+                    "param": "size",
+                }
+            },
         ) from exc
 
-    raw = await image.read()
+    # A raw multipart form bypasses the validated bounds ``ImageGenerationRequest``
+    # enforces on the JSON path, so a negative seed, non-finite guidance, or an
+    # enormous step count could otherwise reach — and monopolize/crash — the
+    # inference server. Validate the numeric knobs to the same bounds here.
+    _reject(
+        steps is not None and not (1 <= steps <= 100),
+        "steps must be between 1 and 100",
+        "steps",
+    )
+    _reject(
+        guidance is not None
+        and not (math.isfinite(guidance) and 0.0 <= guidance <= 20.0),
+        "guidance must be a finite number between 0 and 20",
+        "guidance",
+    )
+    _reject(
+        seed is not None and not (0 <= seed <= 0x7FFFFFFF),
+        "seed must be between 0 and 2147483647",
+        "seed",
+    )
+
+    # Bounded, streaming read: abort as soon as the cumulative size exceeds the
+    # cap rather than materializing the whole (possibly huge) upload first —
+    # otherwise an unauthenticated oversized multipart request exhausts memory.
+    raw = bytearray()
+    while True:
+        chunk = await image.read(1024 * 1024)
+        if not chunk:
+            break
+        raw.extend(chunk)
+        if len(raw) > _MAX_EDIT_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": {
+                        "message": f"image exceeds "
+                        f"{_MAX_EDIT_IMAGE_BYTES // (1024 * 1024)} MB limit",
+                        "type": "invalid_request_error",
+                        "param": "image",
+                    }
+                },
+            )
     if not raw:
         raise HTTPException(
             status_code=400,
-            detail={"error": {"message": "image file is empty",
-                              "type": "invalid_request_error", "param": "image"}},
+            detail={
+                "error": {
+                    "message": "image file is empty",
+                    "type": "invalid_request_error",
+                    "param": "image",
+                }
+            },
         )
-    if len(raw) > _MAX_EDIT_IMAGE_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail={"error": {"message": f"image exceeds "
-                              f"{_MAX_EDIT_IMAGE_BYTES // (1024 * 1024)} MB limit",
-                              "type": "invalid_request_error", "param": "image"}},
-        )
+    raw = bytes(raw)
 
     suffix = os.path.splitext(image.filename or "")[1] or ".png"
     base_seed = seed if seed is not None else int(time.time()) & 0x7FFFFFFF
@@ -296,19 +376,35 @@ async def edit_image(
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(raw)
         tmp_path = tmp.name
+    cancelled = False
     try:
         for index in range(n):
             try:
                 png_bytes = await run_to_completion(
-                    _generate_edit_one, engine, prompt, steps,
-                    base_seed + index, guidance, negative_prompt, tmp_path,
+                    _generate_edit_one,
+                    engine,
+                    prompt,
+                    steps,
+                    base_seed + index,
+                    guidance,
+                    negative_prompt,
+                    tmp_path,
                 )
+            except ImageGenerationCancelled:
+                # A mid-render cancel is a success, not a 500: return whatever
+                # finished (matching the generations envelope), never an error.
+                cancelled = True
+                break
             except ImageRuntimeError as exc:
                 raise HTTPException(
                     status_code=500,
-                    detail={"error": {"message": str(exc),
-                                      "type": "image_generation_error",
-                                      "code": "image_generation_failed"}},
+                    detail={
+                        "error": {
+                            "message": str(exc),
+                            "type": "image_generation_error",
+                            "code": "image_generation_failed",
+                        }
+                    },
                 ) from exc
             data.append({"b64_json": base64.b64encode(png_bytes).decode("ascii")})
     finally:
@@ -317,4 +413,4 @@ async def edit_image(
         except OSError:
             pass
 
-    return {"created": int(time.time()), "data": data}
+    return {"created": int(time.time()), "data": data, "cancelled": cancelled}

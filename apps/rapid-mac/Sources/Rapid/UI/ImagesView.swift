@@ -517,7 +517,12 @@ struct ImagesView: View {
         panel.nameFieldStringValue = "rapid-image.png"
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? image.pngData.write(to: url)
+        do {
+            try image.pngData.write(to: url)
+        } catch {
+            // Don't let a disk-full / permission failure look like a success.
+            viewModel.errorMessage = "Couldn't save the image: \(error.localizedDescription)"
+        }
     }
 }
 

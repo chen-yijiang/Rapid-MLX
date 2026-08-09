@@ -197,31 +197,36 @@ seconds, refine by re-prompting. `image-generation` walks that through AX
 identifiers, no real diffusion weights required (the fake sidecar answers
 `/v1/images/*` with a 1×1 PNG). Demonstrated live with real weights below.
 
-1. open the Images tab via `Sidebar.Images`; assert `Images.EmptyState` is
-   present (no results yet) and its copy invites a prompt + model;
-2. pick an image model in `Images.ModelPicker` (the list is the `[image:gen]`
-   rows from `rapid-mlx models`, never a chat alias — see `catalog-integrity`);
-   optionally set `Images.SizePicker`;
-3. **Generate.** Type into `Images.Prompt`, press `Images.Generate`; assert the
-   button shows the in-flight state while the request is open, then that a
-   result card appears under `Images.Gallery` (and `Images.EmptyState` is gone);
-4. **Refine by re-prompting.** Adjust the prompt and press `Images.Generate`
-   again; each render lands as its own card under `Images.Gallery`, so the user
-   iterates a look by editing words rather than waiting on a slow image-edit.
-5. `Images.Result.Save` opens the standard save panel on any card (not asserted
-   through the panel itself — a modal `NSSavePanel` is out of AX scope, like
-   every other file-picker in the app).
+1. open the Images tab via `Sidebar.Images`; assert the `Images.EmptyState`
+   hero (the cheetah mark + "Draw anything") is present;
+2. the composer's `Images.ModelPicker` lists the `[image:gen]` rows from
+   `rapid-mlx models`, never a chat alias (see `catalog-integrity`); set the
+   aspect ratio with `Images.Aspect` (1:1 / 3:4 / 4:3);
+3. **Load the model.** rapid-mlx serves one model per process, so when the
+   server is on a different (e.g. chat) model the tab shows a readiness banner
+   ("<model> isn't running"); press `Readiness.Action` to switch the server to
+   the image model. `Images.Generate` stays disabled until it is ready — the
+   same `ModelReadiness` gate chat uses;
+4. **Generate.** Type into `Images.Prompt`, press `Images.Generate`; assert the
+   in-flight progress card appears (a true `step / total` bar, elapsed, ETA, and
+   an `Images.Cancel` control), then a result appears in `Images.Stage` with a
+   thumbnail under `Images.Gallery` (and `Images.EmptyState` is gone);
+5. **Refine by re-prompting.** Adjust the prompt and press `Images.Generate`
+   again; each render lands as its own thumbnail in the `Images.Gallery`
+   filmstrip, clickable to revisit its prompt;
+6. `Images.Result.Save` (a hover control on the focal image) opens the standard
+   save panel — not asserted through the modal `NSSavePanel`, out of AX scope
+   like every other file-picker in the app.
 
-### Instruction edit — parked (slow, batch-only)
+### Instruction edit — endpoint-only, parked
 
-The tab also ships an instruction-**edit** path (`Images.Result.Edit` on a card
-re-stages its output as the next `image_paths`, driving `/v1/images/edits`). It
-is **correct but deliberately not the interactive flow**: on current Apple
-Silicon a q4 Qwen-Image-Edit render is ~20 min (see realities below), so it reads
-as a batch action, not a conversation. The endpoint, `ImageGenViewModel.runEdit`
-/ `beginEdit`, and their hermetic tests stay in the tree for when a distilled
-edit model or faster hardware makes it interactive; until then the product story
-is generation.
+The `/v1/images/edits` endpoint and `ImageGenViewModel.runEdit` / `beginEdit`
+exist and are hermetically tested, but the current Images tab wires **no UI
+control** to them — there is no in-app edit action. The path is parked because
+on current Apple Silicon a q4 Qwen-Image-Edit render is ~20 min (see realities
+below): a batch action, not a conversation. It stays in the tree, reachable only
+via the HTTP API, for when a distilled edit model or faster hardware makes it
+interactive; until then the product story is generation.
 
 ### Model realities the UX has to design around
 
@@ -246,12 +251,12 @@ Verified on an M2 Pro 32 GB with the 4-bit mflux checkpoints:
   `-q8`), which costs proportionally more RAM/disk. Raising `steps` past ~20 on
   q4 only burns wall-clock.
 
-The **model-vs-endpoint contract** is the load-bearing invariant here and is
-covered by pure Swift coverage rather than a live flow: a text-to-image alias
-must drive `/v1/images/generations` and an `*-image-edit` alias
-`/v1/images/edits`; the server answers the wrong pairing with a 409 rather than
-a silent wrong result (`ImageGenViewModel.selectedIsEditModel` gates which one
-the compose bar offers, and the routes enforce it server-side).
+The **model-vs-endpoint contract** is enforced server-side and covered by
+hermetic tests rather than a live flow: a text-to-image server answers
+`/v1/images/edits` with a 409, and an edit server answers
+`/v1/images/generations` with a 409, so a mis-routed request fails loud instead
+of returning a silent wrong result. The Images tab itself only drives
+`/v1/images/generations`.
 
 > Status: the AX identifiers and states above are **defined and shipped** in
 > product code; the runnable `gui-golden-flows.sh --flow image-generation`

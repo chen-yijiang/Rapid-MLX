@@ -15,7 +15,11 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from vllm_mlx.api.models import ImageGenerationRequest
-from vllm_mlx.image.engine import ImageGenerationEngine, ImageRuntimeError
+from vllm_mlx.image.engine import (
+    ImageGenerationCancelled,
+    ImageGenerationEngine,
+    ImageRuntimeError,
+)
 from vllm_mlx.runtime.image_lane import ImageEngine
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -61,10 +65,10 @@ def test_detect_family(hf_path, expected_family, is_edit):
 @pytest.mark.parametrize(
     "hf_path,expected_default_steps",
     [
-        ("Runpod/FLUX.2-klein-4B-mflux-4bit", 4),   # distilled turbo
+        ("Runpod/FLUX.2-klein-4B-mflux-4bit", 4),  # distilled turbo
         ("filipstrand/Z-Image-Turbo-mflux-4bit", 8),  # turbo, 8-step sweet spot
         ("black-forest-labs/FLUX.1-schnell", 4),
-        ("Qwen/Qwen-Image", 20),                    # non-distilled
+        ("Qwen/Qwen-Image", 20),  # non-distilled
     ],
 )
 def test_default_steps_is_family_aware(hf_path, expected_default_steps):
@@ -164,8 +168,11 @@ def test_edit_forces_none_dimensions_even_when_size_requested():
     fake = _FakeModel()
     engine._model = fake
     engine.generate(
-        prompt="add a hat", image_paths=["/tmp/in.png"],
-        width=512, height=512, seed=3,
+        prompt="add a hat",
+        image_paths=["/tmp/in.png"],
+        width=512,
+        height=512,
+        seed=3,
     )
     assert fake.calls[0]["width"] is None
     assert fake.calls[0]["height"] is None
@@ -287,14 +294,29 @@ class _FakeImageEngine:
         self.cancelled = False
 
     def progress_snapshot(self):
-        return {"running": True, "step": 2, "total": 4, "elapsed_ms": 1200,
-                "family": "flux2-klein"}
+        return {
+            "running": True,
+            "step": 2,
+            "total": 4,
+            "elapsed_ms": 1200,
+            "family": "flux2-klein",
+        }
 
     def request_cancel(self):
         self.cancelled = True
 
-    def generate(self, *, prompt, num_inference_steps, seed, guidance,
-                 negative_prompt, width=None, height=None, image_paths=None):
+    def generate(
+        self,
+        *,
+        prompt,
+        num_inference_steps,
+        seed,
+        guidance,
+        negative_prompt,
+        width=None,
+        height=None,
+        image_paths=None,
+    ):
         # The edit route omits width/height (the engine derives them from the
         # input image); the generations route always supplies them.
         self.seeds.append(seed)
@@ -399,9 +421,7 @@ def test_cancel_endpoint_signals_engine(client, monkeypatch):
 @pytest.mark.parametrize("bad_size", ["1023x1024", "100x100", "3000x512", "oops"])
 def test_route_rejects_bad_size(client, monkeypatch, bad_size):
     _patch_engine(monkeypatch, _FakeImageEngine())
-    resp = client.post(
-        "/v1/images/generations", json={"prompt": "x", "size": bad_size}
-    )
+    resp = client.post("/v1/images/generations", json={"prompt": "x", "size": bad_size})
     assert resp.status_code in (400, 422)
 
 
@@ -525,3 +545,75 @@ def test_edit_400_empty_image(client, monkeypatch):
         data={"prompt": "x"},
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("steps", "0"),
+        ("steps", "500"),
+        ("guidance", "nan"),
+        ("guidance", "999"),
+        ("seed", "-1"),
+    ],
+)
+def test_edit_rejects_out_of_bounds_params(client, monkeypatch, field, value):
+    # A raw multipart form must not smuggle a negative seed / non-finite
+    # guidance / absurd step count past the validated bounds.
+    _patch_engine(monkeypatch, _FakeImageEngine(is_edit=True))
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "x", field: value},
+    )
+    assert resp.status_code in (400, 422)
+
+
+def test_edit_rejects_oversized_image(client, monkeypatch):
+    _patch_engine(monkeypatch, _FakeImageEngine(is_edit=True))
+    oversized = b"\x89PNG\r\n\x1a\n" + b"0" * (26 * 1024 * 1024)  # > 25 MB cap
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", oversized, "image/png")},
+        data={"prompt": "x"},
+    )
+    assert resp.status_code == 413
+
+
+def test_edit_cancel_returns_cancelled_envelope(client, monkeypatch):
+    from vllm_mlx.image.engine import ImageGenerationCancelled
+
+    class _CancelEngine:
+        is_image_gen = True
+        is_edit = True
+
+        def generate(self, **kwargs):
+            raise ImageGenerationCancelled("cancelled")
+
+    _patch_engine(monkeypatch, _CancelEngine())
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "x"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cancelled"] is True
+    assert body["data"] == []
+
+
+def test_generate_honors_cancel_after_cold_load():
+    # A cancel that lands during the warm-up load must abort before denoising,
+    # not be reset away once the model finishes loading.
+    engine = ImageGenerationEngine("Runpod/FLUX.2-klein-4B-mflux-4bit")
+    built = _FakeModel()
+
+    def _load_then_cancel():
+        engine._cancel = True  # simulate Cancel pressed during the load
+        return built
+
+    engine._build_model = _load_then_cancel  # type: ignore[assignment]
+    with pytest.raises(ImageGenerationCancelled):
+        engine.generate(prompt="x", seed=1)
+    # Nothing was generated (aborted before the denoise call).
+    assert built.calls == []

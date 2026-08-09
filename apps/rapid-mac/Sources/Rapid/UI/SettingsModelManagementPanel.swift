@@ -1323,6 +1323,7 @@ struct SettingsModelManagementPanel: View {
             binary: binary, generation: generation
         ) {
             catalog = hit + (await ModelCatalog.imageEntries(binary: binary))
+            reconcileCapability()
             loading = false
             return
         }
@@ -1336,6 +1337,19 @@ struct SettingsModelManagementPanel: View {
         )
         let image = await ModelCatalog.imageEntries(binary: binary)
         catalog = chat + image
+        reconcileCapability()
+    }
+
+    /// Keep the selected capability tab valid after the catalog changes.
+    /// Deleting the last image model while the Image tab is active (the tab bar
+    /// then collapses because only one kind remains) would otherwise strand the
+    /// panel on an empty, un-switchable ``.image`` view even though chat models
+    /// exist — so fall back to an available kind.
+    private func reconcileCapability() {
+        let kinds = availableKinds
+        if !kinds.isEmpty, !kinds.contains(capability) {
+            capability = kinds.first ?? .chat
+        }
     }
 
     private func deleteAlias(_ entry: ModelEntry) async {
