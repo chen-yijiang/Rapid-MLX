@@ -8,21 +8,6 @@ import Observation
 @MainActor
 @Observable
 final class ImageGenViewModel {
-    /// Speed-vs-quality is the user's real choice; the checkpoint name is
-    /// subtext. ``match`` picks the alias out of the catalog.
-    enum Quality: String, CaseIterable, Identifiable {
-        case fast, best
-        var id: String { rawValue }
-        var title: String { self == .fast ? "Fast" : "Best" }
-        var symbol: String { self == .fast ? "bolt.fill" : "sparkles" }
-        var subtitle: String { self == .fast ? "FLUX.2 Klein" : "Z-Image Turbo" }
-        var etaHint: String { self == .fast ? "~10s" : "~33s" }
-        /// Substring that identifies this tier's alias in the catalog.
-        var match: String { self == .fast ? "klein" : "z-image" }
-        /// Steps used to seed the progress bar before the server reports one.
-        var seedSteps: Int { self == .fast ? 4 : 8 }
-    }
-
     /// Aspect ratio as three friendly buttons rather than a "512×512" string.
     enum Aspect: String, CaseIterable, Identifiable {
         case square, portrait, landscape
@@ -57,14 +42,16 @@ final class ImageGenViewModel {
 
     // MARK: - Composed input
     var prompt: String = ""
-    var quality: Quality = .fast
     var aspect: Aspect = .square
 
     // MARK: - Catalog
-    /// The alias each quality tier resolves to (from the ``[image:gen]`` rows).
+    /// Every installed/available image model (the ``[image:gen]`` rows). The
+    /// picker lists these directly — one dropdown that scales to N models,
+    /// same shape as the chat picker, rather than a fixed set of boxes.
     var imageModels: [ModelEntry] = []
     var catalogLoaded: Bool = false
-    private(set) var selectedAlias: String = ""
+    /// The alias the picker points at. Settable directly by the dropdown.
+    var selectedAlias: String = ""
 
     // MARK: - Results
     /// Newest-first session gallery (the filmstrip).
@@ -88,7 +75,20 @@ final class ImageGenViewModel {
     private(set) var genStartedAt: Date?
 
     /// Steps the bar should assume before the server reports a live total.
-    var estimatedSteps: Int { progress?.total ?? quality.seedSteps }
+    /// Derived from the selected model family (turbo Z-Image wants ~8, the
+    /// distilled Klein/schnell 4) so the bar is sensibly scaled from step one.
+    var estimatedSteps: Int {
+        progress?.total ?? Self.seedSteps(for: selectedAlias)
+    }
+
+    static func seedSteps(for alias: String) -> Int {
+        alias.localizedCaseInsensitiveContains("z-image") ? 8 : 4
+    }
+
+    /// A readable name for the selected model, shown in the cold-load HUD.
+    var selectedDisplayName: String {
+        selectedAlias.isEmpty ? "the model" : selectedAlias
+    }
 
     // MARK: - Edit (parked lane, kept for later)
     var editSource: GeneratedImage?
@@ -104,16 +104,6 @@ final class ImageGenViewModel {
         !isGenerating
             && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !selectedAlias.isEmpty
-    }
-
-    /// Does a model for the chosen quality exist in the catalog?
-    func hasModel(for quality: Quality) -> Bool {
-        imageModels.contains { $0.alias.localizedCaseInsensitiveContains(quality.match) }
-    }
-
-    func setQuality(_ q: Quality) {
-        quality = q
-        resolveAlias()
     }
 
     func use(starter: String) {
@@ -133,11 +123,14 @@ final class ImageGenViewModel {
         resolveAlias()
     }
 
-    /// Point ``selectedAlias`` at the current quality tier, falling back to the
-    /// other tier (then any image model) so Generate is never dead.
+    /// Keep ``selectedAlias`` valid: default to a cached model (so the first
+    /// run doesn't force a pull), else the first image model. Only overrides
+    /// when the current selection is empty or no longer in the catalog, so a
+    /// user's explicit pick survives a refresh.
     private func resolveAlias() {
-        let byTier = imageModels.first { $0.alias.localizedCaseInsensitiveContains(quality.match) }
-        selectedAlias = (byTier ?? imageModels.first)?.alias ?? ""
+        let stillValid = imageModels.contains { $0.alias == selectedAlias }
+        guard selectedAlias.isEmpty || !stillValid else { return }
+        selectedAlias = (imageModels.first { $0.cached } ?? imageModels.first)?.alias ?? ""
     }
 
     // MARK: - Generate

@@ -12,7 +12,7 @@ struct ImagesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            qualityBar
+            topBar
             Divider()
             stageAndHistory
             Divider()
@@ -22,13 +22,13 @@ struct ImagesView: View {
         .task { await viewModel.refreshCatalog() }
     }
 
-    // MARK: - Quality bar
+    // MARK: - Top bar (model picker + Save)
 
-    private var qualityBar: some View {
-        HStack(spacing: 12) {
-            ForEach(ImageGenViewModel.Quality.allCases) { q in
-                qualityChip(q)
-            }
+    private var topBar: some View {
+        HStack(spacing: 10) {
+            Text("Model").font(.caption).foregroundStyle(.secondary)
+            modelPicker
+                .frame(minWidth: 220, maxWidth: 320)
             Spacer()
             if let active = viewModel.activeImage, !viewModel.isGenerating {
                 Button {
@@ -45,34 +45,67 @@ struct ImagesView: View {
         .background(RapidTheme.surfaceSidebar)
     }
 
-    private func qualityChip(_ q: ImageGenViewModel.Quality) -> some View {
-        let selected = viewModel.quality == q
-        return Button {
-            viewModel.setQuality(q)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: q.symbol)
-                    .font(.system(size: 12, weight: .semibold))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(q.title).font(.system(size: 13, weight: .semibold))
-                    Text("\(q.subtitle) · \(q.etaHint)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(selected ? Color.black.opacity(0.65) : .secondary)
+    /// A dropdown listing every image model — the same shape as the chat
+    /// picker (one Menu, a cache glyph per row) so it scales to any number of
+    /// models instead of the fixed Fast/Best boxes. Manage/download/delete
+    /// live in Settings → Model Management (Image tab).
+    private var modelPicker: some View {
+        Menu {
+            if viewModel.imageModels.isEmpty {
+                Text(viewModel.catalogLoaded ? "No image models available" : "Loading…")
+            } else {
+                ForEach(viewModel.imageModels) { entry in
+                    Button {
+                        viewModel.selectedAlias = entry.alias
+                    } label: {
+                        Label(
+                            modelRowTitle(entry),
+                            systemImage: ModelPickerBar.cacheGlyph(cached: entry.cached)
+                        )
+                    }
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(selected ? RapidTheme.brandAmber : RapidTheme.card)
-            .foregroundStyle(selected ? Color.black : Color.primary)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(RapidTheme.hairline, lineWidth: selected ? 0 : 1)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text(viewModel.selectedAlias.isEmpty ? "Choose a model" : viewModel.selectedAlias)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(viewModel.selectedAlias.isEmpty ? .secondary : .primary)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.secondary.opacity(0.06))
             )
-            .opacity(viewModel.catalogLoaded && !viewModel.hasModel(for: q) ? 0.45 : 1)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(RapidTheme.hairline, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
+        .menuStyle(.button)
         .buttonStyle(.plain)
-        .accessibilityIdentifier("Images.Quality.\(q.title)")
+        .menuIndicator(.hidden)
+        .accessibilityIdentifier("Images.ModelPicker")
+    }
+
+    /// "flux2-klein-4b · 4.3 GiB" — alias plus size when known. The green
+    /// check / download glyph (from ``ModelPickerBar.cacheGlyph``) carries
+    /// installed state, exactly as in the chat picker.
+    private func modelRowTitle(_ entry: ModelEntry) -> String {
+        if let size = entry.sizeOnDisk, !size.isEmpty {
+            return "\(entry.alias) · \(size)"
+        }
+        return entry.alias
     }
 
     // MARK: - Stage + history
@@ -164,7 +197,7 @@ struct ImagesView: View {
         HStack(spacing: 12) {
             ProgressView().controlSize(.small)
             VStack(alignment: .leading, spacing: 2) {
-                Text(viewModel.cancelling ? "Stopping…" : "Warming up \(viewModel.quality.subtitle)…")
+                Text(viewModel.cancelling ? "Stopping…" : "Warming up \(viewModel.selectedDisplayName)…")
                     .font(.system(size: 13, weight: .semibold))
                 Text("First run loads the model — this only happens once.")
                     .font(.caption).foregroundStyle(.secondary)
