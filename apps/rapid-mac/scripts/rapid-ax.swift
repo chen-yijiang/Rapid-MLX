@@ -16,9 +16,24 @@ guard CommandLine.arguments.count >= 3,
 
 let command = CommandLine.arguments[1]
 let application = AXUIElementCreateApplication(pid)
-var visited = Set<CFHashCode>()
+var visited = Set<AXUIElement>()
 var records = [[String: Any]]()
 var match: AXUIElement?
+// A negative assertion over ui_elements is valid only if the descendant walk
+// reached every child. Caps and AX read failures are observations of
+// "unknown", not proof that an element is absent.
+var elementWalkComplete = true
+// The window list is NOT a by-product of the tree walk, because every way the
+// walk can come up short is silent: it skips a root child whose AXRole read
+// failed, drops a title it could not read, and stops dead at the record cap.
+// Each shortens the list, and no caller can tell a shortened list from a
+// window that closed — which is exactly how a golden flow waiting for a window
+// to DISAPPEAR takes a transient AX failure as proof that it did. So enumerate
+// the root's children once, up front, and say plainly whether that enumeration
+// can be trusted. `complete: false` is not an error; it means "ask again".
+var windowTitles = [String]()
+var windowListComplete = true
+var windowElements = [AXUIElement]()
 let wanted = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : nil
 
 func attribute(_ element: AXUIElement, _ name: CFString) -> AnyObject? {
@@ -54,9 +69,11 @@ func size(_ element: AXUIElement, _ name: CFString) -> CGSize? {
 }
 
 func walk(_ element: AXUIElement, depth: Int) {
-    guard depth <= 40, records.count < 12_000 else { return }
-    let identity = CFHash(element)
-    guard visited.insert(identity).inserted else { return }
+    guard depth <= 40, records.count < 12_000 else {
+        elementWalkComplete = false
+        return
+    }
+    guard visited.insert(element).inserted else { return }
 
     let identifier = string(element, kAXIdentifierAttribute as CFString)
     var record: [String: Any] = ["depth": depth]
@@ -72,6 +89,14 @@ func walk(_ element: AXUIElement, depth: Int) {
     if let enabled = attribute(element, kAXEnabledAttribute as CFString) as? NSNumber {
         record["enabled"] = enabled.boolValue
     }
+    // Which of several equal-looking things is the CHOSEN one. Without it a
+    // flow can see that the model cards exist and are enabled but not which
+    // one the user picked, so "the wizard silently discarded your selection"
+    // is invisible to every assertion the harness can make (#1653). Same rule
+    // as AXEnabled: absent on most elements, recorded only when published.
+    if let selected = attribute(element, kAXSelectedAttribute as CFString) as? NSNumber {
+        record["selected"] = selected.boolValue
+    }
     if let title = string(element, kAXTitleAttribute as CFString), !title.isEmpty { record["title"] = title }
     if let description = string(element, kAXDescriptionAttribute as CFString), !description.isEmpty { record["description"] = description }
     if let help = string(element, kAXHelpAttribute as CFString), !help.isEmpty { record["help"] = help }
@@ -86,25 +111,78 @@ func walk(_ element: AXUIElement, depth: Int) {
     records.append(record)
 
     if match == nil, identifier == wanted { match = element }
-    guard let children = attribute(element, kAXChildrenAttribute as CFString) as? [AXUIElement] else { return }
-    for child in children {
-        // The application root also owns the global menu bar. Traversing it
-        // captures unrelated macOS Recent Items in test artifacts and adds
-        // thousands of irrelevant nodes. Golden flows only need app windows;
-        // sheets and popovers remain descendants of those windows.
-        if depth == 0, string(child, kAXRoleAttribute as CFString) != kAXWindowRole as String {
-            continue
+    // At depth 0 the children ARE the windows enumerated below, reused rather
+    // than read again: a second AXChildren read can return a different set, and
+    // then `ui_elements` and the `windows` list this dump vouches for would
+    // disagree about which windows exist.
+    //
+    // That enumeration also drops the global menu bar, which the application
+    // root owns as well. Traversing it captures unrelated macOS Recent Items in
+    // artifacts and adds thousands of irrelevant nodes; golden flows only need
+    // app windows, and sheets and popovers stay descendants of those.
+    let children: [AXUIElement]
+    if depth == 0 {
+        children = windowElements
+    } else {
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(
+            element, kAXChildrenAttribute as CFString, &value)
+        if result == .attributeUnsupported || result == .noValue {
+            children = []
+        } else if result == .success, let kids = value as? [AXUIElement] {
+            children = kids
+        } else {
+            elementWalkComplete = false
+            return
         }
+    }
+    for child in children {
         walk(child, depth: depth + 1)
     }
 }
 
+// Enumerate the windows before walking, so the walk can be filtered against
+// the result. Every read that fails here marks the list incomplete instead of
+// quietly shortening it; a window we cannot name is still a window we saw.
+if let rootChildren = attribute(application, kAXChildrenAttribute as CFString) as? [AXUIElement] {
+    for child in rootChildren {
+        guard let role = string(child, kAXRoleAttribute as CFString) else {
+            // We could not even establish whether this child is a window.
+            windowListComplete = false
+            continue
+        }
+        guard role == kAXWindowRole as String else { continue }
+        // Recorded even when the title will not read: a window we cannot name
+        // is still a window, and dropping it here would shorten the tree too.
+        windowElements.append(child)
+        guard let title = string(child, kAXTitleAttribute as CFString) else {
+            windowListComplete = false
+            continue
+        }
+        windowTitles.append(title)
+    }
+} else {
+    windowListComplete = false
+}
+
 walk(application, depth: 0)
+elementWalkComplete = elementWalkComplete && windowListComplete
 
 if command == "dump" {
     let payload: [String: Any] = [
         "success": true,
-        "data": ["pid": pid, "ui_elements": records]
+        "data": [
+            "pid": pid,
+            "ui_elements": records,
+            "walk": [
+                "complete": elementWalkComplete,
+                "record_count": records.count
+            ],
+            // The authority for "is window X open?" — see the note above. Callers
+            // must treat `complete: false` as "could not observe", never as an
+            // answer in either direction.
+            "windows": ["titles": windowTitles, "complete": windowListComplete]
+        ]
     ]
     let data = try! JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
     FileHandle.standardOutput.write(data)

@@ -12,7 +12,7 @@ import Observation
 /// (in parallel via ``TaskGroup``), append the ``role: "tool"`` results
 /// to the transcript, open a fresh assistant placeholder, and start
 /// another stream. The loop terminates on any non-tool finish reason
-/// or when ``maxToolRounds`` is hit.
+/// or after a tools-disabled synthesis round when ``maxToolExecutions`` is hit.
 @MainActor
 @Observable
 final class ChatViewModel {
@@ -51,9 +51,15 @@ final class ChatViewModel {
     /// content), which is what unit tests and the no-tools build get.
     let tools: any ToolRegistry
 
-    /// Hard cap on tool-call rounds within a single user turn — stops a
-    /// runaway model that just keeps asking for the same tool.
-    private let maxToolRounds: Int = 10
+    /// Hard cap on tool executions within a single user turn. Three leaves
+    /// room for the useful search → open page → refine pattern without making
+    /// a user wait through a long local-model loop. After the budget is spent
+    /// we give the model one tools-disabled round to synthesize what it has.
+    private let maxToolExecutions: Int = 3
+
+    nonisolated private static let toolBudgetSynthesisPreamble = """
+    The tool-use budget for this turn is exhausted. Do not request or describe any more tool calls. Answer the user's question now using the evidence already present in the conversation. If that evidence is insufficient, say what remains uncertain.
+    """
 
     /// Per-tool on/off flags, persisted in ``UserDefaults`` under keys of the
     /// form ``rapid.tools.enabled.<name>``. Reads fall through to ``true``
@@ -389,6 +395,21 @@ final class ChatViewModel {
         guard !trimmed.isEmpty else { return }
         guard !isStreaming else { return }
 
+        // Small local models are unreliable at the first step of tool use:
+        // deciding that an explicitly live/dated question needs the web. Do
+        // that narrow piece of routing in the app, while leaving query wording
+        // and answer synthesis to the model. Follow-ups inherit the intent of
+        // the preceding user turn ("What about technology?") so restoring a
+        // conversation cannot silently turn search back into plain chat.
+        let forcedTool = Self.forcedToolForUserTurn(
+            trimmed,
+            priorMessages: messages,
+            enabledToolNames: Set(enabledDefinitions.map { $0.function.name })
+        )
+        let forcedWebSearchQuery = forcedTool == "web_search"
+            ? Self.webSearchQuery(for: trimmed, priorMessages: messages)
+            : nil
+
         let user = ChatMessage(
             role: .user,
             content: trimmed,
@@ -457,9 +478,139 @@ final class ChatViewModel {
             await self.runToolLoop(
                 alias: alias,
                 initialPlaceholder: placeholderIndex,
-                epoch: epoch
+                epoch: epoch,
+                forcedWebSearchQuery: forcedWebSearchQuery
             )
         }
+    }
+
+    /// Deterministic routing for prompts whose answer is explicitly time
+    /// sensitive. This is intentionally narrower than a general semantic
+    /// classifier: a false negative falls back to normal `tool_choice:auto`,
+    /// while a false positive performs an unnecessary network search.
+    nonisolated static func forcedToolForUserTurn(
+        _ prompt: String,
+        priorMessages: [ChatMessage],
+        enabledToolNames: Set<String>
+    ) -> String? {
+        guard enabledToolNames.contains("web_search") else { return nil }
+        if promptRequiresFreshWebEvidence(prompt) { return "web_search" }
+
+        // A short follow-up often omits the live-time words carried by the
+        // previous turn. Inherit across the immediately preceding user turn;
+        // this also covers a restored thread where the first broad search ran
+        // but the user now asks for a narrower, fresh query.
+        guard let previous = priorMessages.last(where: { $0.role == .user }),
+              promptLooksLikeFollowUp(prompt),
+              promptRequiresFreshWebEvidence(previous.content)
+        else { return nil }
+        return "web_search"
+    }
+
+    nonisolated static func promptRequiresFreshWebEvidence(_ prompt: String) -> Bool {
+        let value = prompt.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !value.isEmpty else { return false }
+        let phrases = [
+            "latest", "recent", "today", "yesterday", "this week", "last week",
+            "this month", "this year", "right now", "breaking news",
+            "news story", "news about", "world cup 2026", "2026 world cup",
+            "current price", "current weather", "current version", "current president",
+            "current status", "current score", "current exchange rate",
+            "最新", "最近", "今天", "昨天", "本周", "上周", "这个月", "本月",
+            "今年", "当前", "现在", "刚刚", "新闻", "今年世界杯"
+        ]
+        return phrases.contains(where: value.contains)
+    }
+
+    nonisolated static func promptLooksLikeFollowUp(_ prompt: String) -> Bool {
+        let value = prompt.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !value.isEmpty, value.count <= 240 else { return false }
+        let referentialPhrases = [
+            "what about", "how about", "tell me more", "summarize it",
+            "that story", "those results", "the same topic", "one concrete story",
+            "那这个呢", "那件事", "这件事", "这些结果", "继续说", "总结一下这个"
+        ]
+        if referentialPhrases.contains(where: value.contains) { return true }
+        // Bare elliptical replies are referential precisely because they have
+        // no independent subject. Do not broaden this to arbitrary questions
+        // containing "why" (e.g. "Why is the sky blue?").
+        let bareFollowUps: Set<String> = [
+            "why?", "why", "more", "and?", "还有呢？", "为什么？", "然后呢？"
+        ]
+        return bareFollowUps.contains(value)
+    }
+
+    nonisolated static func webSearchArguments(query: String) -> String {
+        let data = try? JSONSerialization.data(
+            withJSONObject: ["query": query],
+            options: [.sortedKeys]
+        )
+        return data.flatMap { String(data: $0, encoding: .utf8) }
+            ?? #"{"query":""}"#
+    }
+
+    /// Preserve the live-time scope when a follow-up is elliptical. Searching
+    /// only "What about technology?" loses the preceding "last week" filter
+    /// and lets stale or fictional high-ranking pages dominate the results.
+    nonisolated static func webSearchQuery(
+        for prompt: String,
+        priorMessages: [ChatMessage]
+    ) -> String {
+        if promptRequiresFreshWebEvidence(prompt) { return prompt }
+        if let previous = priorMessages.last(where: {
+            $0.role == .user && promptRequiresFreshWebEvidence($0.content)
+        }) {
+            return "\(previous.content)\nFollow-up focus: \(prompt)"
+        }
+        return prompt
+    }
+
+    struct GroundingSource: Equatable, Sendable {
+        let title: String
+        let url: String
+    }
+
+    nonisolated static func groundingSources(from toolResult: String) -> [GroundingSource] {
+        let lines = toolResult.split(separator: "\n", omittingEmptySubsequences: false)
+        var sources: [GroundingSource] = []
+        for index in lines.indices where sources.count < 3 {
+            let titleLine = lines[index].trimmingCharacters(in: .whitespaces)
+            guard titleLine.range(of: #"^\d+\.\s+"#, options: .regularExpression) != nil,
+                  lines.indices.contains(index + 1)
+            else { continue }
+            let url = lines[index + 1].trimmingCharacters(in: .whitespaces)
+            guard url.hasPrefix("https://") || url.hasPrefix("http://") else { continue }
+            let title = titleLine.replacingOccurrences(
+                of: #"^\d+\.\s+"#,
+                with: "",
+                options: .regularExpression
+            )
+            sources.append(GroundingSource(title: title, url: url))
+        }
+        return sources
+    }
+
+    private func appendGroundingSources(
+        _ sources: [GroundingSource],
+        to index: Int,
+        epoch: Int
+    ) {
+        guard epoch == conversationEpoch,
+              !sources.isEmpty,
+              var message = currentMessage(index: index),
+              message.status == .complete,
+              !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+        let missing = sources.filter { !message.content.contains($0.url) }
+        guard !missing.isEmpty else { return }
+        let rows = missing.map { source in
+            let safeTitle = source.title
+                .replacingOccurrences(of: "[", with: "\\[")
+                .replacingOccurrences(of: "]", with: "\\]")
+            return "- [\(safeTitle)](\(source.url))"
+        }
+        message.content += "\n\nSources:\n" + rows.joined(separator: "\n")
+        updateMessage(at: index, with: message)
     }
 
     /// HF repo for the alias the next Send will start, supplied by the
@@ -1024,8 +1175,8 @@ final class ChatViewModel {
     /// ``finish_reason: "tool_calls"`` we run the referenced tools, append the
     /// results as ``role: "tool"`` rows, open a fresh assistant placeholder,
     /// and loop. Any other finish reason (or a transport failure, or Stop)
-    /// ends the turn. Bounded by ``maxToolRounds`` so a misbehaving model
-    /// can't pin the loop forever.
+    /// ends the turn. Bounded by ``maxToolExecutions`` plus one tools-disabled
+    /// synthesis round so a misbehaving model can't pin the loop forever.
     ///
     /// The KEEP-path wire hygiene is preserved on every round: empty-prose
     /// and forward-incompatible ``.unknown`` rows are stripped from the wire
@@ -1034,7 +1185,8 @@ final class ChatViewModel {
     private func runToolLoop(
         alias: String,
         initialPlaceholder: Int,
-        epoch: Int
+        epoch: Int,
+        forcedWebSearchQuery: String? = nil
     ) async {
         defer {
             // A stream that outlived a conversation switch must not reset
@@ -1046,9 +1198,54 @@ final class ChatViewModel {
             }
         }
         var currentPlaceholder = initialPlaceholder
-        var roundsLeft = maxToolRounds
-        while roundsLeft > 0 {
-            roundsLeft -= 1
+        var toolExecutionsLeft = maxToolExecutions
+        var appGroundingSources: [GroundingSource] = []
+        var isFinalSynthesisRound = false
+
+        // `tool_choice:function` is advisory in several local chat templates:
+        // the shipped 1.2B starter can ignore it and answer "I can search".
+        // For an unambiguous fresh-information prompt, dispatch the harmless
+        // search directly and give the model the same assistant(tool_calls) +
+        // tool(result) transcript it would have produced itself. The model's
+        // job is then only evidence synthesis, which is much more reliable.
+        if let query = forcedWebSearchQuery,
+           toolExecutionsLeft > 0,
+           !query.isEmpty
+        {
+            let call = ToolCall(
+                id: "app_search_\(UUID().uuidString)",
+                name: "web_search",
+                arguments: Self.webSearchArguments(query: query)
+            )
+            if var staged = currentMessage(index: currentPlaceholder) {
+                staged.toolCalls = [call]
+                staged.status = .complete
+                updateMessage(at: currentPlaceholder, with: staged)
+            }
+            let result = await tools.run(call)
+            appGroundingSources = Self.groundingSources(from: result.content)
+            guard epoch == conversationEpoch, !Task.isCancelled else {
+                finaliseCancelledPlaceholder(at: currentPlaceholder, epoch: epoch)
+                return
+            }
+            let failureKind = result.failureKind ?? FailureDiagnoser.toolFailureKind(
+                toolName: "web_search",
+                content: result.content,
+                isError: result.isError
+            )
+            _ = appendMessage(ChatMessage(
+                role: .tool,
+                content: result.content,
+                status: (result.isError || failureKind != nil) ? .failed : .complete,
+                errorMessage: failureKind.map { FailureDiagnoser.diagnosis(for: $0).message },
+                failureKind: failureKind,
+                toolCallID: result.toolCallID
+            ))
+            currentPlaceholder = appendMessage(ChatMessage(role: .assistant, status: .streaming))
+            toolExecutionsLeft -= 1
+        }
+
+        while toolExecutionsLeft > 0 || isFinalSynthesisRound {
             // History for this request: everything BEFORE the streaming
             // placeholder. The placeholder itself is excluded because the
             // assistant hasn't said anything yet.
@@ -1070,7 +1267,7 @@ final class ChatViewModel {
             // definitions so the broken-tool-caller strip runs against the
             // model that will actually answer this round.
             let wireAlias = server?.servingAlias ?? alias
-            let definitions = ChatViewModel.wireDefinitions(
+            let definitions = isFinalSynthesisRound ? [] : ChatViewModel.wireDefinitions(
                 forAlias: wireAlias,
                 enabled: enabledDefinitions
             )
@@ -1117,6 +1314,11 @@ final class ChatViewModel {
             {
                 history.removeFirst()
             }
+            // Add this after the ambient/evidence consistency check above so
+            // combining the two system instructions cannot defeat that guard.
+            if isFinalSynthesisRound {
+                history = ChatViewModel.addingToolBudgetSynthesisPreamble(to: history)
+            }
             let request: ChatStreamClient.Request
             if let s = sampling {
                 let resolved = s.resolved(toolsEnabled: !definitions.isEmpty)
@@ -1145,6 +1347,11 @@ final class ChatViewModel {
             )
             switch outcome {
             case .terminal:
+                appendGroundingSources(
+                    appGroundingSources,
+                    to: currentPlaceholder,
+                    epoch: epoch
+                )
                 return
             case .toolCallsPending(let calls):
                 // The user can press Stop in the gap between the stream
@@ -1157,10 +1364,10 @@ final class ChatViewModel {
                     finaliseCancelledPlaceholder(at: currentPlaceholder, epoch: epoch)
                     return
                 }
-                // On the last allowed round, executing the requested tools is
-                // wasted work — there is no follow-up round left to consume
-                // the results. Bail before the side-effects fire.
-                if roundsLeft == 0 {
+                // A tools-disabled synthesis request should never produce a
+                // structured call. Keep a defensive failure for malformed
+                // model output rather than looping forever.
+                if isFinalSynthesisRound {
                     failWithToolRoundCap(at: currentPlaceholder, epoch: epoch)
                     return
                 }
@@ -1174,6 +1381,20 @@ final class ChatViewModel {
                         finaliseCancelledPlaceholder(at: currentPlaceholder, epoch: epoch)
                         return
                     }
+                    // A model may batch many calls into one assistant turn.
+                    // Enforce the budget per requested call, and still emit a
+                    // matching result for every skipped call so the transcript
+                    // remains a valid assistant(tool_calls) → tool sequence.
+                    guard toolExecutionsLeft > 0 else {
+                        results.append(ToolCallResult(
+                            toolCallID: call.id,
+                            content: "Tool budget exhausted. Answer using the results already available.",
+                            isError: true,
+                            failureKind: .toolFailed
+                        ))
+                        continue
+                    }
+                    toolExecutionsLeft -= 1
                     // Refuse rather than dispatch when the tool was not
                     // advertised this round — a malformed model can emit a
                     // tool_call for a tool we never offered, and ``tools.run``
@@ -1223,6 +1444,9 @@ final class ChatViewModel {
                 }
                 // Open the next assistant placeholder and loop.
                 currentPlaceholder = appendMessage(ChatMessage(role: .assistant, status: .streaming))
+                if toolExecutionsLeft == 0 {
+                    isFinalSynthesisRound = true
+                }
             }
         }
     }
@@ -1236,12 +1460,11 @@ final class ChatViewModel {
         updateMessage(at: index, with: stale)
     }
 
-    /// The model kept asking for tools until ``maxToolRounds`` ran out. Surface
-    /// it as a failed row + banner rather than leaving the user staring at a
-    /// half-finished transcript.
+    /// Defensive fallback when a model emits a structured call even though
+    /// the final synthesis request advertised no tools.
     private func failWithToolRoundCap(at index: Int, epoch: Int) {
         guard epoch == conversationEpoch else { return }
-        let message = ChatViewModel.toolRoundCapMessage(cap: maxToolRounds)
+        let message = ChatViewModel.toolRoundCapMessage(cap: maxToolExecutions)
         if var capped = currentMessage(index: index) {
             capped.status = .failed
             capped.failureKind = .toolFailed
@@ -1256,7 +1479,24 @@ final class ChatViewModel {
     /// Copy for the round-cap failure. Static so a test can pin it without
     /// driving a full loop.
     static func toolRoundCapMessage(cap: Int) -> String {
-        "The model kept calling tools without answering (\(cap) rounds). Try rephrasing, or turn a tool off."
+        "The model could not finish after \(cap) tool calls. Try rephrasing, or turn a tool off."
+    }
+
+    /// Add the tools-disabled final-round instruction without introducing a
+    /// second system row, which several local chat templates reject.
+    nonisolated static func addingToolBudgetSynthesisPreamble(
+        to messages: [ChatMessage]
+    ) -> [ChatMessage] {
+        var result = messages
+        if result.first?.role == .system {
+            result[0].content += "\n\n" + toolBudgetSynthesisPreamble
+        } else {
+            result.insert(
+                ChatMessage(role: .system, content: toolBudgetSynthesisPreamble, status: .complete),
+                at: 0
+            )
+        }
+        return result
     }
 
     /// Wire-side filter — what actually ends up in the request body's ``tools``
@@ -1363,7 +1603,9 @@ You have access to tools that fetch real-time information. When you use one of t
 
 5. When the user's question is ambiguous about which subject the tool result covers, ask a clarifying question before answering.
 
-6. If you find yourself wanting to write a long enumerated list, STOP. The tool result likely doesn't contain that list. Issue another tool call with a more specific query instead.
+6. For web results, cite the supporting source inline as a Markdown link using its exact title and URL. Never give a current-events answer without at least one clickable source.
+
+7. If the search result only contains homepages or snippets that do not support a concrete answer, call web_search again with a more specific subject/date query. Do not merely offer to search and do not ask permission to use a tool that is already available.
 
 These rules apply to every tool, not just web search.
 """

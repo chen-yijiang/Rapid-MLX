@@ -44,6 +44,7 @@ struct ContentView: View {
     @SceneStorage("Rapid.showLogs") private var showLogs: Bool = false
     /// Per-session "browse all models" dismissal of the Quickstart card.
     @State private var quickstartDismissedThisSession: Bool = false
+    @Environment(SettingsRouter.self) private var settingsRouter
     /// #223: launch-time auto-start "needs download" state — the empty
     /// state names the pending pull when non-nil.
     @State private var autoStartPendingDownload: (alias: String, sizeText: String?)?
@@ -257,6 +258,9 @@ struct ContentView: View {
         .sheet(isPresented: quickstartSheetPresented) {
             quickstartSheet
         }
+        .onChange(of: settingsRouter.quickstartReturnGeneration) { _, _ in
+            quickstartDismissedThisSession = false
+        }
         // Per-fetch approval for the ``browse`` tool. Skipped entirely when
         // the user has turned on auto-approve in Settings (resolved before a
         // request is ever published), so it only appears on a real prompt.
@@ -463,8 +467,15 @@ struct ContentView: View {
             get: { quickstartVisible },
             set: { presented in
                 // A swipe-down / Esc means "let me look around first" — the
-                // same intent as the card's own "Browse all models", so route
-                // it to the same session flag rather than dropping it.
+                // same intent as the card's own "Skip for now", so route it to
+                // the same session flag rather than dropping it.
+                //
+                // NOT the same intent as "Browse all models", which used to
+                // land here too: that one asks to see the catalogue, and
+                // answering it by closing the wizard discarded the user's
+                // selection and left them on the alphabetical fallback
+                // (#1653). It opens Settings → Models now and leaves the
+                // wizard standing.
                 if !presented { quickstartDismissedThisSession = true }
             }
         )
@@ -476,6 +487,7 @@ struct ContentView: View {
             coordinator: quickstart,
             downloads: downloads,
             server: server,
+            onSkip: { quickstartDismissedThisSession = true },
             onBrowseAll: { quickstartDismissedThisSession = true },
             onSeedWelcome: { true }
         )
@@ -851,9 +863,9 @@ struct ContentView: View {
 
 /// Approval dialog for the ``browse`` tool: present while a request is
 /// pending, deny on external dismiss (Esc / click-outside) so a suspended
-/// tool can never hang waiting on a sheet the user has closed. There is no
-/// per-URL "always allow" — URLs vary each call; unattended users flip
-/// **Auto-approve browsing** in Settings → Tools.
+/// tool can never hang waiting on a sheet the user has closed. "Always allow"
+/// enables the persisted public-web auto-approval mode that can be turned off
+/// again in Settings → Tools.
 private struct BrowseApprovalDialog: ViewModifier {
     let store: BrowseApprovalStore
 
@@ -909,11 +921,17 @@ private struct BrowseApprovalSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            Text("Always allow applies to all future public web pages. You can turn it off in Settings → Tools.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             HStack {
                 Spacer()
                 Button("Don't allow") { store.answer(.deny) }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("ToolApproval.Browse.Deny")
+                Button("Always allow") { store.alwaysAllow() }
+                    .accessibilityIdentifier("ToolApproval.Browse.AlwaysAllow")
                 Button("Allow once") { store.answer(.allowOnce) }
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("ToolApproval.Browse.Allow")
@@ -925,7 +943,7 @@ private struct BrowseApprovalSheet: View {
         // An accessibility modifier on a container that is not its own
         // accessibility element is applied to the elements it contains, so a
         // wrapper identifier can be stamped onto the descendants and make the
-        // name ambiguous — including over the two buttons a flow actually
+        // name ambiguous — including over the three buttons a flow actually
         // needs to press. "The approval is up" is better asserted by waiting
         // for `ToolApproval.Browse.Allow`, which is the control the user acts
         // on rather than a wrapper around it.

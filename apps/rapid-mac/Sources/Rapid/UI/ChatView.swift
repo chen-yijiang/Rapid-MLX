@@ -237,14 +237,16 @@ struct ChatView: View {
                 host: "127.0.0.1",
                 port: server.activePort,
                 bearer: server.activeBearer ?? "",
-                alias: alias,
+                alias: server.servingAlias ?? alias,
                 onClose: { showConnectTools = false }
             )
         }
         .sheet(isPresented: $showBenchmark) {
             BenchmarkView(
                 binary: server.binaryPath,
-                alias: alias,
+                baseURL: ChatStreamClient.loopbackURL(port: server.activePort),
+                bearer: server.activeBearer ?? "",
+                alias: server.servingAlias ?? alias,
                 hardware: MacHardware.detect(),
                 onClose: { showBenchmark = false }
             )
@@ -391,7 +393,7 @@ struct ChatView: View {
                 // Availability is expressed by ENABLEMENT, not by
                 // presence:
                 //
-                //   * Connect your tools is always actionable. The sheet
+                //   * Connect your agents is always actionable. The sheet
                 //     itself explains when the endpoint isn't ready yet
                 //     and refuses to hand out incomplete values.
                 //   * Speed needs a live model to measure, so it
@@ -399,7 +401,7 @@ struct ChatView: View {
                 Button {
                     showConnectTools = true
                 } label: {
-                    Label("Connect your tools", systemImage: "link")
+                    Label("Connect your agents", systemImage: "link")
                 }
                 .help("Point an editor or agent at your local server")
 
@@ -408,6 +410,7 @@ struct ChatView: View {
                 } label: {
                     Label("Speed on this Mac", systemImage: "gauge.with.dots.needle.67percent")
                 }
+                .accessibilityIdentifier("ChatView.SpeedOnThisMac")
                 // Enablement is derived from live server state, so the
                 // button flips to enabled on its own the moment the
                 // model reaches .ready — no user action, no re-render
@@ -961,16 +964,43 @@ private struct MessageRow: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
-            Label(message.reasoningTruncated ? "Thinking trace (cut off)" : "Reasoning",
-                  systemImage: "brain")
+            HStack(spacing: RapidTheme.Space.xs) {
+                Label(message.reasoningTruncated ? "Thinking trace (cut off)" : reasoningTitle,
+                      systemImage: "brain")
+                if reasoningInProgress {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .accessibilityHidden(true)
+                }
+            }
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(reasoningAccessibilityLabel)
         }
         .onAppear {
             // Auto-expand a truncated reasoning-only turn so the user
             // sees the partial trace instead of an empty bubble.
             if message.reasoningTruncated { reasoningExpanded = true }
         }
+    }
+
+    /// A reasoning trace can begin well before answer tokens arrive. Keeping
+    /// its disclosure label static during that interval made a healthy stream
+    /// look frozen. Key this to the ROW's status (not the view model's global
+    /// streaming flag) so completed history never keeps animating while a
+    /// later turn is running.
+    private var reasoningInProgress: Bool {
+        message.status == .streaming && !message.reasoningTruncated
+    }
+
+    private var reasoningTitle: String {
+        reasoningInProgress ? "Reasoning…" : "Reasoning"
+    }
+
+    private var reasoningAccessibilityLabel: String {
+        if message.reasoningTruncated { return "Thinking trace, cut off" }
+        return reasoningInProgress ? "Reasoning in progress" : "Reasoning"
     }
 
     private var showTypingIndicator: Bool {
@@ -1121,13 +1151,17 @@ private struct ToolCallChip: View {
     private var statusIcon: String {
         guard result != nil else { return "ellipsis.circle" }
         guard let failureDiagnosis else { return "checkmark.circle.fill" }
-        return failureDiagnosis.severity == .notice ? "hand.raised" : "exclamationmark.octagon.fill"
+        if failureDiagnosis.severity == .notice { return "hand.raised" }
+        if failureDiagnosis.kind == .browsePageTooLarge { return "exclamationmark.triangle.fill" }
+        return "exclamationmark.octagon.fill"
     }
 
     private var statusColor: Color {
         guard result != nil else { return .secondary }
         guard let failureDiagnosis else { return .green }
-        return failureDiagnosis.severity == .notice ? .secondary : RapidTheme.statusError
+        if failureDiagnosis.severity == .notice { return .secondary }
+        if failureDiagnosis.kind == .browsePageTooLarge { return .orange }
+        return RapidTheme.statusError
     }
 
     /// Red is reserved for something that actually went wrong. A decline reads
@@ -1135,7 +1169,9 @@ private struct ToolCallChip: View {
     /// "this ended early, and that's fine" footers (e.g. "Stopped.").
     private var resultBodyColor: Color {
         guard let failureDiagnosis else { return .secondary }
-        return failureDiagnosis.severity == .notice ? .secondary : RapidTheme.statusError
+        if failureDiagnosis.severity == .notice { return .secondary }
+        if failureDiagnosis.kind == .browsePageTooLarge { return .orange }
+        return RapidTheme.statusError
     }
 
     var body: some View {

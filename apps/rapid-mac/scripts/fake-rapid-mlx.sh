@@ -82,6 +82,95 @@ CONTENT_CHUNKS = [
     " I", " return", " deterministic", " content", " so", " the",
     " smoke", " test", " has", " something", " to", " assert", " on.",
 ]
+
+# Answer SHAPES, chosen by a marker in the user's message.
+#
+# The fake has no model, so it cannot vary answer QUALITY — a golden flow
+# asserting that a poem is good would be theatre. What it can vary, and what
+# the app genuinely does different work for, is the shape of what has to be
+# rendered: a fenced code block gets highlighting and its own copy button, a
+# table has to become a table rather than pipes, LaTeX has to typeset, CJK and
+# emoji have to measure correctly, and a long answer has to scroll without
+# losing the turns above it. Judging what a model actually SAYS to a literary
+# or coding prompt belongs to the eval suites, against a real model.
+#
+# Chunked deliberately mid-token in places: a renderer that only works when a
+# fence or a table row arrives whole is a renderer that breaks on a real
+# stream.
+RESPONSE_SHAPES = {
+    "shape:code": [
+        "Here is the function you asked for:\n\n",
+        "```", "python", "\n",
+        "def fib(n):\n", "    a, b = 0, 1\n",
+        "    for _ in range(n):\n", "        a, b = b, a + b\n",
+        "    return a\n",
+        "```", "\n\n",
+        "It runs in O(n) time and constant space.",
+    ],
+    "shape:table": [
+        "| model | size | speed |\n",
+        "| --- | --- | ---", " |\n",
+        "| qwen3.5-9b | 5.2 GB | 74 tok/s |\n",
+        "| llama-3.1-8b | 4.5 GB | 68 tok/s |\n",
+        "\nBoth fit comfortably in 16 GB.",
+    ],
+    "shape:math": [
+        "The Gaussian integral is\n\n",
+        "$$\\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx = \\sqrt{\\pi}$$",
+        "\n\nand inline it reads $e^{i\\pi} + 1 = 0$.",
+    ],
+    "shape:list": [
+        "Three things, in order:\n\n",
+        "1. First, ", "read the prompt.\n",
+        "2. Second, ", "plan the answer.\n",
+        "   - a nested point\n", "   - another one\n",
+        "3. Third, ", "write it down.\n",
+    ],
+    "shape:unicode": [
+        "中文排版测试:", "这是一段中文回答,", "用来检查换行和字宽。",
+        " Emoji: ", "🎯", "🚀", "。",
+        " Right-to-left: ", "مرحبا", ".",
+    ],
+    "shape:prose": [
+        "The lighthouse keeper ", "kept two logbooks. ",
+        "One recorded the weather, ", "the ships, ", "the hours of the lamp. ",
+        "The other recorded ", "what he thought about ", "while he watched. ",
+        "Only the first was ever read ", "by anyone else.",
+    ],
+}
+
+# Long output is the same default text repeated, so the scroll/perf case does
+# not need its own vocabulary to assert on.
+RESPONSE_SHAPES["shape:long"] = CONTENT_CHUNKS * 30
+
+
+def _shape_for(body):
+    """The chunk list this request should stream.
+
+    Reads the LAST user message, so a multi-turn conversation gets a different
+    shape per turn rather than whatever the first turn asked for.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return CONTENT_CHUNKS * CONTENT_REPEAT
+    text = ""
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                # OpenAI content-parts form.
+                text = " ".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict)
+                )
+            break
+    for marker, chunks in RESPONSE_SHAPES.items():
+        if marker in text:
+            return chunks
+    return CONTENT_CHUNKS * CONTENT_REPEAT
 REASONING_CHUNKS = [
     "Let", " me", " think", " about", " the", " prompt", "."
 ]
@@ -119,6 +208,21 @@ def _delta(content=None, reasoning=None, finish=None):
     return {"choices": [choice]}
 
 
+def _tool_call_delta(call_id):
+    return {"choices": [{
+        "delta": {"tool_calls": [{
+            "index": 0,
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "arguments": json.dumps({"query": "golden tool loop evidence"}),
+            },
+        }]},
+        "finish_reason": "tool_calls",
+    }]}
+
+
 class Handler(BaseHTTPRequestHandler):
     """Minimal OpenAI-shaped surface that's enough to satisfy
     ChatStreamClient + ServerManager's /healthz poll.
@@ -150,19 +254,82 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             self._json(404, {"error": "not_found"})
             return
-        # Drain (and ignore) the request body — we don't echo the
-        # prompt; the fake's output is deterministic so test
-        # assertions can pin specific strings.
+        # Decode only enough of the request to support both normal SSE chat
+        # and the in-app loaded-model speed test (`stream: false`).
         length = int(self.headers.get("content-length", "0") or "0")
+        body = {}
         if length:
-            self.rfile.read(length)
-        _event("chat_request")
+            try:
+                body = json.loads(self.rfile.read(length))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body = {}
+        messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+        definitions = body.get("tools") if isinstance(body.get("tools"), list) else []
+        _event(
+            "chat_request",
+            roles=[m.get("role") for m in messages if isinstance(m, dict)],
+            tools=[
+                d.get("function", {}).get("name")
+                for d in definitions
+                if isinstance(d, dict) and isinstance(d.get("function"), dict)
+            ],
+            user_texts=[
+                m.get("content") for m in messages
+                if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str)
+            ],
+        )
+
+        if body.get("stream") is False:
+            max_tokens = int(body.get("max_tokens", 8) or 8)
+            completion_tokens = min(max_tokens, 128)
+            _event("benchmark_request", max_tokens=max_tokens)
+            self._json(200, {
+                "id": "fake-benchmark",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "measured output"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": 12 + completion_tokens,
+                },
+            })
+            return
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+
+        # Deterministic runaway-model fixture. The app must execute only its
+        # bounded budget and then issue one final request with no tools; that
+        # request gets a useful synthesis rather than another tool call.
+        last_user = next((
+            m.get("content", "") for m in reversed(messages)
+            if isinstance(m, dict) and m.get("role") == "user"
+        ), "")
+        if "shape:tool-loop" in last_user:
+            tool_results = sum(
+                1 for m in messages
+                if isinstance(m, dict) and m.get("role") == "tool"
+            )
+            if definitions:
+                call_id = f"golden_loop_{tool_results + 1}"
+                self.wfile.write(_sse(_tool_call_delta(call_id)))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                _event("tool_loop_call", call_id=call_id)
+                return
+            synthesis = "Golden tool-loop synthesis from existing evidence."
+            self.wfile.write(_sse(_delta(content=synthesis, finish="stop")))
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            _event("tool_loop_synthesis", tool_results=tool_results)
+            return
 
         # #896 crash-recovery harness: when FAKE_DIE_AFTER_CHUNKS
         # is set to a positive integer N, we abruptly os._exit(1)
@@ -190,7 +357,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(_sse(_delta(reasoning=r)))
                 self.wfile.flush()
                 time.sleep(INTER_TOKEN_SLEEP_S)
-            for c in CONTENT_CHUNKS * CONTENT_REPEAT:
+            for c in _shape_for(body):
                 self.wfile.write(_sse(_delta(content=c)))
                 self.wfile.flush()
                 content_emitted += 1

@@ -13,6 +13,25 @@ can actually understand.
 
 ## [Unreleased]
 
+### Added
+
+- **Web-page approvals now include “Always allow.”** Choose it once to let the
+  model read future public web pages without interrupting you for every URL.
+  Private and local addresses remain blocked, and the permission can be turned
+  off again in Settings → Tools.
+
+### Fixed
+
+- **"Speed on this Mac" actually measures something.** It was posting to the
+  wrong path on the local server, so every run 404'd and reported "The
+  benchmark didn't finish. Try again." without ever having measured anything.
+
+- **"Browse all models" in the setup wizard opens the model catalogue.** It used
+  to close the wizard instead — your chosen model was discarded and you landed
+  on the chat surface pinned to a model you never picked. It now opens
+  Settings → Models with the wizard still behind it, so closing Settings puts
+  you back on your selection.
+
 ## [0.12.7] — 2026-08-07
 
 The privacy switch does what it looks like it does, and the models Rapid

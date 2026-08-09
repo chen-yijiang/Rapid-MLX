@@ -13,20 +13,27 @@ Rapid-MLX Desktop app without loading a real model.
 6. a memory-constrained user can see and select an honestly labelled sub-1B
    fallback instead of being sent back to a chooser whose smallest visible
    model is the one that just failed the live-memory guard.
+7. “Speed on this Mac” benchmarks the model already resident in the desktop
+   server: one server start, then one warm-up plus one measured request, with
+   no second model process and no duplicate weight load.
 
+8. “Browse all models” lowers the onboarding sheet, opens Model Management in
+   Settings, accepts a foreground interaction, and returns to the wizard with
+   the user's original model selection intact. A final full-screen capture
+   records the state a person actually sees.
 **Invariants** — properties that must hold, not paths a user walks. These were
 added after a release where every escaped defect landed on a surface no journey
 covered, and each one names the defect it would have caught:
 
-7. `update-state` — Settings → App must name the version the app actually is.
-8. `no-dead-controls` — every Settings panel must expose controls of its own.
-9. `catalog-integrity` — a model that cannot chat must never be offered as one.
-   Now covers **image-gen** aliases too: `rapid-mlx models` tags them
-   `[image:gen]` in their own section (mirroring `[video:gen]`), and the
-   chat catalog's `hasNonChatKindTag` drops `image` alongside `audio`/`video`,
-   so a 24 GB FLUX/Qwen-Image checkpoint can never surface in the chat picker.
+9. `update-state` — Settings → App must name the version the app actually is.
+10. `no-dead-controls` — every Settings panel must expose controls of its own.
+11. `catalog-integrity` — a model that cannot chat must never be offered as one.
+    Now covers **image-gen** aliases too: `rapid-mlx models` tags them
+    `[image:gen]` in their own section (mirroring `[video:gen]`), and the
+    chat catalog's `hasNonChatKindTag` drops `image` alongside `audio`/`video`,
+    so a 24 GB FLUX/Qwen-Image checkpoint can never surface in the chat picker.
 
-10. `image-generation` — the Images tab turns a text prompt into a picture and
+12. `image-generation` — the Images tab turns a text prompt into a picture and
     lets the user iterate by re-prompting (see **Image generation** below). The
     instruction-**edit** path exists in code but is parked as a slow, batch-only
     lane on current hardware (~20 min/edit at q4); the interactive golden flow is
@@ -160,6 +167,22 @@ the original live-memory snapshot against the fallback footprint and exposes
 promise or a warning loop; **Cancel** still returns to the chooser where the
 low-memory category remains visible.
 
+### Loaded-model speed test
+
+`loaded-model-benchmark` pins the resource contract behind **Speed on this
+Mac**. The action is only available after the selected model is ready. It then
+reuses that server's live loopback port and bearer, sends a short warm-up and an
+up-to-128-token measured request, and calculates completion tokens per wall
+second. It must not invoke `rapid-mlx bench`, start another server, or load a
+second copy of the weights.
+
+The deterministic fake sidecar records the evidence the UI alone cannot show:
+exactly one `server_started` event and exactly two `benchmark_request` events.
+The flow also waits for `Benchmark.LoadedModelResult`, proving the number made
+it back through the real sheet. This would have caught the old implementation,
+which rejected an 8B speed test for lack of memory precisely because it tried
+to load an unnecessary second 8B copy.
+
 ## Image generation
 
 The Images tab is a dedicated text→image / image-edit surface, reached from
@@ -250,12 +273,20 @@ Run one journey or retain its isolated persona for diagnosis:
 ```bash
 ./scripts/gui-golden-flows.sh --flow slow-stream-stop
 ./scripts/gui-golden-flows.sh --flow low-memory-choice
+./scripts/gui-golden-flows.sh --flow loaded-model-benchmark
 ./scripts/gui-golden-flows.sh --flow chat-restore --keep
+./scripts/gui-golden-flows.sh --flow browse-all-destination
 ./scripts/gui-golden-flows.sh --flow no-dead-controls
 ```
 
-The suite needs a **local login session** — not SSH or tmux. It also needs the
-screen to stay awake: when the session goes idle, `CGSSessionScreenIsLocked`
+The suite needs an active **GUI login session**. A command launched directly by
+`sshd` or tmux does not inherit Terminal's Screen Recording and Accessibility
+grants. Remote runs are supported by asking the logged-in Terminal app to run
+the command (for example with `osascript ... do script ...`); the test process
+then has the same TCC identity as that Terminal session.
+
+The screen must also stay awake: when the session goes idle,
+`CGSSessionScreenIsLocked`
 flips to `Yes`, every app reports zero windows through AX, and `screencapture`
 returns wallpaper. That looks exactly like a broken app. Hold the session with
 `caffeinate -dimsu -t <seconds>` for the length of the run — `-u` is the
@@ -329,8 +360,14 @@ The checked-in `rapid-ax.swift` helper talks directly to macOS Accessibility.
 It finds controls by stable `AXIdentifier`, performs `AXPress`, sets native text
 values, and serializes roles/descriptions/values for assertions. Peekaboo is
 kept for permission checks, window discovery, menu interaction, and screenshots.
-The only coordinate fallback is the documented first-run SwiftUI consent-sheet
-fallback, derived from AX bounds, for older accessibility stacks.
+Coordinates are used in exactly two places, both deliberate and both derived
+from AX bounds. One is the first-run SwiftUI consent-sheet fallback, for older
+accessibility stacks. The other is `browse-all-destination`, where a coordinate
+click is the *point*: `AXPress` reaches a window trapped behind a modal sheet
+just as well as a usable one, and so does Peekaboo's default background click,
+so proving that a person could use the Settings window the wizard opened takes
+a real `--foreground` mouse event at a real position. Bounds are re-read after
+focusing, since focusing can raise or move the window.
 
 This makes normal actions independent of window position, resolution, theme,
 and most layout changes. It also avoids Peekaboo snapshot publication failures
@@ -370,3 +407,52 @@ Both halves are now fixed: `start_model` waits on `wait_send_idle`, and
 `send_prompt` requires the composer to actually drain. The general rule: an
 assertion that a string is present anywhere is satisfied by the input field,
 the placeholder, the tooltip and the sidebar. Say *which element*.
+## The identifier gate
+
+Because every flow above finds its target by `AXIdentifier`, this suite's
+ceiling is exactly the set of controls that carry one — and that ceiling drops
+silently every time a feature ships an unlabelled control, because the app still
+works by hand. `scripts/check_rapid_mac_ax_identifiers.py` (wired into the
+`accessibility-identifiers` job in `.github/workflows/rapid-mac-ci.yml`) fails a
+PR that **adds** an interactive control under `apps/rapid-mac/Sources/` with no
+`.accessibilityIdentifier(...)`.
+
+It is scoped to lines the diff added. The pre-existing backlog is deliberately
+out of scope — a gate that failed on it would be un-landable, and a disabled
+gate is worse than none. `--audit` lists that backlog when you want to chip at
+it:
+
+```bash
+python scripts/check_rapid_mac_ax_identifiers.py --audit
+python scripts/check_rapid_mac_ax_identifiers.py --base-ref origin/main   # what CI runs
+```
+
+Name new identifiers with the existing `<Surface>.<Thing>` convention (the
+inventory lives in `docs/userflows.md`), and put them on the control itself —
+an identifier on the enclosing `HStack` does not give `AXPress` anything to
+press.
+
+### Opting out
+
+There is currently **no** known control on this surface that cannot carry an
+identifier. `confirmationDialog` / `alert` buttons were the standing suspicion —
+`docs/userflows.md` carried "Approval dialogs lack identifiers" as an open item
+for several releases — and the suspicion was measured rather than inherited: the
+presented dialog is an `AXSheet` whose `AXButton` children *do* carry the
+identifiers declared at the call site. So the escape hatch exists for a case
+nobody has produced yet, and `rg ax-exempt apps/rapid-mac` returning nothing is
+the expected state. If you find a real one, opt out explicitly, with a written
+reason, on the control's line or the line directly above it:
+
+```swift
+// ax-exempt: <what you measured that shows the identifier cannot be reached>
+Button("Allow once") { approve() }
+```
+
+The reason is mandatory — a bare `// ax-exempt:` fails the gate just like a
+missing identifier — and every opt-out is greppable, so the true manual-only
+surface stays countable instead of invisible:
+
+```bash
+rg ax-exempt apps/rapid-mac
+```

@@ -759,6 +759,8 @@ Open the picker any time to switch models.
 /// ``QuickstartCoordinator`` reports the surface should show.
 struct QuickstartView: View {
     @Environment(SettingsRouter.self) private var settingsRouter
+    @Environment(\.dismiss) private var dismiss
+
     /// The ONLY mechanism that opens this app's Settings. It declares a real
     /// ``Window("Settings", id: "settings")`` and no SwiftUI ``Settings``
     /// scene, so ``@Environment(\.openSettings)`` — which this view used to
@@ -771,12 +773,22 @@ struct QuickstartView: View {
     @Bindable var downloads: DownloadManager
     @Bindable var server: ServerManager
 
-    /// Callback the parent supplies for the "or browse all models →"
-    /// link. The parent dismisses the Quickstart surface for the
-    /// current session (without flipping the persisted flag) so the
-    /// existing picker becomes visible. Lifted out as a closure so
-    /// this view can stay agnostic of how the parent toggles its own
-    /// state.
+    /// Callback the parent supplies for "Skip for now". The parent
+    /// dismisses the Quickstart surface for the current session (without
+    /// flipping the persisted flag) so the existing picker becomes visible.
+    /// Lifted out as a closure so this view can stay agnostic of how the
+    /// parent toggles its own state.
+    ///
+    /// This is ONLY the skip path. "Browse all models" used to share it, on
+    /// the theory that both mean "let me look around first" — but they differ
+    /// in exactly the thing that matters: skipping accepts whatever the app
+    /// picks, browsing is a request to choose. Sharing the closure made the
+    /// link a dismiss button that dropped the user's selection and left them
+    /// on the alphabetical fallback (#1653). Browsing is handled in this view
+    /// now, by ``browseAllModels()``.
+    var onSkip: () -> Void
+
+    /// Temporarily lower the wizard while its Settings catalogue is open.
     var onBrowseAll: () -> Void
 
     /// Callback the parent supplies for seeding the welcome message
@@ -981,12 +993,16 @@ struct QuickstartView: View {
             // #549 (§16 wayfinding): the hero must answer "how do I get
             // out?" — before this the only exit was the "Browse all
             // models" link on step 2, trapping a first-run user sitting
-            // on step 1. A low-emphasis Skip drops straight into the app
-            // (same `onBrowseAll` dismiss path the chooser uses), and
-            // `.cancelAction` makes Esc leave onboarding — mirroring the
-            // Skip control OnboardingTour already ships.
+            // on step 1. A low-emphasis Skip drops straight into the app,
+            // and `.cancelAction` makes Esc leave onboarding — mirroring
+            // the Skip control OnboardingTour already ships.
+            //
+            // This is the app's one genuine "dismiss onboarding" control.
+            // "Browse all models" on step 2 shared it until #1653; it does
+            // not any more, because a user asking to see the catalogue has
+            // not asked to leave setup.
             Button("Skip for now") {
-                onBrowseAll()
+                onSkip()
             }
             .buttonStyle(.plain)
             .scaledSystemFont(12, weight: .medium)
@@ -1060,7 +1076,7 @@ struct QuickstartView: View {
                     }
 
                     Button {
-                        onBrowseAll()
+                        browseAllModels()
                     } label: {
                         Text("Browse all models →")
                             .scaledSystemFont(12, weight: .medium)
@@ -1364,12 +1380,36 @@ struct QuickstartView: View {
         )
 
         Button {
-            onBrowseAll()
+            browseAllModels()
         } label: {
             Text("or browse all models →")
                 .font(.callout)
         }
         .buttonStyle(.borderless)
+    }
+
+    /// Open Settings on the model catalogue and restore Quickstart on return.
+    ///
+    /// The sheet's modal session must end before the separate Settings window
+    /// opens. The router restores the wizard when Settings closes, preserving
+    /// the user's existing pick. Without that handoff, browsing became a dead
+    /// end and fell back to an unrelated model (#1653).
+    ///
+    /// Routed through ``SettingsRouter`` for its ordering rule (stage the tab,
+    /// THEN open), and through ``openWindow(id: "settings")`` rather than
+    /// ``openSettings()`` — see the ``openWindow`` property above.
+    private func browseAllModels() {
+        settingsRouter.beginQuickstartCatalogRoundTrip()
+        onBrowseAll()
+        dismiss()
+        // End the sheet's AppKit modal session before opening another window.
+        // Opening synchronously leaves Settings visible to AX but unable to
+        // accept real foreground input until the stale modal session unwinds.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            settingsRouter.route(to: .modelManagement) {
+                openWindow(id: "settings")
+            }
+        }
     }
 
     private func handleQuickstartFailureAction(_ action: FailureDiagnosis.Action) {

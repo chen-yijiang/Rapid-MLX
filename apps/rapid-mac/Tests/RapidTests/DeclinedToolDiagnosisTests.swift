@@ -135,6 +135,32 @@ final class DeclinedToolDiagnosisTests {
         #expect(decision == .allowOnce)
     }
 
+    @Test("Always allow approves the pending fetch and persists auto-approval")
+    func alwaysAllowPersistsAndSkipsFuturePrompts() async throws {
+        let defaults = freshDefaults()
+        let approval = BrowseApprovalStore(defaults: defaults)
+
+        async let pending = approval.requestApproval(
+            url: "https://example.com/article",
+            host: "example.com"
+        )
+        try await waitForPendingApproval(approval)
+        approval.alwaysAllow()
+
+        #expect(await pending == .allowOnce)
+        #expect(approval.pendingRequest == nil)
+        #expect(approval.mode == .autoApproveAll)
+
+        let restored = BrowseApprovalStore(defaults: defaults)
+        #expect(restored.mode == .autoApproveAll)
+        let next = await restored.requestApproval(
+            url: "https://other.example/page",
+            host: "other.example"
+        )
+        #expect(next == .allowOnce)
+        #expect(restored.pendingRequest == nil)
+    }
+
     // MARK: - Declining a cross-origin redirect
 
     @Test("Declining a redirect to another host is a user decline too")
@@ -209,6 +235,20 @@ final class DeclinedToolDiagnosisTests {
         #expect(result.isError)
         #expect(result.failureKind == .toolFailed)
         #expect(result.failureKind?.severity == .error)
+    }
+
+    @Test("An oversized browse page gets specific recovery copy")
+    func oversizedBrowsePageIsSpecific() throws {
+        let kind = FailureDiagnoser.toolFailureKind(
+            toolName: "browse",
+            content: "browse error: page exceeded 2 MB cap",
+            isError: true
+        )
+        #expect(kind == .browsePageTooLarge)
+        let diagnosis = FailureDiagnoser.diagnosis(for: try #require(kind))
+        #expect(diagnosis.message ==
+                "This page is too large for Rapid to read at once. Search it or open a smaller page instead.")
+        #expect(diagnosis.action == nil)
     }
 
     @Test("Text that merely LOOKS like a decline is not promoted to one")
@@ -327,6 +367,7 @@ final class DeclinedToolDiagnosisTests {
         // The condition this kind describes used to land on webSearchUnavailable,
         // so that is what an older build should keep showing for it.
         #expect(FailureDiagnosis.Kind.webSearchRateLimited.legacyPersistedKind == .webSearchUnavailable)
+        #expect(FailureDiagnosis.Kind.browsePageTooLarge.legacyPersistedKind == .toolFailed)
     }
 
     @Test("A rate-limited row is downgrade-safe and reopens as itself")
