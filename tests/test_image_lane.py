@@ -635,3 +635,16 @@ def test_generate_honors_cancel_after_cold_load():
         engine.generate(prompt="x", seed=1)
     # Nothing was generated (aborted before the denoise call).
     assert built.calls == []
+
+
+@pytest.mark.parametrize("fmt", ["url", "webp", "png"])
+def test_edit_rejects_non_b64_response_format(client, monkeypatch, fmt):
+    # The edit endpoint must reject any response_format other than b64_json
+    # (the local lane has no object store for URLs), matching generations.
+    _patch_engine(monkeypatch, _FakeImageEngine(is_edit=True))
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", _png_upload_bytes(), "image/png")},
+        data={"prompt": "x", "response_format": fmt},
+    )
+    assert resp.status_code == 400

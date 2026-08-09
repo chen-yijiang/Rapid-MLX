@@ -5,6 +5,7 @@ import base64
 import logging
 import math
 import os
+import secrets
 import tempfile
 import time
 
@@ -34,8 +35,8 @@ def _image_engine():
     """Return the loaded image engine or raise a 409 if this isn't an image server."""
     from ..config import get_config
 
-    engine = get_config().engine
-    if engine is None or not getattr(engine, "is_image_gen", False):
+    img_engine = get_config().engine
+    if img_engine is None or not getattr(img_engine, "is_image_gen", False):
         raise HTTPException(
             status_code=409,
             detail={
@@ -50,17 +51,17 @@ def _image_engine():
                 }
             },
         )
-    return engine
+    return img_engine
 
 
-def _generate_one(engine, request: ImageGenerationRequest, seed: int) -> bytes:
+def _generate_one(img_engine, request: ImageGenerationRequest, seed: int) -> bytes:
     """Blocking single-image render — runs off the event loop."""
     width, height = request.dimensions()
     # Step count is family-aware: a distilled model (Klein/schnell, 4 steps)
     # would waste wall-clock at 20 and a non-distilled one (Qwen, 20) would be
     # noise at 4. The engine advertises the right default per family.
-    default_steps = getattr(engine, "default_steps", 4)
-    return engine.generate(
+    default_steps = getattr(img_engine, "default_steps", 4)
+    return img_engine.generate(
         prompt=request.prompt,
         width=width,
         height=height,
@@ -85,12 +86,12 @@ async def create_image(request: ImageGenerationRequest = Body(...)):
     """
     from ..image.engine import ImageRuntimeError
 
-    engine = _image_engine()
+    img_engine = _image_engine()
 
     # A single server hosts exactly one image model. When that model is the
     # instruction-edit family, text-to-image generation is the wrong endpoint —
     # 409 toward /v1/images/edits instead of silently ignoring the mismatch.
-    if getattr(engine, "is_edit", False):
+    if getattr(img_engine, "is_edit", False):
         raise HTTPException(
             status_code=409,
             detail={
@@ -122,11 +123,10 @@ async def create_image(request: ImageGenerationRequest = Body(...)):
             },
         )
 
-    # When no seed is pinned, derive one from wall-clock so successive calls
-    # vary; multi-image (``n``) requests offset per index off that base.
-    base_seed = (
-        request.seed if request.seed is not None else int(time.time()) & 0x7FFFFFFF
-    )
+    # When no seed is pinned, draw a random one so successive calls vary — even
+    # two unseeded requests within the same wall-clock second. Multi-image
+    # (``n``) requests offset per index off that base.
+    base_seed = request.seed if request.seed is not None else secrets.randbelow(2**31)
 
     from ..image.engine import ImageGenerationCancelled
 
@@ -135,7 +135,7 @@ async def create_image(request: ImageGenerationRequest = Body(...)):
     for index in range(request.n):
         try:
             png_bytes = await run_to_completion(
-                _generate_one, engine, request, base_seed + index
+                _generate_one, img_engine, request, base_seed + index
             )
         except ImageGenerationCancelled:
             # User stopped mid-render: return whatever finished rather than an
@@ -167,17 +167,22 @@ async def image_progress():
     streaming parser, and honest on slow hardware (the bar can't outrun the
     real steps). Single-flight: the server renders one image at a time.
     """
-    engine = _image_engine()
-    snap = engine.progress_snapshot() if hasattr(engine, "progress_snapshot") else {}
-    return snap
+    img_engine = _image_engine()
+    return img_engine.progress_snapshot()
 
 
 @router.post("/v1/images/cancel")
 async def image_cancel():
-    """Ask the in-flight render to stop at the next denoise step."""
-    engine = _image_engine()
-    if hasattr(engine, "request_cancel"):
-        engine.request_cancel()
+    """Ask the in-flight render to stop at the next denoise step.
+
+    By design the image lane is **single-flight**: the engine's process lock
+    serialises one render at a time, so progress and cancel are intentionally
+    process-global — they refer to the one active render. This is a local,
+    single-user server (the desktop app issues one generation at a time), so
+    there is deliberately no per-request generation id to thread through.
+    """
+    img_engine = _image_engine()
+    img_engine.request_cancel()
     return {"ok": True}
 
 
@@ -197,16 +202,16 @@ def _reject(condition: bool, message: str, param: str) -> None:
 
 
 def _generate_edit_one(
-    engine, prompt, steps, seed, guidance, negative_prompt, image_path
+    img_engine, prompt, steps, seed, guidance, negative_prompt, image_path
 ) -> bytes:
     """Blocking single instruction-edit render — runs off the event loop.
 
     No width/height is threaded: the edit family sizes its output canvas from
-    the input image (the engine passes ``None`` to mflux). Forcing a mismatched
+    the input image (the img_engine passes ``None`` to mflux). Forcing a mismatched
     size desyncs the conditioning latents and yields pure noise, so the request
     ``size`` is accepted for OpenAI-API shape but deliberately not honored.
     """
-    return engine.generate(
+    return img_engine.generate(
         prompt=prompt,
         num_inference_steps=steps if steps is not None else _DEFAULT_EDIT_STEPS,
         seed=seed,
@@ -238,11 +243,11 @@ async def edit_image(
     """
     from ..image.engine import ImageGenerationCancelled, ImageRuntimeError
 
-    engine = _image_engine()
+    img_engine = _image_engine()
 
     # /v1/images/edits requires the edit family; a txt2img server points the
     # caller at /v1/images/generations instead of silently ignoring the image.
-    if not getattr(engine, "is_edit", False):
+    if not getattr(img_engine, "is_edit", False):
         raise HTTPException(
             status_code=409,
             detail={
@@ -270,7 +275,9 @@ async def edit_image(
                 }
             },
         )
-    if response_format == "url":
+    if response_format != "b64_json":
+        # Reject any non-b64_json value (not just "url"), matching the validated
+        # generations contract — the local lane has no object store for URLs.
         raise HTTPException(
             status_code=400,
             detail={
@@ -298,7 +305,7 @@ async def edit_image(
     # derives its output canvas from the input image; a mismatched target size
     # desyncs mflux's conditioning latents into pure noise. We still validate
     # the value so a malformed ``size`` fails loud rather than being silently
-    # dropped, then discard it — the engine sizes the render from the image.
+    # dropped, then discard it — the img_engine sizes the render from the image.
     try:
         parse_image_size(size)
     except ValueError as exc:
@@ -373,10 +380,10 @@ async def edit_image(
     # A fixed suffix — never the attacker-controlled upload filename, whose
     # length/bytes could otherwise raise an uncaught OSError from the temp-file
     # layer. mflux/PIL sniff the real format from content, not the extension.
-    base_seed = seed if seed is not None else int(time.time()) & 0x7FFFFFFF
+    base_seed = seed if seed is not None else secrets.randbelow(2**31)
     data = []
     cancelled = False
-    # One temp file for the whole request; the process lock in the engine keeps
+    # One temp file for the whole request; the process lock in the img_engine keeps
     # generations serial, so a shared init image is safe across the n renders.
     # Creation + write live inside the try so a partial-write / close failure
     # can't leak the file — ``tmp_path`` is captured before the write, and the
@@ -390,7 +397,7 @@ async def edit_image(
             try:
                 png_bytes = await run_to_completion(
                     _generate_edit_one,
-                    engine,
+                    img_engine,
                     prompt,
                     steps,
                     base_seed + index,

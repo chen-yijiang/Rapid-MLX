@@ -186,11 +186,16 @@ struct ImageClient {
             if decoded.cancelled == true { return [] }
             throw ImageClientError.emptyResponse
         }
-        let blobs = decoded.data.compactMap { item -> Data? in
-            guard let b64 = item.b64_json else { return nil }
-            return Data(base64Encoded: b64)
+        // Fail on any malformed item rather than silently dropping it — a
+        // "successful" batch that quietly returns fewer images than requested
+        // would hide server corruption behind a partial gallery.
+        var blobs: [Data] = []
+        for item in decoded.data {
+            guard let b64 = item.b64_json, let data = Data(base64Encoded: b64) else {
+                throw ImageClientError.emptyResponse
+            }
+            blobs.append(data)
         }
-        guard !blobs.isEmpty else { throw ImageClientError.emptyResponse }
         return blobs
     }
 
