@@ -147,12 +147,17 @@ final class ImageGenViewModel {
         }
     }
 
+    /// The in-flight cancel POST, tracked so the next render can wait for it to
+    /// land — otherwise a delayed cancel could arrive after this generation
+    /// ended and stop the *following* one.
+    private var cancelTask: Task<Void, Never>?
+
     func cancel() {
         guard isGenerating, !cancelling else { return }
         cancelling = true
         let port = server.activePort
         let bearer = server.activeBearer
-        Task { await client.cancel(port: port, bearer: bearer) }
+        cancelTask = Task { await client.cancel(port: port, bearer: bearer) }
     }
 
     private func runGenerate() async {
@@ -233,6 +238,10 @@ final class ImageGenViewModel {
     /// Shared request wrapper: flips run state, resets progress, and funnels
     /// every failure into ``errorMessage``.
     private func withRequest(_ body: @escaping () async throws -> Void) async {
+        // Wait for any prior cancel POST to land before starting, so a delayed
+        // cancel can never stop this fresh render.
+        await cancelTask?.value
+        cancelTask = nil
         isGenerating = true
         cancelling = false
         phase = .preparing

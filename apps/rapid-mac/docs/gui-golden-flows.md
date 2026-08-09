@@ -187,7 +187,7 @@ to load an unnecessary second 8B copy.
 
 The Images tab is a dedicated text→image / image-edit surface, reached from
 `Sidebar.Images`. It is decoupled from chat on purpose: rapid-mlx serves **one
-model per process**, so an image-gen alias (e.g. `flux-schnell-4bit`) cannot be
+model per process**, so an image-gen alias (e.g. `flux2-klein-4b`) cannot be
 loaded alongside the chat LLM — selecting one reloads the sidecar, exactly the
 stop/start path a chat model-switch already takes.
 
@@ -232,10 +232,11 @@ interactive; until then the product story is generation.
 
 Verified on an M2 Pro 32 GB with the 4-bit mflux checkpoints:
 
-* **Generate is fast, edit is not.** `flux-schnell-4bit` is step-distilled — a
-  512² image lands in ~27 s at 4 steps. `qwen-image-edit-4bit` is a large,
-  non-distilled 20B model and mflux fixes the edit canvas to a ~1024²-area
-  render, so each denoise step is ~1 min and a default 20-step edit is
+* **Generate is fast, edit is not.** The exposed generators are step-distilled
+  (`flux2-klein-4b` lands a 512² image in ~3 s / a 1024² in ~10 s on an M3
+  Ultra). `qwen-image-edit-4bit` is a large, non-distilled 20B model and mflux
+  fixes the edit canvas to a ~1024²-area render, so each denoise step is ~1 min
+  and a default 20-step edit is
   **~20 minutes**. The edit round is a *batch* action on this hardware, not the
   sub-second turnaround ChatGPT has; the compose bar must show a clearly
   long-running, cancellable in-flight state and never imply instant results.

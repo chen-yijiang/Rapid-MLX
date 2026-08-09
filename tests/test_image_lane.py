@@ -303,8 +303,9 @@ def test_image_engine_adapter_is_duck_typed():
 class _FakeImageEngine:
     is_image_gen = True
 
-    def __init__(self, is_edit=False):
+    def __init__(self, is_edit=False, default_steps=4):
         self.is_edit = is_edit
+        self.default_steps = default_steps
         self.seeds = []
         self.image_paths_seen = []
         self.dims_seen = []
@@ -648,3 +649,14 @@ def test_edit_rejects_non_b64_response_format(client, monkeypatch, fmt):
         data={"prompt": "x", "response_format": fmt},
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("default_steps", [4, 8, 20])
+def test_generations_uses_engine_default_steps(client, monkeypatch, default_steps):
+    # A request without an explicit `steps` must inherit the engine's
+    # family-specific default (Klein 4, Z-Image 8, Qwen 20), not a hardcoded 4.
+    engine = _FakeImageEngine(default_steps=default_steps)
+    _patch_engine(monkeypatch, engine)
+    resp = client.post("/v1/images/generations", json={"prompt": "a fox"})
+    assert resp.status_code == 200
+    assert engine.steps_seen == [default_steps]

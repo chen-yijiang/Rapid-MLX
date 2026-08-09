@@ -183,11 +183,15 @@ class ImageGenerationEngine:
         self._run_seq = 0
         self._active_seq = 0
         self._cancel_seq = 0
+        # Guards the three seq counters, which are touched from both the request
+        # thread (``request_cancel``) and the generation worker thread.
+        self._state_lock = threading.Lock()
         self._reporter = _ProgressReporter(self)
 
     def _is_cancelled(self) -> bool:
         """True when the in-flight run has an outstanding cancel request."""
-        return self._active_seq > 0 and self._cancel_seq >= self._active_seq
+        with self._state_lock:
+            return self._active_seq > 0 and self._cancel_seq >= self._active_seq
 
     def _build_model(self):
         """Instantiate the backing mflux model (import-lazy)."""
@@ -258,7 +262,8 @@ class ImageGenerationEngine:
         no-op (``_active_seq == 0``), and one armed while a render is starting is
         preserved because the seq is only advanced under the lock.
         """
-        self._cancel_seq = max(self._cancel_seq, self._active_seq)
+        with self._state_lock:
+            self._cancel_seq = max(self._cancel_seq, self._active_seq)
 
     def progress_snapshot(self) -> dict:
         """A JSON-safe view of the current denoise progress (single-flight)."""
@@ -306,8 +311,9 @@ class ImageGenerationEngine:
             # pressed during the (possibly multi-gigabyte) cold model load is
             # honored — its seq already matches this run — instead of being lost.
             # The lock guarantees single-flight, so one snapshot is unambiguous.
-            self._run_seq += 1
-            self._active_seq = self._run_seq
+            with self._state_lock:
+                self._run_seq += 1
+                self._active_seq = self._run_seq
             # ``running`` stays False through the cold load — the reporter flips
             # it true on the first denoise step — so the client renders the
             # "warming up" phase during load, not a bogus "denoising step 1".
@@ -356,7 +362,8 @@ class ImageGenerationEngine:
                 raise ImageRuntimeError(f"Image generation failed: {exc}") from exc
             finally:
                 self._progress["running"] = False
-                self._active_seq = 0
+                with self._state_lock:
+                    self._active_seq = 0
 
         return self._encode_png(result)
 

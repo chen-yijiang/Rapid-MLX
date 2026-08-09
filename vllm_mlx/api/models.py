@@ -3203,7 +3203,9 @@ class ImageGenerationRequest(BaseModel):
     n: int = Field(default=1, ge=1, le=4)
     size: str = "1024x1024"
     response_format: Literal["b64_json", "url"] = "b64_json"
-    seed: int | None = Field(default=None, ge=0)
+    # Upper bound so an arbitrarily large Python int can't reach the native
+    # MLX/mflux backend and overflow into a 500.
+    seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
     negative_prompt: str | None = None
     # Diffusion-step count. schnell/Qwen-Image are distilled for 2-8 steps; the
     # ceiling keeps a single request from monopolizing the GPU for minutes.

@@ -135,7 +135,7 @@ async def create_image(request: ImageGenerationRequest = Body(...)):
     for index in range(request.n):
         try:
             png_bytes = await run_to_completion(
-                _generate_one, img_engine, request, base_seed + index
+                _generate_one, img_engine, request, (base_seed + index) & 0x7FFFFFFF
             )
         except ImageGenerationCancelled:
             # User stopped mid-render: return whatever finished rather than an
@@ -400,7 +400,7 @@ async def edit_image(
                     img_engine,
                     prompt,
                     steps,
-                    base_seed + index,
+                    (base_seed + index) & 0x7FFFFFFF,
                     guidance,
                     negative_prompt,
                     tmp_path,
@@ -426,7 +426,14 @@ async def edit_image(
         if tmp_path is not None:
             try:
                 os.unlink(tmp_path)
-            except OSError:
-                pass
+            except OSError as exc:
+                # Don't fail the response on cleanup, but don't swallow it
+                # silently either — a leaked upload in the temp dir is worth a
+                # log line (the basename only, not the full path).
+                logger.warning(
+                    "failed to remove temp edit image %s: %s",
+                    os.path.basename(tmp_path),
+                    exc,
+                )
 
     return {"created": int(time.time()), "data": data, "cancelled": cancelled}
