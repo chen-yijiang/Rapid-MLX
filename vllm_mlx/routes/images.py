@@ -10,6 +10,7 @@ import tempfile
 import time
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
+from starlette.responses import JSONResponse
 
 from ..api.models import ImageGenerationRequest, parse_image_size
 from ._async_utils import run_to_completion
@@ -21,6 +22,108 @@ router = APIRouter()
 # Cap the uploaded init image so a single edit request can't buffer an
 # unbounded body into memory before the size validators run.
 _MAX_EDIT_IMAGE_BYTES = 25 * 1024 * 1024
+# Whole-request cap for the middleware (init image + a little multipart framing
+# slack), enforced BEFORE FastAPI spools the body to disk.
+_IMAGE_EDIT_REQUEST_BYTES = _MAX_EDIT_IMAGE_BYTES + 1024 * 1024
+_OVERSIZE_DETAIL = "image edit request body exceeds the 25 MB limit"
+
+
+class _ImageBodyTooLargeError(Exception):
+    """Signals the bounded receive tripped the body cap mid-stream."""
+
+
+class ImageBodyLimitMiddleware:
+    """Cap /v1/images/edits multipart bodies before FastAPI spools them.
+
+    FastAPI resolves the ``UploadFile``/``Form`` params by parsing (and
+    spooling) the whole multipart body before the endpoint runs, so an
+    in-handler size check is too late to stop an oversized upload from
+    consuming disk. This ASGI middleware rejects on the advertised
+    Content-Length and, absent that, caps the streamed bytes — mirroring the
+    video lane's ``VideoBodyLimitMiddleware``.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope.get("type") != "http"
+            or scope.get("method") != "POST"
+            or scope.get("path") != "/v1/images/edits"
+        ):
+            return await self.app(scope, receive, send)
+
+        headers = {name.lower(): value for name, value in scope.get("headers", ())}
+        advertised = headers.get(b"content-length")
+        if advertised is not None:
+            try:
+                advertised_bytes = int(advertised.decode("ascii"))
+            except (UnicodeDecodeError, ValueError):
+                advertised_bytes = None
+            if (
+                advertised_bytes is not None
+                and advertised_bytes > _IMAGE_EDIT_REQUEST_BYTES
+            ):
+                response = JSONResponse(
+                    status_code=413, content={"detail": _OVERSIZE_DETAIL}
+                )
+                return await response(scope, receive, send)
+
+        total = 0
+        limit_tripped = False
+        replacement_sent = False
+        downstream_started = False
+        downstream_completed = False
+
+        async def bounded_receive():
+            nonlocal total, limit_tripped
+            message = await receive()
+            if message.get("type") == "http.request":
+                total += len(message.get("body", b"") or b"")
+                if total > _IMAGE_EDIT_REQUEST_BYTES:
+                    limit_tripped = True
+                    raise _ImageBodyTooLargeError
+            return message
+
+        async def guarded_send(message):
+            nonlocal replacement_sent, downstream_started, downstream_completed
+            if limit_tripped:
+                if not downstream_started and not replacement_sent:
+                    response = JSONResponse(
+                        status_code=413, content={"detail": _OVERSIZE_DETAIL}
+                    )
+                    await response(scope, receive, send)
+                    replacement_sent = True
+                return
+            message_type = message.get("type")
+            if message_type == "http.response.start":
+                downstream_started = True
+            elif message_type == "http.response.body" and not message.get(
+                "more_body", False
+            ):
+                downstream_completed = True
+            await send(message)
+
+        try:
+            await self.app(scope, bounded_receive, guarded_send)
+        except _ImageBodyTooLargeError:
+            if replacement_sent or downstream_completed:
+                return
+            if downstream_started:
+                await send(
+                    {"type": "http.response.body", "body": b"", "more_body": False}
+                )
+                return
+            response = JSONResponse(
+                status_code=413, content={"detail": _OVERSIZE_DETAIL}
+            )
+            await response(scope, receive, send)
+
+
+def install_image_body_limit_middleware(app) -> None:
+    app.add_middleware(ImageBodyLimitMiddleware)
+
 
 # Default denoise steps for an instruction edit. Qwen-Image-Edit is a large,
 # non-distilled model (unlike the 4-step FLUX.1-schnell generator): its edit

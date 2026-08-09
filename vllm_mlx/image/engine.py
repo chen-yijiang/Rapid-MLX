@@ -362,6 +362,9 @@ class ImageGenerationEngine:
                 raise ImageRuntimeError(f"Image generation failed: {exc}") from exc
             finally:
                 self._progress["running"] = False
+                # Clear the start time so a completed run's snapshot doesn't keep
+                # reporting an ever-growing ``elapsed_ms`` while idle.
+                self._progress["started_at"] = 0.0
                 with self._state_lock:
                     self._active_seq = 0
 

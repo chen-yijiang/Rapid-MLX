@@ -837,6 +837,10 @@ from .routes.video import install_video_body_limit_middleware  # noqa: E402
 
 install_video_body_limit_middleware(app)
 
+from .routes.images import install_image_body_limit_middleware  # noqa: E402
+
+install_image_body_limit_middleware(app)
+
 # SECURITY: blanket request-body size cap across all /v1/* routes.
 # Defends against the DoS pattern documented in rapid-desktop#273 / #463
 # where a 10–100 MB JSON body silently runs full prefill (~60–90 s on a
