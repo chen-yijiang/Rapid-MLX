@@ -851,6 +851,81 @@ def test_terminal_finalize_flush_snapshot_does_not_replay_streamed_content(monke
     )
 
 
+def test_terminal_suffix_survives_when_buffer_unavailable(monkeypatch):
+    """#1709 (codex): an empty/unavailable content buffer is NOT proof that
+    everything was streamed. Suppression requires AFFIRMATIVE provenance — a
+    non-empty buffer that (sanitized) equals the streamed content. With no such
+    proof a terminal suffix must survive, even one that happens to equal prior
+    output. Streamed ``"ha"`` + finalize ``"ha"`` with an empty buffer →
+    ``"haha"`` (not collapsed to ``"ha"``).
+    """
+    from vllm_mlx.domain.events import StreamEvent
+    from vllm_mlx.service import postprocessor as pp_mod
+
+    def finalize_empty_buffer_suffix(self):
+        self.tool_accumulated_text = ""  # buffer unavailable at finalize
+        return [StreamEvent(type="content", content="ha")]
+
+    monkeypatch.setattr(
+        pp_mod.StreamingPostProcessor, "finalize", finalize_empty_buffer_suffix
+    )
+
+    class _EmptyBufferEngine(_PlainStreamEngine):
+        async def stream_chat(self, messages, **kwargs):
+            yield GenerationOutput(
+                text="ha",
+                new_text="ha",
+                prompt_tokens=4,
+                completion_tokens=1,
+                finished=False,
+                channel=None,
+            )
+            yield GenerationOutput(
+                text="ha",
+                new_text="",
+                prompt_tokens=4,
+                completion_tokens=1,
+                finished=True,
+                finish_reason="stop",
+                channel=None,
+            )
+
+    cfg = reset_config()
+    cfg.engine = _EmptyBufferEngine()
+    cfg.model_name = "test-model"
+    cfg.model_registry = None
+    cfg.no_thinking = True
+    cfg.enable_auto_tool_choice = True
+    cfg.tool_call_parser = "auto"
+
+    app = FastAPI()
+    app.include_router(chat_router)
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "stream": True,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "say ha"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    events, saw_done = _parse_sse_events(resp.text)
+    assert saw_done
+
+    content_parts = [
+        choice["delta"]["content"]
+        for event in events
+        for choice in event.get("choices", [])
+        if (choice.get("delta") or {}).get("content")
+    ]
+    assert "".join(content_parts) == "haha", (
+        "with no affirmative buffer provenance an equal-valued terminal suffix "
+        f"must survive; got {''.join(content_parts)!r}"
+    )
+
+
 def test_terminal_replay_guard_handles_sanitizer_sensitive_content(monkeypatch):
     """#1709 (codex): the ``fully-streamed`` provenance check must compare the
     content buffer on the SAME sanitized footing as the wire. The buffer holds
