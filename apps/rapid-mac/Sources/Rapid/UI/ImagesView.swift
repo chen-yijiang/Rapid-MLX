@@ -13,6 +13,9 @@ struct ImagesView: View {
 
     @State private var composeFocusToken = 0
     @State private var pickerHovering = false
+    /// Bumped when the user tries to submit while gated, so the readiness
+    /// banner flashes for attention (same signal ChatView uses).
+    @State private var blockedSendAttempts = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -79,27 +82,75 @@ struct ImagesView: View {
         }
     }
 
+    /// The empty hero — the same shape as ChatView's, with the cheetah mark
+    /// and readiness-driven copy. Just "Draw anything" instead of "Ask
+    /// anything", and no Connect-tools / Speed actions.
     private var emptyStage: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "photo.on.rectangle.angled")
-                .font(.system(size: 36, weight: .light))
-                .foregroundStyle(.tertiary)
-            Text("Type a thought below and press Generate.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Text(noModelHint ?? "Runs entirely on this Mac — private, offline, unlimited.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-        }
-        .multilineTextAlignment(.center)
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        EmptyState(
+            title: "Draw anything",
+            message: readiness.isReady
+                ? "Describe what you want to see, then press Generate."
+                : readiness.emptyStateSubtitle,
+            hint: readiness.isReady ? nil : readiness.emptyStateHint,
+            markDiameter: 92,
+            mark: { CheetahLogo(size: 68) },
+            actions: { EmptyView() }
+        )
         .accessibilityIdentifier("Images.EmptyState")
     }
 
-    private var noModelHint: String? {
-        guard viewModel.catalogLoaded, viewModel.imageModels.isEmpty else { return nil }
-        return "No image models found — install one from Settings → Model Management."
+    // MARK: - Readiness (mirrors ChatView: same "load the model first" flow)
+
+    /// Readiness for the selected image model. Because rapid serves one model
+    /// per process, this reports "isn't running" whenever the server is
+    /// serving something else (e.g. a chat model) — exactly the "load FLUX
+    /// first" guidance chat gives, produced by the same resolver.
+    private var readiness: ModelReadiness {
+        ModelReadiness.resolve(
+            serverState: server.state,
+            alias: viewModel.selectedAlias,
+            cacheState: imageCacheState,
+            sizeText: viewModel.imageModels
+                .first { $0.alias == viewModel.selectedAlias }?.sizeOnDisk,
+            progress: startupProgress,
+            failure: nil
+        )
+    }
+
+    private var imageCacheState: ModelReadiness.CacheState {
+        guard !viewModel.selectedAlias.isEmpty, viewModel.catalogLoaded else {
+            return .catalogPending
+        }
+        guard let entry = viewModel.imageModels
+            .first(where: { $0.alias == viewModel.selectedAlias }) else {
+            return .notInCatalog
+        }
+        return entry.cached ? .onDisk : .notOnDisk
+    }
+
+    private var startupProgress: ModelReadiness.ProgressSnapshot? {
+        guard case .starting = server.state else { return nil }
+        return ModelReadiness.ProgressSnapshot(
+            activity: server.downloadProgress.startupActivity,
+            subtitle: server.downloadProgress.progressSubtitle,
+            fraction: server.downloadProgress.progressFraction
+        )
+    }
+
+    /// The banner's next-step action: start (or download-and-start) the
+    /// selected image model, switching the single server process to it.
+    private func handleReadinessAction(_ action: ModelReadiness.Action) {
+        switch action {
+        case .chooseModel:
+            break  // the composer's model picker owns this step
+        case .downloadAndStart(let target), .start(let target), .retry(let target):
+            let hf = viewModel.imageModels.first { $0.alias == target }?.hfRepo
+            Task { await server.start(alias: target, hfPath: hf) }
+        }
+    }
+
+    private var sendEnabled: Bool {
+        viewModel.canSubmit && readiness.sendAllowed
     }
 
     // MARK: - Progress HUD (the wait, designed)
@@ -230,7 +281,15 @@ struct ImagesView: View {
 
     private var composer: some View {
         VStack(spacing: RapidTheme.Space.sm) {
-            if let error = viewModel.errorMessage {
+            if !readiness.isReady {
+                ReadinessBanner(
+                    readiness: readiness,
+                    attentionToken: blockedSendAttempts,
+                    onAction: handleReadinessAction
+                )
+                .frame(maxWidth: contentMaxWidth)
+                .frame(maxWidth: .infinity)
+            } else if let error = viewModel.errorMessage {
                 InlineNotice(message: error, tone: .error)
                     .frame(maxWidth: contentMaxWidth)
                     .frame(maxWidth: .infinity)
@@ -245,7 +304,9 @@ struct ImagesView: View {
                     text: $viewModel.prompt,
                     focusToken: composeFocusToken,
                     isStreaming: viewModel.isGenerating,
-                    placeholder: "Describe the image you want…",
+                    placeholder: readiness.isReady
+                        ? "Describe the image you want…"
+                        : readiness.composerPlaceholder,
                     onSubmit: runSubmit,
                     onCancel: { viewModel.cancel() }
                 )
@@ -408,17 +469,17 @@ struct ImagesView: View {
             Button(action: runSubmit) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(viewModel.canSubmit ? RapidTheme.onBrandPrimary : Color.secondary)
+                    .foregroundStyle(sendEnabled ? RapidTheme.onBrandPrimary : Color.secondary)
                     .frame(width: 28, height: 28)
-                    .background(Circle().fill(viewModel.canSubmit ? RapidTheme.brandPrimary : Color.clear))
+                    .background(Circle().fill(sendEnabled ? RapidTheme.brandPrimary : Color.clear))
                     .overlay(
                         Circle().strokeBorder(
-                            viewModel.canSubmit ? .clear : RapidTheme.hairlineStrong, lineWidth: 1)
+                            sendEnabled ? .clear : RapidTheme.hairlineStrong, lineWidth: 1)
                     )
             }
             .buttonStyle(.plain)
-            .disabled(!viewModel.canSubmit)
-            .help("Generate")
+            .disabled(!sendEnabled)
+            .help(readiness.isReady ? "Generate" : "Load the model first")
             .accessibilityIdentifier("Images.Generate")
         }
     }
@@ -426,7 +487,12 @@ struct ImagesView: View {
     // MARK: - Actions
 
     private func runSubmit() {
-        guard viewModel.canSubmit else { return }
+        guard sendEnabled else {
+            // Not ready (or empty prompt): flash the readiness banner instead
+            // of silently doing nothing, so the blocking step is visible.
+            if !readiness.sendAllowed { blockedSendAttempts += 1 }
+            return
+        }
         Task { await viewModel.submit() }
     }
 
