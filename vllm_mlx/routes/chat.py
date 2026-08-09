@@ -6697,19 +6697,23 @@ async def stream_chat_completion(
             #
             # Detect the replay by PROVENANCE, not content equality alone
             # (codex): the model's clean content buffer
-            # (``tool_accumulated_text``) was ALREADY fully streamed
-            # (``streamed_content == content_buffer``), so there is provably
-            # no un-emitted tail and any terminal content equal to it is a
-            # cumulative snapshot. A genuinely parser-held suffix — streamed
-            # ``"ha"`` with buffer ``"haha"``, releasing a held ``"ha"`` →
-            # ``"haha"`` — has ``content_buffer != streamed_content`` and is
-            # left untouched. When there is no tool parser the buffer is
-            # empty and no hold-back mechanism exists, so a terminal value
-            # equal to everything streamed is still a snapshot.
+            # (``tool_accumulated_text``) was ALREADY fully streamed — i.e. its
+            # SANITIZED form matches the sanitized wire text (``streamed_content``)
+            # — so there is provably no un-emitted tail and any terminal content
+            # equal to it is a cumulative snapshot. The buffer is raw parser
+            # text, so it MUST be run through ``sanitize_content_for_stream``
+            # before the comparison; otherwise sanitizer-sensitive content (a
+            # trailing ``<|im_end|>`` etc.) would spuriously miss the check and
+            # be replayed. A genuinely parser-held suffix — streamed ``"ha"``
+            # with buffer ``"haha"``, releasing a held ``"ha"`` → ``"haha"`` —
+            # leaves the sanitized buffer LONGER than the wire text, so it does
+            # not match and is left untouched. When there is no tool parser the
+            # buffer is empty and no hold-back mechanism exists, so a terminal
+            # value equal to everything streamed is still a snapshot.
             content_buffer = getattr(processor, "tool_accumulated_text", "") or ""
+            _sanitized_buffer = sanitize_content_for_stream(content_buffer)
             _content_fully_streamed = bool(streamed_content) and (
-                not content_buffer
-                or sanitize_content_for_stream(content_buffer) == streamed_content
+                not content_buffer or _sanitized_buffer == streamed_content
             )
             if _content_fully_streamed:
                 if sanitize_content_for_stream(finish_content) == streamed_content:
