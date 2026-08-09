@@ -764,6 +764,84 @@ def test_terminal_finalize_flush_snapshot_does_not_replay_streamed_content(monke
     )
 
 
+def test_terminal_replay_guard_handles_sanitizer_sensitive_content(monkeypatch):
+    """#1709 (codex): the ``fully-streamed`` provenance check must compare the
+    content buffer on the SAME sanitized footing as the wire. The buffer holds
+    raw text (e.g. a trailing ``<|im_end|>`` special token) while
+    ``streamed_content`` is what ``sanitize_content_for_stream`` actually put
+    on the wire. Comparing the raw buffer would fail the check for any
+    sanitizer-sensitive content and replay it. Streamed ``"hello"`` (buffer
+    ``"hello<|im_end|>"``) + finalize flush of the raw buffer → ``"hello"``.
+    """
+    from vllm_mlx.domain.events import StreamEvent
+    from vllm_mlx.service import postprocessor as pp_mod
+
+    raw = "hello<|im_end|>"  # sanitizes to "hello" on the wire
+
+    def finalize_flush_raw_buffer(self):
+        self.tool_accumulated_text = raw
+        return [StreamEvent(type="content", content=raw)]
+
+    monkeypatch.setattr(
+        pp_mod.StreamingPostProcessor, "finalize", finalize_flush_raw_buffer
+    )
+
+    class _RawTokenEngine(_PlainStreamEngine):
+        async def stream_chat(self, messages, **kwargs):
+            yield GenerationOutput(
+                text=raw,
+                new_text=raw,
+                prompt_tokens=4,
+                completion_tokens=1,
+                finished=False,
+                channel=None,
+            )
+            yield GenerationOutput(
+                text=raw,
+                new_text="",
+                prompt_tokens=4,
+                completion_tokens=1,
+                finished=True,
+                finish_reason="stop",
+                channel=None,
+            )
+
+    cfg = reset_config()
+    cfg.engine = _RawTokenEngine()
+    cfg.model_name = "test-model"
+    cfg.model_registry = None
+    cfg.no_thinking = True
+    cfg.enable_auto_tool_choice = True
+    cfg.tool_call_parser = "auto"
+
+    app = FastAPI()
+    app.include_router(chat_router)
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "stream": True,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "say hello"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    events, saw_done = _parse_sse_events(resp.text)
+    assert saw_done
+
+    content_parts = [
+        choice["delta"]["content"]
+        for event in events
+        for choice in event.get("choices", [])
+        if (choice.get("delta") or {}).get("content")
+    ]
+    assert "".join(content_parts) == "hello", (
+        "sanitizer-sensitive content must be recognised as fully streamed and "
+        f"its terminal replay suppressed; got {''.join(content_parts)!r}"
+    )
+
+
 def test_terminal_finalize_suffix_is_not_suppressed_as_replay(monkeypatch):
     """#1709 follow-up (codex BLOCKING): the replay guard keys on PROVENANCE
     — the model's content buffer was fully streamed — not on content equality

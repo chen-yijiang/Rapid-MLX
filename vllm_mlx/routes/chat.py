@@ -6074,16 +6074,19 @@ async def stream_chat_completion(
         # Wire truth for content already delivered before the terminal chunk.
         # Some tool parsers expose the complete response again on their finish
         # event, so ``processor.accumulated_text`` is not suitable here (it can
-        # also contain raw reasoning/parser input).  Track the sanitized text
-        # at the single content-serialization seam instead.
-        _streamed_content_parts: list[str] = []
+        # also contain raw reasoning/parser input).  Accumulate the sanitized
+        # text at the single content-serialization seam into ONE running string
+        # (CPython optimizes in-place ``+=`` on a refcount-1 str, so this stays
+        # O(n) without retaining a per-delta parts list plus a joined copy).
+        _streamed_content = ""
 
         def _content_sse_chunk(
             text: str, chunk_logprobs: ChoiceLogProbs | None = None
         ) -> str:
             """Serialize one content delta, preserving requested logprobs."""
+            nonlocal _streamed_content
             wire_text = sanitize_content_for_stream(text)
-            _streamed_content_parts.append(wire_text)
+            _streamed_content += wire_text
             if not want_logprobs:
                 return _fast_sse_chunk(wire_text, "content")
             chunk = ChatCompletionChunk(
@@ -6679,7 +6682,7 @@ async def stream_chat_completion(
             # plain-text streams (deltas already drained content during
             # the loop), so this typically just adds the held suffix.
             finish_content = finish_event.content or ""
-            streamed_content = "".join(_streamed_content_parts)
+            streamed_content = _streamed_content
             # Issue #1709: the terminal chunk can replay the WHOLE answer that
             # was already emitted as content deltas during the loop. Two
             # channels do it: some parsers attach a cumulative snapshot to
@@ -6705,7 +6708,8 @@ async def stream_chat_completion(
             # equal to everything streamed is still a snapshot.
             content_buffer = getattr(processor, "tool_accumulated_text", "") or ""
             _content_fully_streamed = bool(streamed_content) and (
-                not content_buffer or content_buffer == streamed_content
+                not content_buffer
+                or sanitize_content_for_stream(content_buffer) == streamed_content
             )
             if _content_fully_streamed:
                 if sanitize_content_for_stream(finish_content) == streamed_content:
