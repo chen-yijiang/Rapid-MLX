@@ -6071,13 +6071,12 @@ async def stream_chat_completion(
             escaped = json.dumps(_sanitize(text))
             return f'{_sse_prefix}"{field}":{escaped}{_sse_suffix}'
 
-        # Wire truth for content already delivered before the terminal chunk.
-        # Some tool parsers expose the complete response again on their finish
-        # event, so ``processor.accumulated_text`` is not suitable here (it can
-        # also contain raw reasoning/parser input).  Accumulate the sanitized
-        # text at the single content-serialization seam into ONE running string
-        # (CPython optimizes in-place ``+=`` on a refcount-1 str, so this stays
-        # O(n) without retaining a per-delta parts list plus a joined copy).
+        # Wire truth for content already delivered before the terminal chunk:
+        # the exact SANITIZED bytes the client received, accumulated at the
+        # single content-serialization seam. ``processor.accumulated_text`` is
+        # unsuitable (it also holds raw reasoning/parser input). One running
+        # string, not a per-delta parts list plus a joined copy (CPython
+        # optimizes in-place ``+=`` on a refcount-1 str, so this stays O(n)).
         _streamed_content = ""
 
         def _content_sse_chunk(
@@ -6697,28 +6696,31 @@ async def stream_chat_completion(
             #
             # Detect the replay by PROVENANCE, not content equality alone
             # (codex): the model's clean content buffer
-            # (``tool_accumulated_text``) was ALREADY fully streamed — i.e. its
-            # SANITIZED form matches the sanitized wire text (``streamed_content``)
-            # — so there is provably no un-emitted tail and any terminal content
-            # equal to it is a cumulative snapshot. The buffer is raw parser
-            # text, so it MUST be run through ``sanitize_content_for_stream``
-            # before the comparison; otherwise sanitizer-sensitive content (a
-            # trailing ``<|im_end|>`` etc.) would spuriously miss the check and
-            # be replayed. A genuinely parser-held suffix — streamed ``"ha"``
-            # with buffer ``"haha"``, releasing a held ``"ha"`` → ``"haha"`` —
-            # leaves the sanitized buffer LONGER than the wire text, so it does
-            # not match and is left untouched. When there is no tool parser the
-            # buffer is empty and no hold-back mechanism exists, so a terminal
-            # value equal to everything streamed is still a snapshot.
+            # (``tool_accumulated_text``) was ALREADY fully streamed, so there
+            # is provably no un-emitted tail and any terminal content equal to
+            # it is a cumulative snapshot. Compare every operand on ONE footing
+            # — each run through ``sanitize_content_for_stream`` as a whole
+            # string. ``_wire_content`` re-sanitizes the accumulated wire text
+            # so a removable special token (e.g. ``<|im_end|>``) split across
+            # two deltas — which the per-delta sanitize could not strip alone —
+            # collapses to the same form as the once-sanitized buffer; without
+            # this the two would never match and the snapshot would replay. A
+            # genuinely parser-held suffix — streamed ``"ha"`` with buffer
+            # ``"haha"``, releasing a held ``"ha"`` → ``"haha"`` — leaves the
+            # sanitized buffer LONGER than the wire text, so it does not match
+            # and is left untouched. When there is no tool parser the buffer is
+            # empty and no hold-back mechanism exists, so a terminal value
+            # equal to everything streamed is still a snapshot.
             content_buffer = getattr(processor, "tool_accumulated_text", "") or ""
-            _sanitized_buffer = sanitize_content_for_stream(content_buffer)
+            _wire_content = sanitize_content_for_stream(streamed_content)
             _content_fully_streamed = bool(streamed_content) and (
-                not content_buffer or _sanitized_buffer == streamed_content
+                not content_buffer
+                or sanitize_content_for_stream(content_buffer) == _wire_content
             )
             if _content_fully_streamed:
-                if sanitize_content_for_stream(finish_content) == streamed_content:
+                if sanitize_content_for_stream(finish_content) == _wire_content:
                     finish_content = ""
-                if sanitize_content_for_stream(finalize_content) == streamed_content:
+                if sanitize_content_for_stream(finalize_content) == _wire_content:
                     finalize_content = ""
             terminal_content = (
                 ""
