@@ -6680,6 +6680,38 @@ async def stream_chat_completion(
             # the loop), so this typically just adds the held suffix.
             finish_content = finish_event.content or ""
             streamed_content = "".join(_streamed_content_parts)
+            # Issue #1709: the terminal chunk can replay the WHOLE answer that
+            # was already emitted as content deltas during the loop. Two
+            # channels do it: some parsers attach a cumulative snapshot to
+            # ``finish_event.content``; and — the manifestation seen with
+            # ``--enable-auto-tool-choice --tool-call-parser auto`` on a
+            # reasoning model — the end-of-stream ``flush_held_content`` in
+            # ``StreamingPostProcessor.finalize`` returns the ENTIRE content
+            # buffer, because the auto parser's emitted-length counter
+            # (``_content_emitted_len``) is only advanced on its streaming
+            # path, which a reasoning parser bypasses. Both duplicate the
+            # wire.
+            #
+            # Detect the replay by PROVENANCE, not content equality alone
+            # (codex): the model's clean content buffer
+            # (``tool_accumulated_text``) was ALREADY fully streamed
+            # (``streamed_content == content_buffer``), so there is provably
+            # no un-emitted tail and any terminal content equal to it is a
+            # cumulative snapshot. A genuinely parser-held suffix — streamed
+            # ``"ha"`` with buffer ``"haha"``, releasing a held ``"ha"`` →
+            # ``"haha"`` — has ``content_buffer != streamed_content`` and is
+            # left untouched. When there is no tool parser the buffer is
+            # empty and no hold-back mechanism exists, so a terminal value
+            # equal to everything streamed is still a snapshot.
+            content_buffer = getattr(processor, "tool_accumulated_text", "") or ""
+            _content_fully_streamed = bool(streamed_content) and (
+                not content_buffer or content_buffer == streamed_content
+            )
+            if _content_fully_streamed:
+                if sanitize_content_for_stream(finish_content) == streamed_content:
+                    finish_content = ""
+                if sanitize_content_for_stream(finalize_content) == streamed_content:
+                    finalize_content = ""
             terminal_content = (
                 ""
                 if _forced_terminal_content_consumed
@@ -6968,19 +7000,6 @@ async def stream_chat_completion(
                 # dedicated trailing usage chunk is suppressed too.
                 usage=None,
             )
-            if streamed_content:
-                # Issue #1709: auto tool-choice parsers can attach a snapshot
-                # of the complete answer during terminal finalization. Compare
-                # the actual serialized representation after all terminal
-                # rescue/sanitization logic, not parser-internal raw text.
-                _terminal_dump = final_chunk.model_dump(exclude_none=True)
-                _terminal_wire_content = (
-                    _terminal_dump.get("choices", [{}])[0]
-                    .get("delta", {})
-                    .get("content")
-                )
-                if _terminal_wire_content == streamed_content:
-                    final_chunk.choices[0].delta.content = None
             yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
         elif fallback_tool_calls or finalize_content:
             # Defensive: stream ended without a "finish" event but

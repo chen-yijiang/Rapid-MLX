@@ -589,18 +589,19 @@ def test_streaming_terminal_chunk_does_not_duplicate_already_streamed_content():
     )
 
 
-@pytest.mark.parametrize("snapshot_source", ["finish", "finalize"])
 def test_terminal_finish_snapshot_does_not_replay_streamed_content(
-    monkeypatch, snapshot_source
+    monkeypatch,
 ):
     """#1709: a parser finish snapshot must not become a second response.
 
     Auto tool-choice parser paths can attach the complete plain-text answer to
-    the finish event after the same answer was emitted as ordinary content
-    deltas.  The terminal chunk may still release genuinely held parser bytes,
-    but it must suppress a verbatim snapshot of content already on the wire.
+    the ``finish`` event (``finish_event.content``) after the same answer was
+    emitted as ordinary content deltas — a cumulative snapshot of everything
+    already on the wire. The terminal chunk must drop that snapshot. A
+    genuinely parser-held suffix arriving via ``finalize`` is a different
+    provenance and must NOT be suppressed — see
+    ``test_terminal_finalize_suffix_is_not_suppressed_as_replay``.
     """
-    from vllm_mlx.domain.events import StreamEvent
     from vllm_mlx.service import postprocessor as pp_mod
 
     original_process_chunk = pp_mod.StreamingPostProcessor.process_chunk
@@ -611,18 +612,11 @@ def test_terminal_finish_snapshot_does_not_replay_streamed_content(
                 event.content = output.text
             yield event
 
-    if snapshot_source == "finish":
-        monkeypatch.setattr(
-            pp_mod.StreamingPostProcessor,
-            "process_chunk",
-            finish_with_full_response,
-        )
-    else:
-        monkeypatch.setattr(
-            pp_mod.StreamingPostProcessor,
-            "finalize",
-            lambda self: [StreamEvent(type="content", content="hello world")],
-        )
+    monkeypatch.setattr(
+        pp_mod.StreamingPostProcessor,
+        "process_chunk",
+        finish_with_full_response,
+    )
 
     class _SeparateFinishEngine(_PlainStreamEngine):
         async def stream_chat(self, messages, **kwargs):
@@ -687,6 +681,165 @@ def test_terminal_finish_snapshot_does_not_replay_streamed_content(
     ]
     assert len(terminal_choices) == 1
     assert "content" not in terminal_choices[0]["delta"]
+
+
+def test_terminal_finalize_flush_snapshot_does_not_replay_streamed_content(monkeypatch):
+    """#1709 real manifestation (auto parser + reasoning model): the
+    end-of-stream ``flush_held_content`` returns the ENTIRE content buffer
+    because the auto parser's emitted-length counter is bypassed by the
+    reasoning parser. That flush duplicates content already streamed as
+    deltas. When the model's content buffer was fully streamed
+    (``tool_accumulated_text == streamed_content``) the terminal flush must
+    be suppressed, not replayed.
+    """
+    from vllm_mlx.domain.events import StreamEvent
+    from vllm_mlx.service import postprocessor as pp_mod
+
+    def finalize_flush_full_buffer(self):
+        # Mirror the auto parser's stale-counter flush: buffer == everything
+        # already streamed, released again as a terminal content event.
+        self.tool_accumulated_text = "hello world"
+        return [StreamEvent(type="content", content="hello world")]
+
+    monkeypatch.setattr(
+        pp_mod.StreamingPostProcessor, "finalize", finalize_flush_full_buffer
+    )
+
+    class _FullBufferEngine(_PlainStreamEngine):
+        async def stream_chat(self, messages, **kwargs):
+            accumulated = ""
+            for i, delta in enumerate(["hello", " world"]):
+                accumulated += delta
+                yield GenerationOutput(
+                    text=accumulated,
+                    new_text=delta,
+                    prompt_tokens=4,
+                    completion_tokens=i + 1,
+                    finished=False,
+                    channel=None,
+                )
+            yield GenerationOutput(
+                text=accumulated,
+                new_text="",
+                prompt_tokens=4,
+                completion_tokens=2,
+                finished=True,
+                finish_reason="stop",
+                channel=None,
+            )
+
+    cfg = reset_config()
+    cfg.engine = _FullBufferEngine()
+    cfg.model_name = "test-model"
+    cfg.model_registry = None
+    cfg.no_thinking = True
+    cfg.enable_auto_tool_choice = True
+    cfg.tool_call_parser = "auto"
+
+    app = FastAPI()
+    app.include_router(chat_router)
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "stream": True,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "say hello world"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    events, saw_done = _parse_sse_events(resp.text)
+    assert saw_done
+
+    content_parts = [
+        choice["delta"]["content"]
+        for event in events
+        for choice in event.get("choices", [])
+        if (choice.get("delta") or {}).get("content")
+    ]
+    assert "".join(content_parts) == "hello world", (
+        "a finalize flush that replays the fully-streamed content buffer must "
+        f"be suppressed; got {''.join(content_parts)!r}"
+    )
+
+
+def test_terminal_finalize_suffix_is_not_suppressed_as_replay(monkeypatch):
+    """#1709 follow-up (codex BLOCKING): the replay guard keys on PROVENANCE
+    — the model's content buffer was fully streamed — not on content equality
+    alone. A genuinely parser-held suffix is the not-yet-streamed tail: the
+    model produced ``"haha"`` (buffer), only ``"ha"`` reached the wire, and
+    the held ``"ha"`` is released at finalize. Because the buffer (``"haha"``)
+    is NOT equal to what was streamed (``"ha"``), the held tail must be
+    emitted → ``"haha"``, never collapsed to ``"ha"``.
+    """
+    from vllm_mlx.domain.events import StreamEvent
+    from vllm_mlx.service import postprocessor as pp_mod
+
+    def finalize_release_held_tail(self):
+        # Model actually produced "haha"; the parser streamed "ha" and held
+        # the second "ha" behind a marker that never became a tool call.
+        self.tool_accumulated_text = "haha"
+        return [StreamEvent(type="content", content="ha")]
+
+    monkeypatch.setattr(
+        pp_mod.StreamingPostProcessor, "finalize", finalize_release_held_tail
+    )
+
+    class _HeldSuffixEngine(_PlainStreamEngine):
+        async def stream_chat(self, messages, **kwargs):
+            yield GenerationOutput(
+                text="ha",
+                new_text="ha",
+                prompt_tokens=4,
+                completion_tokens=1,
+                finished=False,
+                channel=None,
+            )
+            yield GenerationOutput(
+                text="ha",
+                new_text="",
+                prompt_tokens=4,
+                completion_tokens=1,
+                finished=True,
+                finish_reason="stop",
+                channel=None,
+            )
+
+    cfg = reset_config()
+    cfg.engine = _HeldSuffixEngine()
+    cfg.model_name = "test-model"
+    cfg.model_registry = None
+    cfg.no_thinking = True
+    cfg.enable_auto_tool_choice = True
+    cfg.tool_call_parser = "auto"
+
+    app = FastAPI()
+    app.include_router(chat_router)
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "stream": True,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "say ha"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    events, saw_done = _parse_sse_events(resp.text)
+    assert saw_done
+
+    content_parts = [
+        choice["delta"]["content"]
+        for event in events
+        for choice in event.get("choices", [])
+        if (choice.get("delta") or {}).get("content")
+    ]
+    assert "".join(content_parts) == "haha", (
+        "a parser-held finalize suffix (buffer != streamed) must be preserved, "
+        f"not suppressed as a replay; got {''.join(content_parts)!r}"
+    )
 
 
 def test_synthetic_terminal_chunk_does_not_replay_accumulated_text(monkeypatch):
