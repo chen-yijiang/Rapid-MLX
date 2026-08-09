@@ -90,7 +90,7 @@ class ImageEngine:
         height: int = 1024,
         num_inference_steps: int = 4,
         seed: int = 0,
-        guidance: float = 4.0,
+        guidance: float | None = None,
         negative_prompt: str | None = None,
         image_paths: list[str] | None = None,
     ) -> bytes:

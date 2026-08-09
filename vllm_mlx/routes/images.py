@@ -65,7 +65,9 @@ def _generate_one(engine, request: ImageGenerationRequest, seed: int) -> bytes:
         height=height,
         num_inference_steps=request.steps if request.steps is not None else default_steps,
         seed=seed,
-        guidance=request.guidance if request.guidance is not None else 4.0,
+        # None → each model uses its own trained default guidance (Klein is
+        # guidance-distilled; forcing 4.0 washes it out).
+        guidance=request.guidance,
         negative_prompt=request.negative_prompt,
     )
 

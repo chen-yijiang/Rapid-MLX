@@ -221,6 +221,34 @@ def test_generate_resets_progress_and_registers_reporter():
     assert engine._progress["total"] == 4
 
 
+def test_klein_drops_unsupported_negative_prompt():
+    # Regression: FLUX.2 Klein's generate_image has no negative_prompt param,
+    # so the engine must NOT forward it (passing it raises a TypeError).
+    engine = ImageGenerationEngine("Runpod/FLUX.2-klein-4B-mflux-4bit")
+    fake = _FakeModel()
+    engine._model = fake
+    engine.generate(prompt="a fox", negative_prompt="blurry, low quality", seed=1)
+    assert "negative_prompt" not in fake.calls[0]
+
+
+def test_supporting_family_keeps_negative_prompt():
+    engine = ImageGenerationEngine("filipstrand/Z-Image-Turbo-mflux-4bit")
+    fake = _FakeModel()
+    engine._model = fake
+    engine.generate(prompt="a fox", negative_prompt="blurry", seed=1)
+    assert fake.calls[0]["negative_prompt"] == "blurry"
+
+
+def test_guidance_omitted_when_unset():
+    # Unset guidance is dropped so a guidance-distilled model uses its own
+    # trained default rather than a forced value.
+    engine = ImageGenerationEngine("Runpod/FLUX.2-klein-4B-mflux-4bit")
+    fake = _FakeModel()
+    engine._model = fake
+    engine.generate(prompt="a fox", seed=1)
+    assert "guidance" not in fake.calls[0]
+
+
 def test_backend_failure_becomes_runtime_error():
     engine = ImageGenerationEngine("Qwen/Qwen-Image")
 

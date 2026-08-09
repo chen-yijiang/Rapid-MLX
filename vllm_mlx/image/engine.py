@@ -105,6 +105,11 @@ def _detect_family(model_name: str) -> str:
     )
 
 
+# Families whose ``generate_image`` takes NO ``negative_prompt`` parameter.
+# FLUX.2 Klein omits it (Flux1 / Qwen-Image / Z-Image all accept it), and
+# passing an unknown kwarg raises — so the engine drops it for these.
+_NO_NEGATIVE_PROMPT_FAMILIES = frozenset({"flux2-klein"})
+
 # Per-family default denoise steps when the request pins none. Distilled/turbo
 # models converge in a handful of steps; a non-distilled model needs many more.
 _DEFAULT_STEPS_BY_FAMILY = {
@@ -144,6 +149,7 @@ class ImageGenerationEngine:
         self.family = _detect_family(model_name)
         self.is_edit = self.family == "qwen-image-edit"
         self.default_steps = _DEFAULT_STEPS_BY_FAMILY.get(self.family, 4)
+        self.supports_negative_prompt = self.family not in _NO_NEGATIVE_PROMPT_FAMILIES
         self._prequantized = _looks_like_prequantized(model_name)
         # ``None`` when the repo is already quantized — passing a quantize width
         # for a pre-quantized checkpoint makes mflux re-quantize and error.
@@ -240,7 +246,7 @@ class ImageGenerationEngine:
         height: int = 1024,
         num_inference_steps: int = 4,
         seed: int = 0,
-        guidance: float = 4.0,
+        guidance: float | None = None,
         negative_prompt: str | None = None,
         image_paths: list[str] | None = None,
     ) -> bytes:
@@ -282,24 +288,15 @@ class ImageGenerationEngine:
                     # Passing ``None`` lets mflux size the target to match the
                     # conditioning, exactly like its edit CLI.
                     result = model.generate_image(
-                        seed=seed,
-                        prompt=prompt,
-                        image_paths=image_paths,
-                        num_inference_steps=num_inference_steps,
-                        height=None,
-                        width=None,
-                        guidance=guidance,
-                        negative_prompt=negative_prompt,
+                        image_paths=image_paths, height=None, width=None,
+                        **self._gen_kwargs(seed, prompt, num_inference_steps,
+                                           guidance, negative_prompt),
                     )
                 else:
                     result = model.generate_image(
-                        seed=seed,
-                        prompt=prompt,
-                        num_inference_steps=num_inference_steps,
-                        height=height,
-                        width=width,
-                        guidance=guidance,
-                        negative_prompt=negative_prompt,
+                        height=height, width=width,
+                        **self._gen_kwargs(seed, prompt, num_inference_steps,
+                                           guidance, negative_prompt),
                     )
             except ImageRuntimeError:
                 raise  # cancellation + already-clean errors pass straight through
@@ -309,6 +306,25 @@ class ImageGenerationEngine:
                 self._progress["running"] = False
 
         return self._encode_png(result)
+
+    def _gen_kwargs(self, seed, prompt, num_inference_steps, guidance, negative_prompt) -> dict:
+        """Build ``generate_image`` kwargs, omitting params a family rejects.
+
+        FLUX.2 Klein has no ``negative_prompt`` parameter (passing it raises),
+        and a guidance-distilled model degrades when forced to a fixed guidance
+        — so ``guidance`` is passed only when the caller set one, otherwise each
+        model uses its own trained default.
+        """
+        kwargs = {
+            "seed": seed,
+            "prompt": prompt,
+            "num_inference_steps": num_inference_steps,
+        }
+        if guidance is not None:
+            kwargs["guidance"] = guidance
+        if negative_prompt is not None and self.supports_negative_prompt:
+            kwargs["negative_prompt"] = negative_prompt
+        return kwargs
 
     @staticmethod
     def _encode_png(result) -> bytes:
