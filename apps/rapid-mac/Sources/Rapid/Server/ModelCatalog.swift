@@ -371,6 +371,62 @@ enum ModelCatalog {
         return rows
     }
 
+    // MARK: - Video lane (reference — not yet wired into any surface)
+    //
+    // Mirror of ``imageEntries`` / ``parseImageRows`` for the ``[video:gen]``
+    // rows the engine already prints (``cli.py``: LTX-2.3 / Wan2.2 /
+    // CogVideoX-Fun aliases). Deliberately NOT called anywhere yet: the MVP
+    // (see docs/video-lane-mvp-and-plan.md) found local video is a minutes-per-
+    // clip *render*, not a seconds-per-image *interaction*, so a Video tab that
+    // copies the Images tab would be a poor UX. This is the starting point for
+    // the render-queue design if/when that lane is built. To surface video
+    // models in Model Management, call ``videoEntries`` alongside
+    // ``imageEntries`` at SettingsModelManagementPanel.swift:1325/1338 —
+    // ``availableKinds`` then gains ``.video`` and the capability tab appears.
+
+    /// Video-generation aliases (``[video:gen]`` rows) — the video counterpart
+    /// of ``imageEntries``. Reference only; see the note above.
+    static func videoEntries(
+        binary: URL,
+        hubCacheOverride: URL? = ModelsFolderPreference.validatedOverrideURL()
+    ) async -> [ModelEntry] {
+        async let modelsOut = runRapidMlx(binary: binary, args: ["models"])
+        async let cachedTask: [(String, String?, String?)] = listCached(
+            binary: binary,
+            hubCacheOverride: hubCacheOverride
+        )
+        let rows = parseVideoRows(await modelsOut)
+        let cachedRepos = Set((await cachedTask).compactMap { $0.1 })
+        return rows.map { row in
+            ModelEntry(
+                alias: row.alias,
+                hfRepo: row.hfRepo,
+                sizeOnDisk: row.size,
+                cached: row.hfRepo.map { cachedRepos.contains($0) } ?? false,
+                kind: .video
+            )
+        }
+    }
+
+    /// Parse ``[video:gen]``-tagged rows into ``(alias, hfRepo, size)``.
+    /// Row shape (see cli.py video section):
+    /// ``ltx-2.3-mlx-q4    21.2 GiB    [video:gen] notapalindrome/ltx23-mlx-av-q4``.
+    static func parseVideoRows(
+        _ output: String
+    ) -> [(alias: String, hfRepo: String?, size: String?)] {
+        var rows: [(String, String?, String?)] = []
+        for rawLine in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespaces)
+            let fields = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            guard let alias = fields.first, isSafeAlias(alias),
+                  let tagIdx = fields.firstIndex(of: "[video:gen]") else { continue }
+            let hfRepo = tagIdx + 1 < fields.count ? fields[tagIdx + 1] : nil
+            let size = tagIdx > 1 ? fields[1..<tagIdx].joined(separator: " ") : nil
+            rows.append((alias, hfRepo, size))
+        }
+        return rows
+    }
+
     /// True when the line carries a non-chat Kind tag in its own column.
     ///
     /// Matching the bare substring ``"[audio:"`` would let any row whose
