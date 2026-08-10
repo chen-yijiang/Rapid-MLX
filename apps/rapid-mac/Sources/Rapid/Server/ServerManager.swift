@@ -80,8 +80,8 @@ struct MemoryLoadConfirmationQueue {
     }
 
     mutating func abandonWaiter(_ requestID: UUID) {
+        decisions.removeValue(forKey: requestID)
         guard let index = pending.firstIndex(where: { $0.requestID == requestID }) else {
-            decisions.removeValue(forKey: requestID)
             return
         }
         pending[index].requestID = nil

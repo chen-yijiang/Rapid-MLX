@@ -105,4 +105,18 @@ struct MemoryLoadConfirmationQueueTests {
         #expect(queue.takeDecision(for: requestA) == .confirmed(sequence: 1))
         #expect(queue.currentWarning?.id == warningB.id)
     }
+
+    @Test("cancellation after confirmation drains the retained decision")
+    func confirmedThenAbandonedDoesNotLeakDecision() {
+        var queue = MemoryLoadConfirmationQueue()
+        let request = UUID()
+        let warning = warning("confirmed-then-cancelled")
+        queue.enqueue(warning: warning, requestID: request)
+
+        #expect(queue.resolveCurrent(warning: warning, decision: .confirmed(sequence: 8)))
+        queue.abandonWaiter(request)
+        #expect(queue.takeDecision(for: request) == nil)
+        queue.completeConfirmedLaunch(warningID: warning.id)
+        #expect(queue.currentWarning == nil)
+    }
 }
