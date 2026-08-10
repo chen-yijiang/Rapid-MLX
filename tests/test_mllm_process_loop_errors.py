@@ -18,6 +18,7 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
     waiting = MLLMRequest(request_id="waiting-request", prompt="hello")
     running = MLLMRequest(request_id="running-request", prompt="hello")
     uid_only = "uid-only-request"
+    pending_only = "pending-only-request"
     scheduler.requests = {
         waiting.request_id: waiting,
         running.request_id: running,
@@ -33,12 +34,13 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
         waiting.request_id: asyncio.Queue(),
         running.request_id: full_running_queue,
         uid_only: asyncio.Queue(),
+        pending_only: asyncio.Queue(),
         aborted: asyncio.Queue(),
     }
     scheduler.request_id_to_uid = {running.request_id: 42, uid_only: 43}
     scheduler.uid_to_request_id = {42: running.request_id, 43: uid_only}
     scheduler._detokenizer_pool = {running.request_id: object()}
-    scheduler._pending_abort_ids = {running.request_id}
+    scheduler._pending_abort_ids = {running.request_id, pending_only}
     scheduler._aborted_queue_ids = {aborted}
     scheduler.finished_req_ids = set()
     scheduler._running = True
@@ -55,13 +57,17 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
     try:
         # Let the fatal distributor confront the already-full bounded queue
         # before any consumer frees a slot.
-        while scheduler.requests:
-            await asyncio.sleep(0)
+        async def _wait_until_failed() -> None:
+            while scheduler.requests:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(_wait_until_failed(), timeout=0.5)
         outputs = await asyncio.wait_for(
             asyncio.gather(
                 scheduler.output_queues[waiting.request_id].get(),
                 scheduler.output_queues[running.request_id].get(),
                 scheduler.output_queues[uid_only].get(),
+                scheduler.output_queues[pending_only].get(),
                 scheduler.output_queues[aborted].get(),
             ),
             timeout=0.5,
@@ -78,6 +84,7 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
         waiting.request_id,
         running.request_id,
         uid_only,
+        pending_only,
     }
     assert outputs[-1] is None
     for output in outputs[:-1]:

@@ -1266,6 +1266,10 @@ class MLLMScheduler:
         # partially transitioned request gets its terminal queue signal.
         request_ids.update(self.request_id_to_uid)
         request_ids.update(self.uid_to_request_id.values())
+        # An abort can be accepted after the request has otherwise been
+        # detached. Its queue still needs a terminal signal before the pending
+        # ledger is cleared below.
+        request_ids.update(self._pending_abort_ids)
         # Third-party exceptions can contain paths, prompt fragments, or model
         # internals. The detailed traceback is logged by the caller; clients
         # receive only this stable 500-class message.
