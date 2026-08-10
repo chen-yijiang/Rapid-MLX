@@ -37,6 +37,8 @@ struct MemoryLoadConfirmationQueueTests {
         #expect(queue.resolveCurrent(warning: warningB, decision: .confirmed(sequence: 7)) == true)
         #expect(queue.takeDecision(for: requestB) == .confirmed(sequence: 7))
         #expect(queue.currentWarning == nil)
+        queue.completeConfirmedLaunch(warningID: warningB.id)
+        #expect(queue.currentWarning == nil)
     }
 
     @Test("same-alias loads remain distinct requests")
@@ -54,6 +56,8 @@ struct MemoryLoadConfirmationQueueTests {
         #expect(queue.resolveCurrent(warning: warningA, decision: .confirmed(sequence: 1)))
         #expect(queue.takeDecision(for: requestA) == .confirmed(sequence: 1))
         #expect(queue.takeDecision(for: requestB) == nil)
+        #expect(queue.currentWarning == nil)
+        queue.completeConfirmedLaunch(warningID: warningA.id)
         #expect(queue.currentWarning?.id == warningB.id)
     }
 
@@ -64,6 +68,8 @@ struct MemoryLoadConfirmationQueueTests {
         queue.enqueue(warning: warning, requestID: nil)
 
         #expect(queue.resolveCurrent(warning: warning, decision: .confirmed(sequence: 3)))
+        #expect(queue.currentWarning == nil)
+        queue.completeConfirmedLaunch(warningID: warning.id)
         #expect(queue.currentWarning == nil)
     }
 
@@ -77,6 +83,26 @@ struct MemoryLoadConfirmationQueueTests {
         queue.abandonWaiter(request)
         #expect(queue.currentWarning?.id == warning.id)
         #expect(queue.resolveCurrent(warning: warning, decision: .confirmed(sequence: 4)))
+        queue.completeConfirmedLaunch(warningID: warning.id)
         #expect(queue.takeDecision(for: request) == nil)
+    }
+
+    @Test("next prompt waits for both confirmed launch completion and result consumption")
+    func confirmedLaunchSerializesNextPrompt() {
+        var queue = MemoryLoadConfirmationQueue()
+        let requestA = UUID()
+        let requestB = UUID()
+        let warningA = warning("model-a")
+        let warningB = warning("model-b")
+        queue.enqueue(warning: warningA, requestID: requestA)
+        queue.enqueue(warning: warningB, requestID: requestB)
+
+        #expect(queue.resolveCurrent(warning: warningA, decision: .confirmed(sequence: 1)))
+        #expect(queue.currentWarning == nil)
+        #expect(queue.resolveCurrent(warning: warningA, decision: .cancelled) == false)
+        queue.completeConfirmedLaunch(warningID: warningA.id)
+        #expect(queue.currentWarning == nil)
+        #expect(queue.takeDecision(for: requestA) == .confirmed(sequence: 1))
+        #expect(queue.currentWarning?.id == warningB.id)
     }
 }

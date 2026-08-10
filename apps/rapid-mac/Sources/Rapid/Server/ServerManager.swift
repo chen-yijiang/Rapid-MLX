@@ -12,37 +12,71 @@ struct MemoryLoadConfirmationQueue {
     }
 
     private struct Pending: Equatable {
+        enum Phase: Equatable {
+            case awaitingDecision
+            case launching
+        }
+
         let warning: ModelSizing.MemoryWarning
         var requestID: UUID?
+        var phase: Phase = .awaitingDecision
+        var launchComplete = false
     }
 
     private var pending: [Pending] = []
     private var decisions: [UUID: Decision] = [:]
 
-    var currentWarning: ModelSizing.MemoryWarning? { pending.first?.warning }
+    var currentWarning: ModelSizing.MemoryWarning? {
+        guard pending.first?.phase == .awaitingDecision else { return nil }
+        return pending.first?.warning
+    }
 
     mutating func enqueue(warning: ModelSizing.MemoryWarning, requestID: UUID?) {
         pending.append(Pending(warning: warning, requestID: requestID))
     }
 
     func isPending(_ requestID: UUID) -> Bool {
-        pending.contains { $0.requestID == requestID }
+        pending.contains {
+            $0.requestID == requestID && $0.phase == .awaitingDecision
+        }
     }
 
     mutating func resolveCurrent(
         warning: ModelSizing.MemoryWarning,
         decision: Decision
     ) -> Bool {
-        guard pending.first?.warning.id == warning.id else { return false }
-        let resolved = pending.removeFirst()
-        if let requestID = resolved.requestID {
+        guard pending.first?.warning.id == warning.id,
+              pending.first?.phase == .awaitingDecision else { return false }
+        if let requestID = pending[0].requestID {
             decisions[requestID] = decision
+        }
+        switch decision {
+        case .cancelled:
+            pending.removeFirst()
+        case .confirmed:
+            pending[0].phase = .launching
         }
         return true
     }
 
+    mutating func completeConfirmedLaunch(warningID: UUID) {
+        guard pending.first?.warning.id == warningID,
+              pending.first?.phase == .launching else { return }
+        pending[0].launchComplete = true
+        if let requestID = pending[0].requestID,
+           decisions[requestID] != nil {
+            return
+        }
+        pending.removeFirst()
+    }
+
     mutating func takeDecision(for requestID: UUID) -> Decision? {
-        decisions.removeValue(forKey: requestID)
+        let decision = decisions.removeValue(forKey: requestID)
+        if pending.first?.requestID == requestID,
+           pending.first?.launchComplete == true {
+            pending.removeFirst()
+        }
+        return decision
     }
 
     mutating func abandonWaiter(_ requestID: UUID) {
@@ -969,13 +1003,18 @@ final class ServerManager {
             return
         }
         memoryConfirmTask = Task { [weak self] in
-            await self?.start(
+            guard let self else { return }
+            if self.child != nil {
+                await self.stop()
+            }
+            await self.start(
                 alias: warning.alias,
                 hfPath: warning.hfPath,
                 isAutoRespawn: warning.isAutoRespawn,
                 bypassMemoryGuard: true
             )
-            self?.memoryConfirmRunning.remove(seq)
+            self.memoryConfirmRunning.remove(seq)
+            self.memoryConfirmations.completeConfirmedLaunch(warningID: warning.id)
         }
     }
 
