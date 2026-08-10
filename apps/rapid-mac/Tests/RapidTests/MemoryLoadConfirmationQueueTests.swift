@@ -29,7 +29,7 @@ struct MemoryLoadConfirmationQueueTests {
 
         #expect(queue.currentWarning?.id == warningA.id)
         #expect(queue.resolveCurrent(warning: warningB, decision: .confirmed(sequence: 99)) == false)
-        #expect(queue.cancelCurrent() == true)
+        #expect(queue.resolveCurrent(warning: warningA, decision: .cancelled) == true)
         #expect(queue.takeDecision(for: requestA) == .cancelled)
         #expect(queue.takeDecision(for: requestB) == nil)
 

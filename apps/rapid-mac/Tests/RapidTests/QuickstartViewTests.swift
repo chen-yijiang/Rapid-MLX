@@ -769,7 +769,7 @@ struct QuickstartMemoryWiringSourceGuardTests {
             "The in-sheet card's confirm button no longer calls server.confirmPendingMemoryLoad — 'Load anyway' would be inert (#1503)."
         )
         #expect(
-            src.contains("server.cancelPendingMemoryLoad()"),
+            src.contains("server.cancelPendingMemoryLoad(warning)"),
             "The in-sheet card's cancel button no longer calls server.cancelPendingMemoryLoad — the parked load is never dropped (#1503)."
         )
         #expect(

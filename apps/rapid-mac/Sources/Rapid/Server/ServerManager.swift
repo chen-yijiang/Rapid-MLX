@@ -41,11 +41,6 @@ struct MemoryLoadConfirmationQueue {
         return true
     }
 
-    mutating func cancelCurrent() -> Bool {
-        guard let warning = currentWarning else { return false }
-        return resolveCurrent(warning: warning, decision: .cancelled)
-    }
-
     mutating func takeDecision(for requestID: UUID) -> Decision? {
         decisions.removeValue(forKey: requestID)
     }
@@ -987,13 +982,16 @@ final class ServerManager {
     /// The user backed out of a memory-risky load. Just drops the
     /// held request; ``state`` is untouched (it never left idle/stopped
     /// because ``start`` returned before spawning).
-    func cancelPendingMemoryLoad() {
+    func cancelPendingMemoryLoad(_ warning: ModelSizing.MemoryWarning) {
         // Deliberately leaves ``memoryConfirmRunning`` alone: this cancels a
         // load that was never started, so any launch still in flight belongs
         // to an EARLIER confirmation and its waiter must not be told it
         // finished.
         memoryConfirmTask = nil
-        _ = memoryConfirmations.cancelCurrent()
+        _ = memoryConfirmations.resolveCurrent(
+            warning: warning,
+            decision: .cancelled
+        )
     }
 
     func start(
