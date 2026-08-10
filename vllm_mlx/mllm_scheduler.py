@@ -1243,6 +1243,10 @@ class MLLMScheduler:
         waiter blocked.  Reset the poisoned batch and return terminal outputs
         for event-loop-thread delivery instead.
         """
+        # ``running`` is keyed by request ID (see ``_schedule_waiting``), not
+        # by the generator UID.  Include it explicitly because a partially
+        # failed scheduling step may have moved a request there before it was
+        # committed to every other bookkeeping map.
         request_ids = set(self.requests) | set(self.running)
         request_ids.update(request.request_id for request in self.waiting)
         err_text = f"MLLM engine loop error: {type(exc).__name__}: {exc}"
@@ -1278,6 +1282,9 @@ class MLLMScheduler:
         self.uid_to_request_id.clear()
         self._detokenizer_pool.clear()
         self._pending_abort_ids.clear()
+        # Do not clear ``_aborted_queue_ids`` here. ``_distribute_outputs``
+        # runs immediately after this helper and must still signal requests
+        # that completed an abort just before the fatal step exception.
         self.finished_req_ids.update(request_ids)
         return output
 

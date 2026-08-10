@@ -15,13 +15,22 @@ from vllm_mlx.mllm_scheduler import MLLMRequest, MLLMScheduler
 async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
     """Unexpected mlx-vlm/model errors must not be logged and retried forever."""
     scheduler = MLLMScheduler.__new__(MLLMScheduler)
-    request = MLLMRequest(request_id="broken", prompt="hello")
-    scheduler.requests = {request.request_id: request}
-    scheduler.waiting = __import__("collections").deque([request])
-    scheduler.running = {}
-    scheduler.output_queues = {request.request_id: asyncio.Queue()}
-    scheduler.request_id_to_uid = {}
-    scheduler.uid_to_request_id = {}
+    waiting = MLLMRequest(request_id="waiting-request", prompt="hello")
+    running = MLLMRequest(request_id="running-request", prompt="hello")
+    scheduler.requests = {
+        waiting.request_id: waiting,
+        running.request_id: running,
+    }
+    scheduler.waiting = __import__("collections").deque([waiting])
+    # The running map is keyed by request ID; generator UIDs live only in the
+    # two adjacent translation maps.
+    scheduler.running = {running.request_id: running}
+    scheduler.output_queues = {
+        waiting.request_id: asyncio.Queue(),
+        running.request_id: asyncio.Queue(),
+    }
+    scheduler.request_id_to_uid = {running.request_id: 42}
+    scheduler.uid_to_request_id = {42: running.request_id}
     scheduler._detokenizer_pool = {}
     scheduler._pending_abort_ids = set()
     scheduler._aborted_queue_ids = set()
@@ -37,8 +46,12 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
 
     task = asyncio.create_task(scheduler._process_loop())
     try:
-        output = await asyncio.wait_for(
-            scheduler.output_queues[request.request_id].get(), timeout=0.5
+        outputs = await asyncio.wait_for(
+            asyncio.gather(
+                scheduler.output_queues[waiting.request_id].get(),
+                scheduler.output_queues[running.request_id].get(),
+            ),
+            timeout=0.5,
         )
     finally:
         scheduler._running = False
@@ -48,10 +61,15 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
         except asyncio.CancelledError:
             pass
 
-    assert output.finished is True
-    assert output.finish_reason == "length"
-    assert "TypeError" in output.error
-    assert "mask" in output.error
+    assert {output.request_id for output in outputs} == {
+        waiting.request_id,
+        running.request_id,
+    }
+    for output in outputs:
+        assert output.finished is True
+        assert output.finish_reason == "length"
+        assert "TypeError" in output.error
+        assert "mask" in output.error
     assert scheduler._step_no_queue.call_count == 1
     assert not scheduler.requests
     assert not scheduler.waiting
