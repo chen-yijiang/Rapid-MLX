@@ -158,14 +158,6 @@ final class ServerManager {
     /// consuming one another's confirmation (#1463).
     private var memoryConfirmations = MemoryLoadConfirmationQueue()
 
-    /// The re-entered launch spawned by "Load anyway". ``ensureServing``
-    /// awaits this instead of polling for a state change: ``start`` can
-    /// legitimately sit in ``awaitDownloadSettlement`` (a background pull
-    /// still fetching the model) with ``state`` still idle for far longer
-    /// than any fixed bound, and timing out there would drop the user's
-    /// message even though the model does come up.
-    private var memoryConfirmTask: Task<Void, Never>?
-
     /// Confirmed launches still running, by sequence number. Polled by
     /// ``awaitConfirmedLaunch`` instead of awaiting the task's ``value``:
     /// awaiting a non-throwing Task is NOT cancellation-aware, so a caller
@@ -1002,7 +994,7 @@ final class ServerManager {
             memoryConfirmRunning.remove(seq)
             return
         }
-        memoryConfirmTask = Task { [weak self] in
+        Task { [weak self] in
             guard let self else { return }
             if self.child != nil {
                 await self.stop()
@@ -1026,7 +1018,6 @@ final class ServerManager {
         // load that was never started, so any launch still in flight belongs
         // to an EARLIER confirmation and its waiter must not be told it
         // finished.
-        memoryConfirmTask = nil
         _ = memoryConfirmations.resolveCurrent(
             warning: warning,
             decision: .cancelled

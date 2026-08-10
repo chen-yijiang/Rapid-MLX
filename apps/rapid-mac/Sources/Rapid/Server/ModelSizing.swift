@@ -226,6 +226,16 @@ enum ModelSizing {
         /// projected utilisation, not on footprint-versus-free alone.
         var totalGB: Double = 0
 
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.alias == rhs.alias
+                && lhs.hfPath == rhs.hfPath
+                && lhs.isAutoRespawn == rhs.isAutoRespawn
+                && lhs.severity == rhs.severity
+                && lhs.footprintGB == rhs.footprintGB
+                && lhs.freeGB == rhs.freeGB
+                && lhs.totalGB == rhs.totalGB
+        }
+
         var title: String {
             switch severity {
             case .unsafe:
