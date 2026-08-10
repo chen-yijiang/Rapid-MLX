@@ -1234,6 +1234,53 @@ class MLLMScheduler:
                 except asyncio.QueueFull:
                     pass
 
+    def _fail_all_inflight(self, exc: Exception) -> MLLMSchedulerOutput:
+        """Fail and detach every request after an unexpected step exception.
+
+        A model/processor exception can escape before ``_step_no_queue`` has
+        produced an output.  Retrying that same batch is both unsafe (the
+        generator may already be partially mutated) and leaves every HTTP
+        waiter blocked.  Reset the poisoned batch and return terminal outputs
+        for event-loop-thread delivery instead.
+        """
+        request_ids = set(self.requests) | set(self.running)
+        request_ids.update(request.request_id for request in self.waiting)
+        err_text = f"MLLM engine loop error: {type(exc).__name__}: {exc}"
+
+        output = MLLMSchedulerOutput(
+            finished_request_ids=request_ids,
+            outputs=[
+                RequestOutput(
+                    request_id=request_id,
+                    output_text="",
+                    finished=True,
+                    finish_reason="length",
+                    error=err_text,
+                )
+                for request_id in request_ids
+            ],
+        )
+
+        for request_id in request_ids:
+            request = self.requests.get(request_id)
+            if request is not None:
+                request.status = RequestStatus.FINISHED_ABORTED
+        if self.batch_generator is not None:
+            try:
+                self.batch_generator.close()
+            except Exception:
+                logger.debug("Failed to close poisoned MLLM batch", exc_info=True)
+            self.batch_generator = None
+        self.waiting.clear()
+        self.running.clear()
+        self.requests.clear()
+        self.request_id_to_uid.clear()
+        self.uid_to_request_id.clear()
+        self._detokenizer_pool.clear()
+        self._pending_abort_ids.clear()
+        self.finished_req_ids.update(request_ids)
+        return output
+
     def step(self) -> MLLMSchedulerOutput:
         """
         Execute one scheduling step (includes queue distribution).
@@ -1491,8 +1538,11 @@ class MLLMScheduler:
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    logger.error(f"Error in MLLM process loop: {e}")
-                    await asyncio.sleep(0.1)
+                    logger.exception(
+                        "Error in MLLM process loop; failing in-flight requests"
+                    )
+                    self._distribute_outputs(self._fail_all_inflight(e))
+                    await asyncio.sleep(0)
         finally:
             cancel_to_reraise: asyncio.CancelledError | None = None
             if self._step_executor is not None:
