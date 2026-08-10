@@ -1222,7 +1222,19 @@ class MLLMScheduler:
                     if req_output.finished:
                         queue.put_nowait(None)  # Signal end
                 except asyncio.QueueFull:
-                    pass
+                    if req_output.finished:
+                        # A terminal result must never be dropped behind stale
+                        # deltas in a bounded/custom queue. Discard buffered
+                        # partial output and reserve the available slot for the
+                        # terminal object. ``stream_outputs`` stops (or raises
+                        # on ``error``) after reading it, so the optional None
+                        # sentinel is not required in this fallback path.
+                        while not queue.empty():
+                            try:
+                                queue.get_nowait()
+                            except asyncio.QueueEmpty:  # pragma: no cover - race
+                                break
+                        queue.put_nowait(req_output)
 
         # Signal queues for requests aborted during this step
         while self._aborted_queue_ids:

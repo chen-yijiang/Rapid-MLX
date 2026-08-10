@@ -27,9 +27,11 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
     # two adjacent translation maps.
     scheduler.running = {running.request_id: running}
     aborted = "already-aborted-request"
+    full_running_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    full_running_queue.put_nowait(object())  # stale partial output
     scheduler.output_queues = {
         waiting.request_id: asyncio.Queue(),
-        running.request_id: asyncio.Queue(),
+        running.request_id: full_running_queue,
         uid_only: asyncio.Queue(),
         aborted: asyncio.Queue(),
     }
@@ -51,6 +53,10 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
 
     task = asyncio.create_task(scheduler._process_loop())
     try:
+        # Let the fatal distributor confront the already-full bounded queue
+        # before any consumer frees a slot.
+        while scheduler.requests:
+            await asyncio.sleep(0)
         outputs = await asyncio.wait_for(
             asyncio.gather(
                 scheduler.output_queues[waiting.request_id].get(),
