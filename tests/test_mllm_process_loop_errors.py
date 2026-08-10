@@ -17,6 +17,7 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
     scheduler = MLLMScheduler.__new__(MLLMScheduler)
     waiting = MLLMRequest(request_id="waiting-request", prompt="hello")
     running = MLLMRequest(request_id="running-request", prompt="hello")
+    uid_only = "uid-only-request"
     scheduler.requests = {
         waiting.request_id: waiting,
         running.request_id: running,
@@ -25,21 +26,25 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
     # The running map is keyed by request ID; generator UIDs live only in the
     # two adjacent translation maps.
     scheduler.running = {running.request_id: running}
+    aborted = "already-aborted-request"
     scheduler.output_queues = {
         waiting.request_id: asyncio.Queue(),
         running.request_id: asyncio.Queue(),
+        uid_only: asyncio.Queue(),
+        aborted: asyncio.Queue(),
     }
-    scheduler.request_id_to_uid = {running.request_id: 42}
-    scheduler.uid_to_request_id = {42: running.request_id}
-    scheduler._detokenizer_pool = {}
-    scheduler._pending_abort_ids = set()
-    scheduler._aborted_queue_ids = set()
+    scheduler.request_id_to_uid = {running.request_id: 42, uid_only: 43}
+    scheduler.uid_to_request_id = {42: running.request_id, 43: uid_only}
+    scheduler._detokenizer_pool = {running.request_id: object()}
+    scheduler._pending_abort_ids = {running.request_id}
+    scheduler._aborted_queue_ids = {aborted}
     scheduler.finished_req_ids = set()
     scheduler._running = True
     scheduler._injected_step_executor = None
     scheduler._step_executor = None
     scheduler._owns_step_executor = True
-    scheduler.batch_generator = None
+    batch_generator = MagicMock()
+    scheduler.batch_generator = batch_generator
     scheduler._step_no_queue = MagicMock(
         side_effect=TypeError("Model.__call__() missing required argument: mask")
     )
@@ -50,6 +55,8 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
             asyncio.gather(
                 scheduler.output_queues[waiting.request_id].get(),
                 scheduler.output_queues[running.request_id].get(),
+                scheduler.output_queues[uid_only].get(),
+                scheduler.output_queues[aborted].get(),
             ),
             timeout=0.5,
         )
@@ -61,15 +68,25 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
         except asyncio.CancelledError:
             pass
 
-    assert {output.request_id for output in outputs} == {
+    assert {output.request_id for output in outputs[:-1]} == {
         waiting.request_id,
         running.request_id,
+        uid_only,
     }
-    for output in outputs:
+    assert outputs[-1] is None
+    for output in outputs[:-1]:
         assert output.finished is True
         assert output.finish_reason == "length"
-        assert "TypeError" in output.error
-        assert "mask" in output.error
+        assert output.error == "MLLM inference failed due to an internal engine error"
+        assert "mask" not in output.error
     assert scheduler._step_no_queue.call_count == 1
+    batch_generator.close.assert_called_once_with()
+    assert scheduler.batch_generator is None
     assert not scheduler.requests
     assert not scheduler.waiting
+    assert not scheduler.running
+    assert not scheduler.request_id_to_uid
+    assert not scheduler.uid_to_request_id
+    assert not scheduler._detokenizer_pool
+    assert not scheduler._pending_abort_ids
+    assert not scheduler._aborted_queue_ids

@@ -1249,7 +1249,15 @@ class MLLMScheduler:
         # committed to every other bookkeeping map.
         request_ids = set(self.requests) | set(self.running)
         request_ids.update(request.request_id for request in self.waiting)
-        err_text = f"MLLM engine loop error: {type(exc).__name__}: {exc}"
+        # A step can fail between generator admission and the scheduler-map
+        # commit. Include both sides of the UID translation so even that
+        # partially transitioned request gets its terminal queue signal.
+        request_ids.update(self.request_id_to_uid)
+        request_ids.update(self.uid_to_request_id.values())
+        # Third-party exceptions can contain paths, prompt fragments, or model
+        # internals. The detailed traceback is logged by the caller; clients
+        # receive only this stable 500-class message.
+        err_text = "MLLM inference failed due to an internal engine error"
 
         output = MLLMSchedulerOutput(
             finished_request_ids=request_ids,
@@ -1258,6 +1266,10 @@ class MLLMScheduler:
                     request_id=request_id,
                     output_text="",
                     finished=True,
+                    # RequestOutput/OpenAI schemas do not admit an "error"
+                    # finish reason. ``stream_outputs`` raises ``error``
+                    # before yielding this object, so clients cannot mistake
+                    # this compatibility literal for a successful truncation.
                     finish_reason="length",
                     error=err_text,
                 )
