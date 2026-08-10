@@ -22,7 +22,7 @@ def _make_info(file_sizes_bytes: list[int]) -> SimpleNamespace:
         SimpleNamespace(size=sz, rfilename=f"file-{index}.safetensors")
         for index, sz in enumerate(file_sizes_bytes)
     ]
-    return SimpleNamespace(siblings=siblings, safetensors=None)
+    return SimpleNamespace(siblings=siblings, safetensors=None, sha="current-sha")
 
 
 def _fake_statvfs(free_bytes: int):
@@ -127,12 +127,17 @@ class TestDiskSpaceCheck:
             ),
             SimpleNamespace(size=4096, rfilename="vae/config.json"),
         ]
-        info = SimpleNamespace(siblings=siblings, safetensors=None)
+        info = SimpleNamespace(
+            siblings=siblings,
+            safetensors=None,
+            sha="current-mflux-sha",
+        )
         disk_probe = Mock(return_value=_fake_statvfs(100 * 1024**3))
 
         cached_files = {sibling.rfilename for sibling in siblings}
 
-        def cached(_repo, filename):
+        def cached(_repo, filename, *, revision=None):
+            assert revision == "current-mflux-sha"
             if filename in cached_files:
                 return f"/fake/snapshot/{filename}"
             return None
@@ -165,9 +170,11 @@ class TestDiskSpaceCheck:
                 ),
             ],
             safetensors=None,
+            sha="current-mflux-sha",
         )
 
-        def cached(_repo, filename):
+        def cached(_repo, filename, *, revision=None):
+            assert revision == "current-mflux-sha"
             if filename.startswith("transformer/"):
                 return f"/fake/snapshot/{filename}"
             return None
@@ -195,9 +202,11 @@ class TestDiskSpaceCheck:
                 SimpleNamespace(size=int(5 * gib), rfilename="model.safetensors"),
             ],
             safetensors=None,
+            sha="current-text-sha",
         )
 
-        def cached(_repo, filename):
+        def cached(_repo, filename, *, revision=None):
+            assert revision == "current-text-sha"
             return "/fake/snapshot/config.json" if filename == "config.json" else None
 
         with (
@@ -212,6 +221,35 @@ class TestDiskSpaceCheck:
             with pytest.raises(SystemExit) as exc:
                 _check_disk_space("mlx-community/Partial-Model")
             assert exc.value.code == 1
+
+    def test_stale_default_ref_does_not_credit_old_revision_bytes(self):
+        """Cache hits must belong to the exact remote SHA being measured."""
+        gib = 1024**3
+        info = SimpleNamespace(
+            siblings=[
+                SimpleNamespace(size=int(5 * gib), rfilename="model.safetensors")
+            ],
+            safetensors=None,
+            sha="new-remote-sha",
+        )
+        seen_revisions = []
+
+        def cached(_repo, _filename, *, revision=None):
+            seen_revisions.append(revision)
+            # The unpinned default ref still resolves an old same-named file;
+            # the current remote revision has not been downloaded.
+            return "/fake/old/model.safetensors" if revision is None else None
+
+        with (
+            patch("huggingface_hub.try_to_load_from_cache", side_effect=cached),
+            patch("huggingface_hub.model_info", return_value=info),
+            patch("os.path.exists", return_value=False),
+            patch("os.statvfs", return_value=_fake_statvfs(int(1.0 * gib))),
+        ):
+            with pytest.raises(SystemExit) as exc:
+                _check_disk_space("mlx-community/Updated-Model")
+            assert exc.value.code == 1
+        assert seen_revisions == ["new-remote-sha"]
 
     def test_uses_hf_hub_cache_for_statvfs(self):
         """The probe must use HF_HUB_CACHE (respects HF_HOME), not the

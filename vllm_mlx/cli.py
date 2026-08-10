@@ -959,6 +959,7 @@ def _check_disk_space(model_name: str, force: bool = False) -> None:
         from vllm_mlx._download_gate import _sibling_size
 
         info = model_info(model_name, files_metadata=True)
+        remote_revision = getattr(info, "sha", None)
         download_size_bytes = 0
         for sibling in getattr(info, "siblings", None) or []:
             filename = getattr(sibling, "rfilename", "") or ""
@@ -968,7 +969,11 @@ def _check_disk_space(model_name: str, force: bool = False) -> None:
             if size <= 0:
                 continue
             try:
-                cached = try_to_load_from_cache(model_name, filename)
+                cached = try_to_load_from_cache(
+                    model_name,
+                    filename,
+                    revision=remote_revision,
+                )
             except Exception:
                 cached = None
             if isinstance(cached, str) and os.path.exists(cached):
