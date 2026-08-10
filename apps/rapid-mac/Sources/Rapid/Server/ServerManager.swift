@@ -2,6 +2,63 @@ import Darwin
 import Foundation
 import Observation
 
+/// FIFO state machine for memory-risk confirmations. A request token is
+/// present for ``ensureServing`` callers that must await their own answer;
+/// direct ``start`` calls still queue a prompt but retain no result.
+struct MemoryLoadConfirmationQueue {
+    enum Decision: Equatable {
+        case confirmed(sequence: Int)
+        case cancelled
+    }
+
+    private struct Pending: Equatable {
+        let warning: ModelSizing.MemoryWarning
+        var requestID: UUID?
+    }
+
+    private var pending: [Pending] = []
+    private var decisions: [UUID: Decision] = [:]
+
+    var currentWarning: ModelSizing.MemoryWarning? { pending.first?.warning }
+
+    mutating func enqueue(warning: ModelSizing.MemoryWarning, requestID: UUID?) {
+        pending.append(Pending(warning: warning, requestID: requestID))
+    }
+
+    func isPending(_ requestID: UUID) -> Bool {
+        pending.contains { $0.requestID == requestID }
+    }
+
+    mutating func resolveCurrent(
+        warning: ModelSizing.MemoryWarning,
+        decision: Decision
+    ) -> Bool {
+        guard pending.first?.warning.id == warning.id else { return false }
+        let resolved = pending.removeFirst()
+        if let requestID = resolved.requestID {
+            decisions[requestID] = decision
+        }
+        return true
+    }
+
+    mutating func cancelCurrent() -> Bool {
+        guard let warning = currentWarning else { return false }
+        return resolveCurrent(warning: warning, decision: .cancelled)
+    }
+
+    mutating func takeDecision(for requestID: UUID) -> Decision? {
+        decisions.removeValue(forKey: requestID)
+    }
+
+    mutating func abandonWaiter(_ requestID: UUID) {
+        guard let index = pending.firstIndex(where: { $0.requestID == requestID }) else {
+            decisions.removeValue(forKey: requestID)
+            return
+        }
+        pending[index].requestID = nil
+    }
+}
+
 /// Lifecycle phases of the embedded `rapid-mlx serve` child process.
 ///
 /// Mirrors the `ServerState` enum in the v0.1 Tauri reference. The Swift
@@ -62,13 +119,15 @@ final class ServerManager {
     /// either acknowledges the risk (``confirmPendingMemoryLoad``) or
     /// backs out (``cancelPendingMemoryLoad``). ``nil`` when no load is
     /// being held for confirmation.
-    var pendingMemoryWarning: ModelSizing.MemoryWarning?
+    var pendingMemoryWarning: ModelSizing.MemoryWarning? {
+        memoryConfirmations.currentWarning
+    }
 
-    /// How the user answered the most recent memory prompt. Read by
-    /// ``awaitMemoryDecision`` so ``ensureServing`` can tell "user backed
-    /// out" (an honest startup failure) from "user chose Load anyway"
-    /// (wait for the re-entered launch instead of reporting failure).
-    private var memoryLoadConfirmed: Bool = false
+    /// Each guarded load owns its own decision. The queue exposes only its
+    /// head to SwiftUI, while preserving later prompts until the current one
+    /// is answered. This prevents overlapping ``ensureServing`` calls from
+    /// consuming one another's confirmation (#1463).
+    private var memoryConfirmations = MemoryLoadConfirmationQueue()
 
     /// The re-entered launch spawned by "Load anyway". ``ensureServing``
     /// awaits this instead of polling for a state change: ``start`` can
@@ -750,7 +809,8 @@ final class ServerManager {
         if child != nil {
             await stop()
         }
-        await start(alias: trimmed, hfPath: hfPath)
+        let memoryRequestID = UUID()
+        await start(alias: trimmed, hfPath: hfPath, memoryRequestID: memoryRequestID)
         // ``start`` also returns without spawning when the pre-load
         // memory guard parks the load on a confirmation prompt. Reading
         // ``isServing`` now would report "couldn't start the model"
@@ -758,14 +818,13 @@ final class ServerManager {
         // that triggered the load (typically a first chat message) would
         // be marked failed and then silently dropped the moment the user
         // picks "Load anyway". Wait for the answer instead.
-        if pendingMemoryWarning != nil {
-            let confirmed = await awaitMemoryDecision()
-            if confirmed {
+        if let decision = await awaitMemoryDecision(for: memoryRequestID) {
+            if case .confirmed(let seq) = decision {
                 // Wait out the actual re-entered launch — no fixed bound,
                 // because it may legitimately sit on a background download.
                 // Bind to THIS confirmation so an unrelated later cancel
                 // cannot end the wait early.
-                await awaitConfirmedLaunch(memoryConfirmSeq)
+                await awaitConfirmedLaunch(seq)
             }
         }
         // ``start`` returns silently when another caller already owns
@@ -801,15 +860,18 @@ final class ServerManager {
     /// awaiting a continuation so a dismissed-without-answer alert (or a
     /// build with no view bound to ``pendingMemoryWarning``) resolves via
     /// ``cancelPendingMemoryLoad`` instead of stranding the caller.
-    private func awaitMemoryDecision() async -> Bool {
-        while pendingMemoryWarning != nil {
+    private func awaitMemoryDecision(
+        for requestID: UUID
+    ) async -> MemoryLoadConfirmationQueue.Decision? {
+        while memoryConfirmations.isPending(requestID) {
             do {
                 try await Task.sleep(nanoseconds: 200_000_000)
             } catch {
-                return false
+                memoryConfirmations.abandonWaiter(requestID)
+                return .cancelled
             }
         }
-        return memoryLoadConfirmed
+        return memoryConfirmations.takeDecision(for: requestID)
     }
 
 
@@ -901,14 +963,16 @@ final class ServerManager {
     /// race to nil and silently drop the load. Re-enters ``start`` with
     /// the guard bypassed.
     func confirmPendingMemoryLoad(_ warning: ModelSizing.MemoryWarning) {
-        memoryLoadConfirmed = true
-        pendingMemoryWarning = nil
-        // Publish the task BEFORE clearing nothing else — both this and the
-        // waiter run on the MainActor, so a waiter that observes
-        // ``pendingMemoryWarning == nil`` is guaranteed to see this task.
         memoryConfirmSeq += 1
         let seq = memoryConfirmSeq
         memoryConfirmRunning.insert(seq)
+        guard memoryConfirmations.resolveCurrent(
+            warning: warning,
+            decision: .confirmed(sequence: seq)
+        ) else {
+            memoryConfirmRunning.remove(seq)
+            return
+        }
         memoryConfirmTask = Task { [weak self] in
             await self?.start(
                 alias: warning.alias,
@@ -928,16 +992,16 @@ final class ServerManager {
         // load that was never started, so any launch still in flight belongs
         // to an EARLIER confirmation and its waiter must not be told it
         // finished.
-        memoryLoadConfirmed = false
         memoryConfirmTask = nil
-        pendingMemoryWarning = nil
+        _ = memoryConfirmations.cancelCurrent()
     }
 
     func start(
         alias: String,
         hfPath: String? = nil,
         isAutoRespawn: Bool = false,
-        bypassMemoryGuard: Bool = false
+        bypassMemoryGuard: Bool = false,
+        memoryRequestID: UUID? = nil
     ) async {
         // Issue #278: a manual restart is the user taking over the
         // lifecycle — reset the budget at entry so a previously
@@ -1007,7 +1071,7 @@ final class ServerManager {
             // only what is genuinely dangerous, and surface "tight"
             // passively — the picker's static sizing bands already do.
             if safety == .unsafe {
-                pendingMemoryWarning = ModelSizing.MemoryWarning(
+                let warning = ModelSizing.MemoryWarning(
                     alias: trimmedAlias,
                     hfPath: hfPath,
                     isAutoRespawn: isAutoRespawn,
@@ -1016,7 +1080,10 @@ final class ServerManager {
                     freeGB: Double(snapshot.freeBytes) / Double(1 << 30),
                     totalGB: Double(snapshot.totalBytes) / Double(1 << 30)
                 )
-                memoryLoadConfirmed = false
+                memoryConfirmations.enqueue(
+                    warning: warning,
+                    requestID: memoryRequestID
+                )
                 // The user is now the decision-maker for this alias, so a
                 // queued auto-respawn must not answer for them. Parking a
                 // load leaves ``state`` untouched — still ``.crashed`` when

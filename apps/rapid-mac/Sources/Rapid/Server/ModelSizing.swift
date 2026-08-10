@@ -213,7 +213,7 @@ enum ModelSizing {
     /// Copy lives here (not in a view) so ``ModelSizingTests`` can pin
     /// it without a SwiftUI host — same pattern as the tooBig alert.
     struct MemoryWarning: Equatable, Sendable, Identifiable {
-        var id: String { alias }
+        let id = UUID()
         let alias: String
         let hfPath: String?
         let isAutoRespawn: Bool
