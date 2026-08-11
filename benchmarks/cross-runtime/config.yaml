@@ -90,17 +90,30 @@ scenarios:
     prompt_tokens: 16000
     max_tokens: 512
     reps: 3
+  # decode/concurrency cells use a generation-saturating prompt so
+  # every runtime emits exactly max_tokens: thinking-enabled templates
+  # (mlx-lm/ollama defaults) vs rapid's casual-chat thinking
+  # auto-disable otherwise produce 8x different workloads per request,
+  # making aggregate tok/s incomparable.
   decode_b1:
     prompt_tokens: 128
     max_tokens: 640    # hybrid/MoE TPS on short answers is bogus (#284)
     reps: 3
+    saturate: true
+  decode_16k:          # long-context decode rate, workload-pinned
+    prompt_tokens: 16000
+    max_tokens: 512
+    reps: 3
+    saturate: true
   conc_4:
     prompt_tokens: 512
     max_tokens: 256
     parallel: 4
     reps: 2
+    saturate: true
   conc_8:
     prompt_tokens: 512
     max_tokens: 256
     parallel: 8
     reps: 2
+    saturate: true

@@ -65,18 +65,40 @@ def get_tokenizer(hf_id):
     return _tokenizer_cache[hf_id]
 
 
-def build_prompt(hf_id, target_tokens):
+SATURATE_TASK = (
+    "Write an exhaustively detailed technical essay on the history of "
+    "operating systems: cover every era, architecture, scheduler design "
+    "and file system you can, one by one, in long fully-written prose. "
+    "Do not summarize, do not conclude, keep adding sections until you "
+    "are cut off. "
+)
+
+
+def build_prompt(hf_id, target_tokens, saturate=False):
     """Deterministic text sized to ~target_tokens with the model's own
     tokenizer (counted on raw text; chat-template overhead is small and
-    applies to every runtime alike)."""
+    applies to every runtime alike). saturate=True asks for unbounded
+    generation so every runtime hits max_tokens exactly — equal decode
+    workload regardless of each runtime's thinking-template defaults."""
     tok = get_tokenizer(hf_id)
+    task = SATURATE_TASK if saturate else (
+        "Summarize the following in one short paragraph. "
+        if target_tokens <= 128 else
+        "Read the following document, then answer: what is its main "
+        "claim? Answer in two sentences.\n\n"
+    )
     if target_tokens <= 128:
-        base = "Summarize the following in one short paragraph. " + FILLER
+        base = task + FILLER
         ids = tok.encode(base)
         while len(ids) < target_tokens:
             base += FILLER
             ids = tok.encode(base)
         return base
+    if saturate:
+        task = (
+            "Read the following document, then " + SATURATE_TASK
+            + "Document:\n\n"
+        )
     reps = max(1, (target_tokens * 4) // len(FILLER))
     text = FILLER * reps
     ids = tok.encode(text)
@@ -87,10 +109,7 @@ def build_prompt(hf_id, target_tokens):
     while len(ids) > target_tokens and len(text) > len(FILLER):
         text = text[: -len(FILLER)]
         ids = tok.encode(text)
-    return (
-        "Read the following document, then answer: what is its main "
-        "claim? Answer in two sentences.\n\n" + text
-    )
+    return task + text
 
 
 # ------------------------------------------------------------- servers
@@ -277,6 +296,10 @@ async def stream_chat(client, base_url, model_id, prompt, max_tokens):
             except json.JSONDecodeError:
                 continue
             now = time.monotonic()
+            if obj.get("error"):
+                # mid-stream error event on an HTTP 200 — surface the
+                # payload instead of reporting "no tokens"
+                raise RuntimeError(f"SSE error event: {obj['error']}")
             if obj.get("usage"):
                 usage = obj["usage"]
             for ch in obj.get("choices", []):
@@ -423,7 +446,8 @@ def main():
                 model_id = m["hf_mlx"]
             try:
                 for name, sc in scenarios.items():
-                    prompt = build_prompt(m["hf_mlx"], sc["prompt_tokens"])
+                    prompt = build_prompt(m["hf_mlx"], sc["prompt_tokens"],
+                                          saturate=sc.get("saturate", False))
                     rec = {"runtime": rt, "model": m["key"], "scenario": name,
                            "lane": args.lane, "load_s": server.load_s,
                            "spec": sc}
