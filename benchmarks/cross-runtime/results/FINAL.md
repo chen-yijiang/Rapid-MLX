@@ -23,6 +23,101 @@
 **Fairness caveats that survived to the end**: quant formats differ except gpt-oss; Ollama context/parallel env pinned (20480 × 8) which inflates its RSS; rapid's R12-T2F thinking auto-disable is a product behavior we neutralized in throughput cells via saturating prompts (†
  marks residual early-EOS cells); one machine, one night, N=3 medians with spreads shown.
 
+## Post-fix re-run — 2026-08-12, engine main@dde006ca
+
+The three engine issues this benchmark filed were fixed within a day and the
+rapid column was re-measured on the same machine/harness (runs
+`postfix-parity`, `postfix-product`, `postfix-vision`; mlx-vlm re-measured in
+the vision lane for a same-night comparison; other columns are the 2026-08-11
+numbers — ollama's GGUFs were removed after the original cycle and were not
+re-pulled):
+
+- **#1857** (fixes #1853): two default-on features each added O(context)
+  work to every decode step — a synchronous full-KV disk checkpoint every
+  256 tokens that nothing ever read back, and int4 live-KV quantization
+  whose dequant-on-read materializes full-precision K/V per step. Both are
+  now opt-in (defaults: interval 0, bf16).
+- **#1848 / #1849**: MLLM lane no longer treats `prefill_step_size` as a
+  hard cap for text-only prompts, and stream errors surface as typed
+  client errors instead of a generic 200-stream — gemma-4-26b's 16 k DNF
+  cells now produce numbers.
+- **#1856** (fixes #1854): projected vision features are cached, so
+  repeated images skip the encoder.
+
+Headline: **16 k decode +14…+66 % across every model**, the two FAIL cells
+are gone, conc_8 gains up to +21 %, and vision TTFT nearly halved. rapid is
+now first or second in every 16 k decode cell (was last/second-to-last), and
+takes the conc_8 lead on 4 of 6 models. Remaining gaps: B=1 + 16 k decode
+vs oMLX (scheduler-step overhead family) and big-model conc_8 vs mlx-lm.
+
+**decode_16k** (decode tok/s) — rapid before → after; best competitor from 2026-08-11 run
+
+| model | rapid (0.12.10) | rapid (main@dde006ca) | best other |
+|---|---|---|---|
+| qwen3.5-4b | 80 | 133 ±0% | 149 (oMLX) |
+| qwen3.5-9b | 79 | 95 ±0% | 104 (oMLX) |
+| gpt-oss-20b | 84† | 96 ±4% | 108 (oMLX) |
+| qwen3.6-27b | 21† | 33 ±0% | 35 (oMLX) |
+| gemma-4-26b | FAIL | 92 ±0% | 92 (oMLX) |
+| qwen3.6-35b-a3b | 73 | 83 ±0% | 99 (oMLX) |
+
+**conc_8** (aggregate tok/s) — rapid before → after; best competitor from 2026-08-11 run
+
+| model | rapid (0.12.10) | rapid (main@dde006ca) | best other |
+|---|---|---|---|
+| qwen3.5-4b | 225 | 272 ±0% | 232 (mlx-lm) |
+| qwen3.5-9b | 149 | 163 ±0% | 149 (mlx-lm) |
+| gpt-oss-20b | 220 | 230 ±0% | 207 (mlx-lm) |
+| qwen3.6-27b | 31 | 34 ±0% | 50 (mlx-lm) |
+| gemma-4-26b | 205 | 205 ±0% | 183 (mlx-lm) |
+| qwen3.6-35b-a3b | 164 | 190 ±0% | 226 (mlx-lm) |
+
+**decode_b1** (decode tok/s) — rapid before → after
+
+| model | rapid (0.12.10) | rapid (main@dde006ca) |
+|---|---|---|
+| qwen3.5-4b | 150 | 160 ±0% |
+| qwen3.5-9b | 106 | 108 ±0% |
+| gpt-oss-20b | 127 | 127 ±0% |
+| qwen3.6-27b | 36 | 38 ±0% |
+| gemma-4-26b | 111 | 112 ±0% |
+| qwen3.6-35b-a3b | 92 | 96 ±0% |
+
+**conc_4** (aggregate tok/s) — rapid before → after
+
+| model | rapid (0.12.10) | rapid (main@dde006ca) |
+|---|---|---|
+| qwen3.5-4b | 198 | 231 ±0% |
+| qwen3.5-9b | 132 | 143 ±0% |
+| gpt-oss-20b | 179 | 185 ±0% |
+| qwen3.6-27b | 28 | 32 ±1% |
+| gemma-4-26b | 166 | 166 ±0% |
+| qwen3.6-35b-a3b | 117 | 130 ±0% |
+
+**ttft_16k** (median TTFT) — rapid before → after
+
+| model | rapid (0.12.10) | rapid (main@dde006ca) |
+|---|---|---|
+| qwen3.5-4b | 9.30s | 8.69s ±0% |
+| qwen3.5-9b | 15.31s | 14.68s ±0% |
+| gpt-oss-20b | 9.21s | 8.76s ±0% |
+| qwen3.6-27b | 52.68s | 51.39s ±0% |
+| gemma-4-26b | FAIL | 9.27s ±0% |
+| qwen3.6-35b-a3b | 8.43s | 8.01s ±0% |
+
+**vision (gemma-4-26b, parity)** — rapid and mlx-vlm both re-measured this run
+
+| scenario | rapid before | rapid after | mlx-vlm (re-run) | oMLX (08-11) |
+|---|---|---|---|---|
+| vision_ttft | 0.60s | 0.32s ±1% | 0.25s ±15% | 0.45s |
+| vision_decode | 111† | 111 ±0% | 114 ±0% | 117† |
+
+Product-lane notes (`postfix-product`): defaults now match the fixed
+behavior, so product ≈ parity on decode; with the prefix cache on,
+repeated-16k-prefix TTFT drops to 1.6–3.0 s on the qwen models
+(4B 1.74 s, 35B-A3B 1.58 s) — the agentic re-prompt case the cache exists
+for. ttft_short is unchanged (0.17–0.66 s, still first everywhere).
+
 ## Run `merged-final (parity-full+v2, product-key+v2, vision-lane)`
 
 Versions: rapid rapid-mlx 0.12.10, omlx 0.5.8.dev3, ollama ollama version is 0.32.5, mlx_lm 0.31.3, macos 26.5.2
