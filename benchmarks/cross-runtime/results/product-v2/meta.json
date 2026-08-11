@@ -1,0 +1,12 @@
+{
+  "run_id": "product-v2",
+  "lane": "product",
+  "started_unix": 1786469755.798243,
+  "versions": {
+    "rapid": "rapid-mlx 0.12.10",
+    "omlx": "0.5.8.dev3",
+    "ollama": "ollama version is 0.32.5",
+    "mlx_lm": "0.31.3",
+    "macos": "26.5.2"
+  }
+}
