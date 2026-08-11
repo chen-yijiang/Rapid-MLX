@@ -1640,3 +1640,32 @@ def test_process_prompts_does_not_cap_large_text_only_prompt(monkeypatch):
         f"a 20k-token text-only prompt must pass the cap (then fail on the "
         f"bare-model prefill), but got the cap error: {err_msg}"
     )
+
+
+def test_prefill_cap_exempts_batch_of_long_text_only_prompts():
+    """A batch of MANY long text-only prompts must not trip the cap (#1848).
+
+    Concurrency concern raised in review: with text-only now exempt, several
+    >8k text prompts can batch together. Even though each is prefilled in
+    chunks, they all still need full KV at cache-merge time, so we must not
+    accidentally re-introduce a rejection for multi-long-text batches. The
+    cap is vision-only by design; an all-text-only batch (any count, any
+    length) must never violate it (#1848 / #682 contract preserved).
+    """
+    from vllm_mlx.mllm_batch_generator import _prefill_cap_violation
+
+    # 4 concurrent long text-only prompts, all > prefill_step_size.
+    batch = [_text_request(uid=i, token_count=20000) for i in range(4)]
+    assert _prefill_cap_violation(batch, prefill_step_size=8192) is None, (
+        "a batch of multiple 20k-token text-only prompts must stay exempt "
+        "from the vision-only per-batch cap (no DNF / no cap rejection)"
+    )
+
+    # And when one long VISION request joins them, the cap correctly fires
+    # only because of the vision request, not the text ones.
+    mixed = [_text_request(uid=i, token_count=20000) for i in range(3)]
+    mixed.append(_make_vision_cap_request(uid=3, token_count=10000))
+    assert _prefill_cap_violation(mixed, prefill_step_size=8192) is not None, (
+        "a 10k-token vision request among long text-only peers must still "
+        "trip the cap (#682 preserved)"
+    )

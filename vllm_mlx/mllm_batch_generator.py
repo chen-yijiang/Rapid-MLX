@@ -174,7 +174,7 @@ def _prefill_cap_violation(requests, prefill_step_size: int):
     max_batch_tokens = prefill_step_size * num_vision
     if vision_tokens > max_batch_tokens:
         return (
-            f"Total prompt tokens ({vision_tokens}) exceeds the "
+            f"Vision-request prompt tokens ({vision_tokens}) exceeds the "
             f"per-batch cap ({max_batch_tokens} = prefill_step_size "
             f"{prefill_step_size} × {num_vision} vision request(s)). "
             f"For image inputs, downscale the image; for text inputs, "

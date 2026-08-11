@@ -615,7 +615,7 @@ def test_disconnect_guard_surfaces_client_actionable_error_message():
     async def _generator():
         yield 'data: {"role":"assistant"}\n\n'
         raise ValueError(
-            "Total prompt tokens (20000) exceeds the per-batch cap "
+            "Vision-request prompt tokens (20000) exceeds the per-batch cap "
             "(8192 = prefill_step_size 8192 × 1 vision request(s)). "
             "For image inputs, downscale the image."
         )
