@@ -216,16 +216,28 @@ def launch(cfg, runtime, model, lane, log_dir):
 
 
 def attach_ollama(cfg, rt, port, log_dir):
-    """(Re)start the ollama daemon with the harness-controlled env so
-    context length etc. are recorded, then attach."""
-    subprocess.run(["pkill", "-x", "ollama"], capture_output=True)
-    time.sleep(1.0)
+    """Start the ollama daemon with the harness-controlled env, or
+    reuse the one a previous model leg already started (restarting per
+    model raced the old process for the port: 'address already in
+    use'). Server.stop() leaves a reused daemon running; the harness
+    caller kills it at end of run."""
+    base = f"http://127.0.0.1:{port}"
+    if not port_free(port):
+        try:
+            httpx.get(base + rt["ready_path"], timeout=2.0).raise_for_status()
+            return Server("ollama", base, proc=None, load_s=None)
+        except httpx.HTTPError:
+            subprocess.run(["pkill", "-x", "ollama"], capture_output=True)
+    t0 = time.monotonic()
+    while not port_free(port):
+        if time.monotonic() - t0 > 30:
+            raise RuntimeError("port 11434 still bound 30s after pkill")
+        time.sleep(0.5)
     env = {**os.environ, **rt.get("daemon_env", {})}
     log = open(log_dir / "ollama-daemon.log", "ab")
     proc = subprocess.Popen(
         ["ollama", "serve"], cwd=str(HOME), stdout=log, stderr=log, env=env
     )
-    base = f"http://127.0.0.1:{port}"
     wait_http(base + rt["ready_path"], timeout_s=60, proc=proc)
     return Server("ollama", base, proc, load_s=None)
 
