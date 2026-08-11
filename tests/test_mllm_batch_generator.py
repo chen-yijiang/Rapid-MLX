@@ -1138,8 +1138,10 @@ def test_per_batch_cap_fires_on_oversized_batch_with_actionable_message(
     gen = _gen_with_prefill_cap(prefill_step_size=100)
     monkeypatch.setattr(gen, "_preprocess_request", lambda req: None)
 
-    # 500-token request, cap = 100 × 1 = 100 ⇒ 500 > 100 ⇒ raises.
-    request = _make_cap_request(uid=0, token_count=500)
+    # 500-token VISION request, cap = 100 × 1 = 100 ⇒ 500 > 100 ⇒ raises.
+    # (Text-only requests are exempt from the cap since #1848, so the cap
+    #  guard is pinned against a vision-bearing request.)
+    request = _make_vision_cap_request(uid=0, token_count=500)
 
     with pytest.raises(ValueError) as excinfo:
         MLLMBatchGenerator._process_prompts(gen, [request])
@@ -1174,8 +1176,9 @@ def test_per_batch_cap_does_not_fail_at_default_on_typical_screenshot(
     gen = _gen_with_prefill_cap(prefill_step_size=8192)
     monkeypatch.setattr(gen, "_preprocess_request", lambda req: None)
 
-    # 2292 tokens — typical Qwen3-VL token count for a 1920×1080 image.
-    request = _make_cap_request(uid=0, token_count=2292)
+    # 2292 tokens — typical Qwen3-VL token count for a 1920×1080 image,
+    # carried on a vision-bearing request (this is an image prompt).
+    request = _make_vision_cap_request(uid=0, token_count=2292)
 
     # The function will still raise SOMETHING downstream (we handed it
     # bare ``object()`` for model / language_model so the real prefill
@@ -1536,3 +1539,104 @@ def test_preprocess_request_no_key_for_unsupported_model(monkeypatch):
     )
     gen._preprocess_request(req)
     assert req.vision_feature_key is None
+
+
+# --------------------------------------------------------------------------- #
+# #1848 — a text-only prompt larger than ``prefill_step_size`` must not trip
+# the per-batch cap. The cap exists to bound vision-merge memory (#682);
+# text-only prompts are prefilled in chunks on the vision-encoding path and
+# contribute no vision tokens, so they are exempt.
+# --------------------------------------------------------------------------- #
+def _make_vision_cap_request(uid: int, token_count: int) -> MLLMBatchRequest:
+    """Like ``_make_cap_request`` but with a non-None ``pixel_values`` so it
+    counts as a vision-bearing request for the per-batch cap."""
+    req = _make_cap_request(uid=uid, token_count=token_count)
+    req.pixel_values = mx.zeros((1, 3, 32, 32), dtype=mx.float32)
+    req.image_grid_thw = mx.array([[2, 2, 1]], dtype=mx.int32)
+    return req
+
+
+def _text_request(uid: int, token_count: int) -> MLLMBatchRequest:
+    """A plain text-only request (no pixel values / grid)."""
+    return _make_cap_request(uid=uid, token_count=token_count)
+
+
+def test_prefill_cap_exempts_large_text_only_prompt():
+    """A >8k text-only prompt must NOT trip the per-batch cap (#1848).
+
+    Pre-fix the inline check used ``prefill_step_size * len(requests)`` and
+    rejected any single prompt longer than ``prefill_step_size`` (default
+    8192), even though the chunked text-only prefill path could handle it.
+    This is the regression the issue's DNF reported.
+    """
+    from vllm_mlx.mllm_batch_generator import _prefill_cap_violation
+
+    req = _text_request(uid=0, token_count=20000)
+    assert _prefill_cap_violation([req], prefill_step_size=8192) is None, (
+        "a 20k-token text-only prompt must be exempt from the per-batch cap "
+        "(it is prefilled in chunks and contributes no vision tokens)"
+    )
+
+
+def test_prefill_cap_still_fires_on_large_vision_request():
+    """The cap must STILL bound vision-merge memory: an image request whose
+    (text + vision) token count exceeds ``prefill_step_size × n_vision`` is
+    rejected with the actionable message (#682 preserved).
+    """
+    from vllm_mlx.mllm_batch_generator import _prefill_cap_violation
+
+    req = _make_vision_cap_request(uid=0, token_count=20000)
+    msg = _prefill_cap_violation([req], prefill_step_size=8192)
+    assert msg is not None, "a 20k-token vision request must trip the cap"
+    assert "exceeds the per-batch cap" in msg
+    assert "downscale the image" in msg
+
+
+def test_prefill_cap_counts_only_vision_requests_in_budget():
+    """In a mixed batch the cap budget scales with the number of *vision*
+    requests; text-only requests are exempt and do not inflate the multiplier
+    (#1848).
+    """
+    from vllm_mlx.mllm_batch_generator import _prefill_cap_violation
+
+    # 1 vision request + 1 huge text-only request, cap = 8192 × 1 vision.
+    batch = [
+        _make_vision_cap_request(uid=0, token_count=8000),  # under vision cap
+        _text_request(uid=1, token_count=9000),  # exempt, > 8192
+    ]
+    assert _prefill_cap_violation(batch, prefill_step_size=8192) is None, (
+        "the text-only request must not push the vision budget over the cap"
+    )
+
+    # Same batch but now the vision request itself exceeds the cap.
+    batch = [
+        _make_vision_cap_request(uid=0, token_count=10000),  # exceeds 8192
+        _text_request(uid=1, token_count=9000),
+    ]
+    assert _prefill_cap_violation(batch, prefill_step_size=8192) is not None, (
+        "a vision request over the cap must still trip the cap in a mixed batch"
+    )
+
+
+def test_process_prompts_does_not_cap_large_text_only_prompt(monkeypatch):
+    """End-to-end pin of the #1848 DNF through ``_process_prompts``.
+
+    With the production MLLM default ``prefill_step_size=8192``, a single
+    20000-token TEXT-ONLY prompt must NOT trip the per-batch cap. Pre-fix
+    this raised ValueError("exceeds the per-batch cap") and the request
+    DNF'd. It will still fail downstream (bare ``object()`` model cannot
+    actually prefill), but that failure must NOT be the cap error.
+    """
+    gen = _gen_with_prefill_cap(prefill_step_size=8192)
+    monkeypatch.setattr(gen, "_preprocess_request", lambda req: None)
+
+    request = _text_request(uid=0, token_count=20000)
+
+    with pytest.raises(Exception) as excinfo:  # noqa: BLE001 — see below
+        MLLMBatchGenerator._process_prompts(gen, [request])
+
+    err_msg = str(excinfo.value)
+    assert "exceeds the per-batch cap" not in err_msg, (
+        f"a 20k-token text-only prompt must pass the cap (then fail on the "
+        f"bare-model prefill), but got the cap error: {err_msg}"
+    )
