@@ -13,6 +13,7 @@ ports:
   rapid: 8101
   omlx: 8102
   mlxlm: 8103
+  mlxvlm: 8104
   ollama: 11434
 
 venvs:
@@ -38,6 +39,12 @@ runtimes:
   mlxlm:
     kind: openai
     serve: "{python} -m mlx_lm server --model {model} --port {port} --temp 0.0"
+    parity_flags: ""
+    product_flags: ""
+    ready_path: /v1/models
+  mlxvlm:
+    kind: openai
+    serve: "{python} -m mlx_vlm server --model {model} --port {port}"
     parity_flags: ""
     product_flags: ""
     ready_path: /v1/models
@@ -116,4 +123,17 @@ scenarios:
     max_tokens: 256
     parallel: 8
     reps: 2
+    saturate: true
+  # vision lane: image + prompt; run with --runtimes rapid,omlx,mlxvlm,ollama
+  # --models gemma-4-26b (the matrix's vision model)
+  vision_ttft:
+    prompt_tokens: 32
+    max_tokens: 64
+    reps: 3
+    vision: true
+  vision_decode:
+    prompt_tokens: 32
+    max_tokens: 512
+    reps: 3
+    vision: true
     saturate: true

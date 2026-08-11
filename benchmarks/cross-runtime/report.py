@@ -12,11 +12,12 @@ import statistics
 import sys
 from pathlib import Path
 
-RUNTIME_ORDER = ["rapid", "omlx", "mlxlm", "ollama"]
+RUNTIME_ORDER = ["rapid", "omlx", "mlxlm", "mlxvlm", "ollama"]
 RUNTIME_LABEL = {
     "rapid": "rapid-mlx",
     "omlx": "oMLX",
     "mlxlm": "mlx-lm",
+    "mlxvlm": "mlx-vlm",
     "ollama": "Ollama",
 }
 
@@ -67,7 +68,7 @@ def fmt(rec, scenario):
     if scenario.startswith("conc"):
         v = rec.get("median_agg_tps")
         return f"{v:.0f}{spread(rec, 'agg_tps')}{mark}" if v else "—"
-    if scenario.startswith("ttft"):
+    if "ttft" in scenario:
         v = rec.get("median_ttft_s")
         return f"{v:.2f}s{spread(rec, 'ttft_s')}" if v else "—"
     v = rec.get("median_decode_tps")
@@ -88,33 +89,42 @@ def emit(meta, cells, out):
     out.append(f"## Run `{meta['run_id']}`\n")
     out.append("Versions: " + ", ".join(
         f"{k} {v}" for k, v in meta.get("versions", {}).items()) + "\n")
+    present = {k[1] for k in cells}
+    order = [r for r in RUNTIME_ORDER if r in present]
     for lane in lanes:
         out.append(f"\n### Lane: {lane}\n")
         for sc in scenarios:
             out.append(f"\n**{sc}**  ("
                        + ("aggregate tok/s" if sc.startswith("conc")
-                          else "median TTFT" if sc.startswith("ttft")
+                          else "median TTFT" if "ttft" in sc
                           else "decode tok/s") + ")  († = early EOS, under-saturated)\n")
             hdr = "| model | " + " | ".join(
-                RUNTIME_LABEL[r] for r in RUNTIME_ORDER) + " |"
+                RUNTIME_LABEL[r] for r in order) + " |"
             out.append(hdr)
-            out.append("|" + "---|" * (len(RUNTIME_ORDER) + 1))
+            out.append("|" + "---|" * (len(order) + 1))
             for m in models:
                 row = [m]
-                for rt in RUNTIME_ORDER:
+                for rt in order:
                     rec = cells.get((lane, rt, m, sc))
+                    # a fatal launch record explains missing cells only
+                    # when NOTHING for this runtime/model succeeded
+                    # (patch-up runs append healthy cells after it)
                     if rec is None and (lane, rt, m, "__launch__") in cells:
-                        rec = cells[(lane, rt, m, "__launch__")]
+                        healthy = any(
+                            cells.get((lane, rt, m, s)) is not None
+                            for s in scenarios)
+                        if not healthy:
+                            rec = cells[(lane, rt, m, "__launch__")]
                     row.append(fmt(rec, sc))
                 out.append("| " + " | ".join(row) + " |")
         # memory + load tables
         out.append("\n**peak RSS (GB) / cold load (s, server-boot + first-request)**\n")
         out.append("| model | " + " | ".join(
-            RUNTIME_LABEL[r] for r in RUNTIME_ORDER) + " |")
-        out.append("|" + "---|" * (len(RUNTIME_ORDER) + 1))
+            RUNTIME_LABEL[r] for r in order) + " |")
+        out.append("|" + "---|" * (len(order) + 1))
         for m in models:
             row = [m]
-            for rt in RUNTIME_ORDER:
+            for rt in order:
                 recs = [cells.get((lane, rt, m, sc)) for sc in scenarios]
                 recs = [r for r in recs if r and not r.get("fatal")]
                 if not recs:

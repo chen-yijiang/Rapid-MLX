@@ -263,15 +263,29 @@ def attach_ollama(cfg, rt, port, log_dir):
 
 # -------------------------------------------------------------- client
 
-async def stream_chat(client, base_url, model_id, prompt, max_tokens):
+def _image_data_uri():
+    import base64
+    png = (HERE / "vision-probe.png").read_bytes()
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+async def stream_chat(client, base_url, model_id, prompt, max_tokens,
+                      image=False):
     """One streaming chat completion; returns timing + token counts.
 
     TTFT is measured to the first delta carrying visible content OR
     reasoning (reasoning models start streaming thought first — that
     IS their first token; content-only TTFT is also recorded)."""
+    if image:
+        content = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": _image_data_uri()}},
+        ]
+    else:
+        content = prompt
     body = {
         "model": model_id,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": content}],
         "max_tokens": max_tokens,
         "temperature": 0,
         "stream": True,
@@ -329,7 +343,7 @@ async def stream_chat(client, base_url, model_id, prompt, max_tokens):
     }
 
 
-async def run_cell(server, model_id, prompt, scenario, out):
+async def run_cell(server, model_id, prompt, scenario, out, image=False):
     reps = scenario.get("reps", 3)
     parallel = scenario.get("parallel", 1)
     limits = httpx.Limits(max_connections=parallel + 2)
@@ -342,7 +356,7 @@ async def run_cell(server, model_id, prompt, scenario, out):
         try:
             await stream_chat(client, server.base_url, model_id,
                               "Case 0: " + prompt,
-                              min(scenario["max_tokens"], 32))
+                              min(scenario["max_tokens"], 32), image=image)
             out["warmup_s"] = time.monotonic() - t_w
         except Exception as e:
             out["warmup_error"] = repr(e)
@@ -355,13 +369,13 @@ async def run_cell(server, model_id, prompt, scenario, out):
                 runs.append(await stream_chat(
                     client, server.base_url, model_id,
                     f"Case {rep + 1}: " + prompt,
-                    scenario["max_tokens"]))
+                    scenario["max_tokens"], image=image))
             else:
                 t0 = time.monotonic()
                 res = await asyncio.gather(*[
                     stream_chat(client, server.base_url, model_id,
                                 f"Case {rep + 1}-{i}: " + prompt,
-                                scenario["max_tokens"])
+                                scenario["max_tokens"], image=image)
                     for i in range(parallel)
                 ], return_exceptions=True)
                 ok = [r for r in res if isinstance(r, dict)]
@@ -446,13 +460,23 @@ def main():
                 model_id = m["hf_mlx"]
             try:
                 for name, sc in scenarios.items():
-                    prompt = build_prompt(m["hf_mlx"], sc["prompt_tokens"],
-                                          saturate=sc.get("saturate", False))
+                    if sc.get("vision"):
+                        prompt = (
+                            "Describe this image in exhaustive detail: every "
+                            "shape, colour, position and relation, one by "
+                            "one; keep adding observations until cut off."
+                            if sc.get("saturate")
+                            else "Describe this image in two sentences."
+                        )
+                    else:
+                        prompt = build_prompt(m["hf_mlx"], sc["prompt_tokens"],
+                                              saturate=sc.get("saturate", False))
                     rec = {"runtime": rt, "model": m["key"], "scenario": name,
                            "lane": args.lane, "load_s": server.load_s,
                            "spec": sc}
                     try:
-                        asyncio.run(run_cell(server, model_id, prompt, sc, rec))
+                        asyncio.run(run_cell(server, model_id, prompt, sc, rec,
+                                             image=bool(sc.get("vision"))))
                         rec["median_ttft_s"] = median_of(rec.get("runs", []), "ttft_s")
                         rec["median_decode_tps"] = median_of(rec.get("runs", []), "decode_tps")
                         rec["median_agg_tps"] = median_of(rec.get("runs", []), "agg_tps")
