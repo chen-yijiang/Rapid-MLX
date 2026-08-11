@@ -1,0 +1,106 @@
+# Cross-runtime benchmark: rapid-mlx vs oMLX vs mlx-lm vs Ollama.
+#
+# Fairness contract (see README):
+# - Every runtime is measured through the same OpenAI-compatible
+#   streaming client, one runtime at a time, on an otherwise idle GPU.
+# - "parity" lane turns every optional accelerator off (prefix cache,
+#   PFlash, speculative decode, oMLX paged cache) — raw engine speed.
+# - "product" lane runs each runtime's shipped defaults — what a user
+#   actually gets after install.
+# - temp=0 everywhere; per-cell 1 discarded warmup + N repeats.
+
+ports:
+  rapid: 8101
+  omlx: 8102
+  mlxlm: 8103
+  ollama: 11434
+
+venvs:
+  rapid: ~/work/bench-venvs/rapid
+  omlx: ~/work/bench-venvs/omlx
+  mlxlm_python: /opt/homebrew/bin/python3.12
+
+runtimes:
+  rapid:
+    kind: openai
+    # {model} replaced with hf_mlx id. Launched from $HOME (neutral cwd).
+    serve: "{venv}/bin/rapid-mlx serve {model} --port {port}"
+    parity_flags: "--disable-prefix-cache --no-spec-decode --pflash off"
+    product_flags: ""
+    ready_path: /v1/models
+  omlx:
+    kind: openai
+    serve: "{venv}/bin/omlx serve --hf-cache --port {port}"
+    parity_flags: "--no-cache"
+    product_flags: ""
+    ready_path: /v1/models
+    # multi-model server: model chosen per-request by id
+  mlxlm:
+    kind: openai
+    serve: "{python} -m mlx_lm server --model {model} --port {port} --temp 0.0"
+    parity_flags: ""
+    product_flags: ""
+    ready_path: /v1/models
+  ollama:
+    kind: openai
+    # daemon managed by the harness so env is controlled & recorded
+    daemon_env:
+      OLLAMA_CONTEXT_LENGTH: "20480"   # 16k prompt + gen headroom; OpenAI endpoint can't set num_ctx per request
+      OLLAMA_KEEP_ALIVE: "60m"
+      OLLAMA_NUM_PARALLEL: "8"
+    ready_path: /api/version
+
+models:
+  - key: qwen3.5-4b
+    hf_mlx: mlx-community/Qwen3.5-4B-MLX-4bit
+    ollama_tag: qwen3.5:4b
+    quant_note: "MLX 4bit vs GGUF Q4_K_M"
+  - key: qwen3.5-9b
+    hf_mlx: mlx-community/Qwen3.5-9B-4bit
+    ollama_tag: qwen3.5:9b
+    quant_note: "MLX 4bit vs GGUF Q4_K_M"
+  - key: gpt-oss-20b
+    hf_mlx: mlx-community/gpt-oss-20b-MXFP4-Q8
+    ollama_tag: gpt-oss:20b
+    quant_note: "MXFP4 both sides — cleanest quant parity in the matrix"
+  - key: qwen3.6-27b
+    hf_mlx: mlx-community/Qwen3.6-27B-4bit
+    ollama_tag: qwen3.6:27b
+    quant_note: "MLX 4bit vs GGUF Q4_K_M"
+  - key: gemma-4-26b
+    hf_mlx: mlx-community/gemma-4-26b-a4b-it-4bit
+    ollama_tag: gemma4:26b-a4b
+    quant_note: "MLX 4bit vs GGUF Q4_K_M; MoE A4B; also the vision-lane model"
+    vision: true
+  - key: qwen3.6-35b-a3b
+    hf_mlx: mlx-community/Qwen3.6-35B-A3B-4bit
+    ollama_tag: qwen3.6:35b-a3b
+    quant_note: "MLX 4bit vs GGUF Q4_K_M; MoE A3B"
+
+scenarios:
+  ttft_short:
+    prompt_tokens: 128
+    max_tokens: 64
+    reps: 3
+  ttft_4k:
+    prompt_tokens: 4000
+    max_tokens: 64
+    reps: 3
+  ttft_16k:            # doubles as long-context decode
+    prompt_tokens: 16000
+    max_tokens: 512
+    reps: 3
+  decode_b1:
+    prompt_tokens: 128
+    max_tokens: 640    # hybrid/MoE TPS on short answers is bogus (#284)
+    reps: 3
+  conc_4:
+    prompt_tokens: 512
+    max_tokens: 256
+    parallel: 4
+    reps: 2
+  conc_8:
+    prompt_tokens: 512
+    max_tokens: 256
+    parallel: 8
+    reps: 2
