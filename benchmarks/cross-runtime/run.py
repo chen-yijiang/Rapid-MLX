@@ -305,23 +305,29 @@ async def run_cell(server, model_id, prompt, scenario, out):
         # load_s + warmup_s regardless of loading strategy.
         t_w = time.monotonic()
         try:
-            await stream_chat(client, server.base_url, model_id, prompt,
+            await stream_chat(client, server.base_url, model_id,
+                              "Case 0: " + prompt,
                               min(scenario["max_tokens"], 32))
             out["warmup_s"] = time.monotonic() - t_w
         except Exception as e:
             out["warmup_error"] = repr(e)
         runs = []
         for rep in range(reps):
+            # unique per-request prefix: with product-lane prefix caches
+            # on, identical repeated prompts would measure a 100% cache
+            # hit instead of the engine
             if parallel == 1:
                 runs.append(await stream_chat(
-                    client, server.base_url, model_id, prompt,
+                    client, server.base_url, model_id,
+                    f"Case {rep + 1}: " + prompt,
                     scenario["max_tokens"]))
             else:
                 t0 = time.monotonic()
                 res = await asyncio.gather(*[
-                    stream_chat(client, server.base_url, model_id, prompt,
+                    stream_chat(client, server.base_url, model_id,
+                                f"Case {rep + 1}-{i}: " + prompt,
                                 scenario["max_tokens"])
-                    for _ in range(parallel)
+                    for i in range(parallel)
                 ], return_exceptions=True)
                 ok = [r for r in res if isinstance(r, dict)]
                 errs = [repr(r) for r in res if not isinstance(r, dict)]

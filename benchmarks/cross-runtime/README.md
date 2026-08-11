@@ -28,7 +28,10 @@ mid-2026.
 5. **Deterministic prompts.** temp=0; prompt text is fixed filler
    sized per-model with the model's own tokenizer (128 / 4k / 16k
    targets). Each cell runs 1 discarded warmup (kernel compile,
-   page-in) + N repeats; the median and spread are reported.
+   page-in) + N repeats; the median and spread are reported. Every
+   request carries a unique leading salt: in the product lane prefix
+   caches are on, and identical repeated prompts would measure a 100%
+   cache hit instead of the engine.
 6. **Decode is measured on long generations** (≥512 tokens): MoE and
    hybrid models report misleading TPS on short answers.
 7. **Context length is pinned.** Ollama's OpenAI endpoint cannot set
