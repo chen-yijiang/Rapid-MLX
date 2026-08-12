@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import threading
 import types
 from typing import Any
 
@@ -277,6 +278,9 @@ def _bind_singleton_surface(cache_obj: Any) -> None:
             setattr(cache_obj, name, types.MethodType(fn, cache_obj))
 
 
+_install_lock = threading.Lock()
+
+
 def install_singleton_cache_fastpath() -> bool:
     """Idempotent module-level install. Returns False when the running
     mlx-lm lacks the expected seams (fall back to stock batched merging)."""
@@ -288,6 +292,14 @@ def install_singleton_cache_fastpath() -> bool:
 
     gen = importlib.import_module("mlx_lm.generate")
 
+    # Serialize check + patch: concurrent generator creation (multi-model
+    # residency loads on separate executor threads) must never capture a
+    # half-installed seam as orig_merge (codex r6 on #1874).
+    with _install_lock:
+        return _install_locked(gen)
+
+
+def _install_locked(gen) -> bool:
     if getattr(gen, "_rapid_singleton_cache_fastpath", False):
         return True
     orig_merge = getattr(gen, "_merge_caches", None)
@@ -321,14 +333,18 @@ def install_singleton_cache_fastpath() -> bool:
             # handle raw per-request layers handed straight to the extend
             # seam defensively (codex r3 on #1874) — including the
             # copy-on-admit, since a loaned layer is hazardous wherever
-            # it enters the batch.
-            admitted = []
-            for c in cache_b:
-                if _is_singleton_passthrough_layer(c):
+            # it enters the batch. All-or-nothing, mirroring
+            # _merge_caches_singleton: a partially bound list would mix
+            # singleton and raw layers (codex r6). Non-qualifying lists
+            # return unchanged — exactly stock _extend_cache's behavior.
+            if all(_is_singleton_passthrough_layer(c) for c in cache_b):
+                admitted = []
+                for c in cache_b:
                     c = _detach_layer(c)
                     _bind_singleton_surface(c)
-                admitted.append(c)
-            return admitted
+                    admitted.append(c)
+                return admitted
+            return cache_b
         if not cache_b:
             return cache_a
         if len(cache_a) != len(cache_b):

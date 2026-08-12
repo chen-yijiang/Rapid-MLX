@@ -221,6 +221,21 @@ def test_promote_composite_preserves_wrapper_state():
     assert type(promoted.caches[0]) is not KVCache  # child promoted
 
 
+def test_extend_into_empty_batch_all_or_nothing():
+    """codex r6: a mixed cache list at the extend seam must not be
+    partially bound — either every layer qualifies (detach + bind all)
+    or the list returns unchanged, which is stock behavior."""
+    gen = importlib.import_module("mlx_lm.generate")
+    raw = _filled_kv()
+
+    class _Foreign:
+        pass
+
+    out = gen._extend_cache([], [raw, _Foreign()])
+    assert out[0] is raw
+    assert "filter" not in raw.__dict__  # no partial binding
+
+
 def test_extend_into_empty_batch_binds_surface():
     """codex r3 BLOCKING: layers reaching the extend seam without going
     through the patched merge must still get the singleton surface (and
