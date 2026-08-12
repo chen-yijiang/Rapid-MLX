@@ -3310,9 +3310,7 @@ async def _preflight_mllm_chat_stream(
         return True
 
     try:
-        completed = await _wait_with_disconnect(
-            _prime(), raw_request, timeout=timeout
-        )
+        completed = await _wait_with_disconnect(_prime(), raw_request, timeout=timeout)
     except BaseException:
         await stream.aclose()
         raise
