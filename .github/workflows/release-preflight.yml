@@ -133,7 +133,8 @@ jobs:
     # G1 — clean-room install + import smoke on macOS-14. Catches the
     # #408 class where dev mlx has a symbol PyPI mlx doesn't.
     needs: detect-bump-pr
-    if: needs.detect-bump-pr.outputs.is_bump == 'true'
+    # THROWAWAY BRANCH: disabled to isolate PF-2. Do not merge.
+    if: false
     runs-on: macos-14
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -154,7 +155,8 @@ jobs:
     # The release-er must cite "audited" in the PR description if any
     # finding lands in a code path our compat shim doesn't already cover.
     needs: detect-bump-pr
-    if: needs.detect-bump-pr.outputs.is_bump == 'true'
+    # THROWAWAY BRANCH: disabled to isolate PF-2. Do not merge.
+    if: false
     runs-on: macos-14
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -183,7 +185,8 @@ jobs:
     # user override for hardware probe). Requires MLX because the test
     # introspects vllm_mlx.engine / vllm_mlx.server signatures.
     needs: detect-bump-pr
-    if: needs.detect-bump-pr.outputs.is_bump == 'true'
+    # THROWAWAY BRANCH: disabled to isolate PF-2. Do not merge.
+    if: false
     runs-on: macos-14
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
