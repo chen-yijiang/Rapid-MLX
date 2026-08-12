@@ -302,6 +302,8 @@ def test_extract_full_span_buffer_still_independent():
     mx.eval(c.keys, c.values)
     c = _passthrough(c)
     clone = c.extract(0)
+    assert clone.keys is not c.keys
+    assert clone.values is not c.values
     c.values[..., 0:4, :] = c.values[..., 0:4, :] * 0.0 + 7.0
     assert float(clone.values[0, 0, 0, 0]) == 1.0
 
@@ -333,6 +335,49 @@ def test_extract_nonzero_row_raises():
     c = _passthrough(_filled_kv())
     with pytest.raises(IndexError):
         c.extract(1)
+
+
+def test_promote_composite_slots_wrapper():
+    """codex r5 BLOCKING: wrapper cloning must survive __slots__ classes
+    (copy.copy, not __new__ + __dict__)."""
+
+    class _SlotsWrapper:
+        __slots__ = ("tag", "caches")
+
+        def __init__(self, tag, caches):
+            self.tag = tag
+            self.caches = caches
+
+    w = _SlotsWrapper("keep-me", [_filled_kv()])
+    promoted = _promote_layer(w)
+    assert promoted is not w
+    assert promoted.tag == "keep-me"
+    assert type(promoted.caches[0]) is not KVCache
+
+
+def test_detach_deepcopies_native_surface_layers():
+    """codex r5 BLOCKING: native batch-surface layers must not retain
+    aliases to loaned state either — admission deep-copies them."""
+    gen = importlib.import_module("mlx_lm.generate")
+
+    class _NativeLayer:
+        def __init__(self):
+            self.state = [mx.ones((2, 2))]
+
+        def filter(self, keep):
+            pass
+
+        def extract(self, idx):
+            pass
+
+        def extend(self, other):
+            pass
+
+    _NativeLayer.__module__ = "mlx_lm.models.cache"
+    obj = _NativeLayer()
+    [admitted] = gen._merge_caches([[obj]])
+    assert admitted is not obj
+    assert admitted.state[0] is not obj.state[0]
 
 
 def test_extend_requires_promotion():

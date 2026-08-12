@@ -60,6 +60,7 @@ unchanged, so the steady-state B=1 win is untouched.
 
 from __future__ import annotations
 
+import copy
 import logging
 import types
 from typing import Any
@@ -119,10 +120,11 @@ def _promote_layer(cache_obj: Any) -> Any:
         if all(a is b for a, b in zip(sub, converted)):
             return cache_obj
         # Clone the wrapper and swap the children — reconstructing via
-        # ``type(obj)(*converted)`` assumes a splat constructor and
-        # would crash wrappers holding extra state (codex r3 on #1874).
-        clone = type(cache_obj).__new__(type(cache_obj))
-        clone.__dict__.update(cache_obj.__dict__)
+        # ``type(obj)(*converted)`` assumes a splat constructor and would
+        # crash wrappers holding extra state (codex r3 on #1874).
+        # copy.copy (not __new__ + __dict__) so wrappers using __slots__
+        # or custom copy hooks clone correctly (codex r5).
+        clone = copy.copy(cache_obj)
         clone.caches = type(sub)(converted) if isinstance(sub, tuple) else converted
         return clone
     if type(cache_obj) in _SINGLETON_EXACT_TYPES:
@@ -176,9 +178,7 @@ def _copy_exact_layer(cache_obj: Any) -> Any:
     never carried over.
     """
     if isinstance(cache_obj, RotatingKVCache):
-        import copy as _copy
-
-        clone = _copy.deepcopy(cache_obj)
+        clone = copy.deepcopy(cache_obj)
         for name in _SURFACE_NAMES:
             clone.__dict__.pop(name, None)
         return clone
@@ -214,15 +214,21 @@ def _detach_layer(cache_obj: Any) -> Any:
         converted = [_detach_layer(c) for c in sub]
         if all(a is b for a, b in zip(sub, converted)):
             return cache_obj
-        clone = type(cache_obj).__new__(type(cache_obj))
-        clone.__dict__.update(cache_obj.__dict__)
+        # copy.copy (not __new__ + __dict__) so wrappers using __slots__
+        # or custom copy hooks clone correctly (codex r5 on #1874).
+        clone = copy.copy(cache_obj)
         clone.caches = type(sub)(converted) if isinstance(sub, tuple) else converted
         return clone
-    if type(cache_obj) not in _SINGLETON_EXACT_TYPES:
-        return cache_obj
-    if getattr(cache_obj, "keys", None) is None:
-        return cache_obj
-    return _copy_exact_layer(cache_obj)
+    if type(cache_obj) in _SINGLETON_EXACT_TYPES:
+        if getattr(cache_obj, "keys", None) is None:
+            return cache_obj
+        return _copy_exact_layer(cache_obj)
+    # Native batch-surface layers (hybrid ArraysCache/MambaCache): every
+    # CURRENT loan path deepcopies or refuses them (the non-trimmable
+    # gate), but that is the prefix cache's contract, not this lane's —
+    # deepcopy unconditionally so a future shallow loan cannot alias.
+    # Fresh layers are near-empty; the copy is noise (codex r5).
+    return copy.deepcopy(cache_obj)
 
 
 def _singleton_extract(self, idx: int):
