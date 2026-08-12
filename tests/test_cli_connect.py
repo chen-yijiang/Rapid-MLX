@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shlex
 from contextlib import redirect_stdout
 
 import pytest
@@ -306,7 +307,8 @@ def test_render_banner_connect_carries_remote_endpoint():
 
 def test_render_banner_connect_carries_ipv6_endpoint():
     out = connect.render_banner(connect.ServerEndpoints("::1", 8000, model="m1"))
-    assert "--base-url http://[::1]:8000/v1" in out
+    # IPv6 literals contain '['/']', which shlex.quote wraps in single quotes.
+    assert "--base-url 'http://[::1]:8000/v1'" in out
 
 
 def test_resolve_endpoints_preserves_explicit_model(monkeypatch):
@@ -359,4 +361,74 @@ def test_ipv6_scoped_zone_id_config_and_banner_agree():
     """Banner Connect command and endpoint rows both use the %25 form."""
     out = connect.render_banner(connect.ServerEndpoints("fe80::1%en0", 8000, model="m"))
     assert "Ready: http://[fe80::1%25en0]:8000" in out
-    assert "--base-url http://[fe80::1%25en0]:8000/v1" in out
+    assert "--base-url 'http://[fe80::1%25en0]:8000/v1'" in out
+
+
+# --- Review round 3: dynamic URL in copied commands must be shell-quoted ----
+def test_banner_connect_base_url_is_shell_quoted_for_special_hosts():
+    """A crafted host must not smuggle a second shell command into the banner.
+
+    ``render_banner`` builds the Connect: rows that a user copies and pastes
+    into a shell. Every dynamic ``--base-url`` value must be ``shlex.quote``-
+    ed so characters like ``;``, ``$()`` and spaces cannot be interpreted as
+    shell syntax.
+    """
+
+    cases = [
+        "mini.local; touch /tmp/pwned",
+        "ha x",
+        "$(rm -rf /)",
+        "it's",
+    ]
+    for host in cases:
+        out = connect.render_banner(connect.ServerEndpoints(host, 8000, model="m"))
+        expected_url = connect.ServerEndpoints(host, 8000, model="m").openai_url
+        expected = f"--base-url {shlex.quote(expected_url)}"
+        assert expected in out, (
+            f"host {host!r}: expected {expected!r} to be in banner output:\n{out}"
+        )
+
+
+def test_banner_ipv6_zone_id_quoted_and_not_double_encoded():
+    """Scoped IPv6 with a raw zone-id is encoded %25 and then shell-quoted."""
+    out = connect.render_banner(connect.ServerEndpoints("fe80::1%en0", 8000, model="m"))
+    assert "--base-url 'http://[fe80::1%25en0]:8000/v1'" in out
+
+
+def test_banner_already_encoded_zone_id_not_double_encoded():
+    """An already-encoded %25 zone-id is left alone, not turned into %2525."""
+    out = connect.render_banner(
+        connect.ServerEndpoints("fe80::1%25en0", 8000, model="m")
+    )
+    assert "http://[fe80::1%25en0]:8000" in out
+    assert "%2525" not in out
+
+
+def test_banner_already_bracketed_host_not_double_bracketed():
+    """A pre-bracketed [::1] host is normalized, not rendered as [[::1]]."""
+    out = connect.render_banner(connect.ServerEndpoints("[::1]", 8000, model="m"))
+    assert "Ready: http://[::1]:8000" in out
+    assert "[[::1]]" not in out
+
+
+def test_point_command_base_url_is_shell_quoted():
+    """``rapid-mlx connect <agent>`` output must shell-quote --base-url.
+
+    ``_print_point_command`` is what ``connect claude-code`` / ``connect
+    continue`` render, and it carries the same copy-paste security contract as
+    the banner.
+    """
+    from vllm_mlx.cli import _print_point_command
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _print_point_command(
+            "Claude Code",
+            "agents claude-code --setup",
+            "http://mini.local; touch /tmp/pwned:8000/v1",
+        )
+    out = buf.getvalue()
+    expected = shlex.quote("http://mini.local; touch /tmp/pwned:8000/v1")
+    # The copy-paste command's --base-url is shell-quoted. (The human-facing
+    # ``→  <url>`` echo line above it is informational, not a command.)
+    assert f"--base-url {expected}" in out

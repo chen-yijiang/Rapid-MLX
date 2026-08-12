@@ -32,30 +32,50 @@ Constraints encoded here:
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass
 from typing import Any
 
 
 def _authority(host: str) -> str:
-    """Render a host for a URL authority component.
+    """Render a host for a URI authority component, canonicalizing it.
 
     IPv6 literals (and scoped literals like ``fe80::1%en0``) MUST be wrapped
-    in square brackets in a URI authority, e.g. ``http://[::1]:8000``.
-    Uses the same lexical ``":" in host`` rule as the serve CLI's
-    ``_is_ipv6_host`` so zone-id scoped addresses are also detected.
+    in square brackets in a URI authority, e.g. ``http://[::1]:8000``. Uses
+    the same lexical ``":" in host`` rule as the serve CLI's ``_is_ipv6_host``
+    so zone-id scoped addresses are also detected.
 
-    The zone-id separator ``%`` is percent-encoded as ``%25`` to keep the
-    URL well-formed per RFC 6874 (zone identifiers are delimited by ``%25``
-    in URIs), e.g. ``http://[fe80::1%25en0]:8000``.
+    The zone-id separator ``%`` is percent-encoded as ``%25`` per RFC 6874
+    (zone identifiers are delimited by ``%25`` in URIs), e.g.
+    ``http://[fe80::1%25en0]:8000``.
+
+    Accepts and normalizes non-canonical input rather than guessing:
+    an already-bracketed literal (``[::1]``) is not double-bracketed, and an
+    already-encoded ``%25`` is not percent-encoded a second time.
     """
+    # Strip an existing surrounding bracket pair so we never double-bracket.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+
     if ":" not in host:
         return host
-    bracketed = f"[{host}]"
+
+    # Percent-encode a raw zone-id `%` as `%25` unless it already begins a
+    # valid `%25` escape (case-insensitive). This keeps an already-encoded
+    # ``fe80::1%25en0`` stable while encoding a bare ``fe80::1%en0``.
     if "%" in host:
-        # Percent-encode every raw `%` (the zone-id separator) so the URL
-        # stays well-formed and parser-friendly.
-        bracketed = bracketed.replace("%", "%25")
-    return bracketed
+        out: list[str] = []
+        i = 0
+        while i < len(host):
+            if host[i] == "%" and host[i : i + 3].lower() != "%25":
+                out.append("%25")
+                i += 1
+            else:
+                out.append(host[i])
+                i += 1
+        host = "".join(out)
+
+    return f"[{host}]"
 
 
 @dataclass(frozen=True)
@@ -152,7 +172,7 @@ def render_banner(ep: ServerEndpoints, *, include_connect: bool = True) -> str:
         for app, cmd, needs_endpoint in _CONNECT_ROWS:
             rendered = cmd
             if needs_endpoint:
-                rendered += f" --base-url {ep.openai_url}"
+                rendered += f" --base-url {shlex.quote(ep.openai_url)}"
             lines.append(f"    {app:<{width}}  {rendered}")
 
     return "\n".join(lines) + "\n"

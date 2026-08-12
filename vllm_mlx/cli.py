@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import os
+import shlex
 import sys
 from collections.abc import Callable
 
@@ -7870,7 +7871,7 @@ def _print_point_command(app: str, setup_verb: str, url: str) -> None:
     print(f"  {app}  →  {url}")
     print()
     print(f"      rapid-mlx {setup_verb} \\")
-    print(f"        --base-url {url}")
+    print(f"        --base-url {shlex.quote(url)}")
     print()
     print("  This writes your tool's config to point at the running server")
     print("  (previews a diff, requires consent, verifies the connection).")
