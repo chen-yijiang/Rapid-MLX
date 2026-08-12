@@ -3680,6 +3680,16 @@ class Scheduler:
         # so this layering is safe.
         _install_dense_sampler_fastpath(bg)
 
+        # Singleton-cache fast path: keep per-request KV caches in their
+        # single-sequence form while the batch holds one row (plain causal
+        # mask -> mx.fast SDPA's native fast path), promoting to batched
+        # caches only when a second row joins. Idempotent module-level
+        # patch on mlx_lm.generate; measured +4-8% B=1 decode (bench
+        # 2026-08-12, oMLX parity study).
+        from .singleton_cache_fastpath import install_singleton_cache_fastpath
+
+        install_singleton_cache_fastpath()
+
         return bg
 
     def _make_prompt_cache_save_callback(self):
