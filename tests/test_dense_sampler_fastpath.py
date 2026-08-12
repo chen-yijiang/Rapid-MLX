@@ -94,9 +94,12 @@ def test_heterogeneous_batch_keeps_per_request_samplers():
     assert gb.observed_fallback is original_fallback
 
 
-def test_b1_does_not_engage_fast_path():
-    """B=1 is degenerate — patch must NOT swap (no perf upside, and
-    swapping just adds attribute writes per step)."""
+def test_b1_engages_fast_path():
+    """B=1 must swap too (bench-tuning 2026-08-12): a single per-request
+    sampler still trips mlx-lm's ``any(self.samplers)`` per-row branch —
+    one slice, one closure call, one single-element concatenate every
+    decode step. The earlier exclusion assumed "no perf upside", which
+    the B=1 decode benchmarks disproved."""
     sampler = lambda x: x  # noqa: E731
     original_fallback = lambda x: x  # noqa: E731
     gb = _FakeGenBatch(samplers=[sampler], fallback=original_fallback)
@@ -104,8 +107,13 @@ def test_b1_does_not_engage_fast_path():
 
     gb._step()
 
-    assert gb.observed_samplers == [sampler]
-    assert gb.observed_fallback is original_fallback
+    # Fast path observed inside the call: row slot cleared, sampler
+    # promoted to the shared fallback...
+    assert gb.observed_samplers == [None]
+    assert gb.observed_fallback is sampler
+    # ...and state restored afterwards.
+    assert gb.samplers == [sampler]
+    assert gb.fallback_sampler is original_fallback
 
 
 def test_homogeneous_with_first_none_does_not_engage():
