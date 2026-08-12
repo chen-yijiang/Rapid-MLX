@@ -49,13 +49,21 @@ def spread(rec, key):
 
 def undersaturated(rec):
     """True when a saturate cell didn't hit its token cap (early EOS)
-    — its throughput number then reflects a lighter workload."""
+    — its throughput number then reflects a lighter workload.
+
+    Conc runs carry per-request counts in run["completions"] (single
+    runs carry run["usage"]); before that field existed, early-EOS conc
+    cells slipped past this check entirely (#1861 post-mortem: the 27B
+    conc "gap" vs mlx-lm was 800 vs 2048 generated tokens)."""
     if not (rec.get("spec") or {}).get("saturate"):
         return False
     cap = (rec.get("spec") or {}).get("max_tokens") or 0
     runs = rec.get("runs") or []
     toks = [(r.get("usage") or {}).get("completion_tokens")
             for r in runs if isinstance(r, dict) and r.get("usage")]
+    for r in runs:
+        if isinstance(r, dict) and r.get("completions"):
+            toks.extend(r["completions"])
     return bool(toks) and min(toks) < 0.9 * cap
 
 

@@ -384,12 +384,28 @@ async def run_cell(server, model_id, prompt, scenario, out, image=False):
                 total_completion = sum(
                     (r["usage"] or {}).get("completion_tokens") or 0 for r in ok
                 )
+                # decode-phase aggregate: excludes the shared prefill
+                # barrier (all TTFTs ≈ full-batch prefill time on
+                # BatchGenerator-based runtimes) so early-EOS workload
+                # asymmetry and prefill speed don't pollute the decode
+                # comparison (#1861 post-mortem).
+                _ttfts = [r["ttft_s"] for r in ok]
+                _decode_span = wall - (min(_ttfts) if _ttfts else 0)
                 runs.append({
                     "parallel": parallel,
                     "ok": len(ok),
                     "errors": errs,
                     "wall_s": wall,
                     "agg_tps": total_completion / wall if wall > 0 else None,
+                    "decode_agg_tps": (
+                        total_completion / _decode_span if _decode_span > 0 else None
+                    ),
+                    # per-request completion tokens so undersaturated()
+                    # can flag early-EOS conc cells (they previously
+                    # slipped past the † check, which reads run["usage"])
+                    "completions": [
+                        (r["usage"] or {}).get("completion_tokens") or 0 for r in ok
+                    ],
                     "ttft_p50_s": statistics.median(r["ttft_s"] for r in ok) if ok else None,
                     "ttft_max_s": max((r["ttft_s"] for r in ok), default=None),
                 })
