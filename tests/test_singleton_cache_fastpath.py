@@ -285,6 +285,24 @@ def test_extract_returns_independent_trimmed_copy():
     assert float(clone.values[0, 0, 0, 0]) == 1.0
 
 
+def test_extract_full_span_buffer_still_independent():
+    """codex r4 claimed mx.contiguous may alias when the extracted slice
+    spans the full contiguous buffer. Refuted empirically (MLX setitem
+    is functional — prior value nodes never see it), and pinned here:
+    offset == buffer width, then mutate the original after extract."""
+    c = KVCache()
+    k = mx.zeros((1, 2, 4, 8))
+    v = mx.ones((1, 2, 4, 8))
+    c.update_and_fetch(k, v)
+    c.keys = mx.contiguous(c.keys[..., :4, :])  # buffer width == offset
+    c.values = mx.contiguous(c.values[..., :4, :])
+    mx.eval(c.keys, c.values)
+    c = _passthrough(c)
+    clone = c.extract(0)
+    c.values[..., 0:4, :] = c.values[..., 0:4, :] * 0.0 + 7.0
+    assert float(clone.values[0, 0, 0, 0]) == 1.0
+
+
 def test_extract_rotating_is_independent_copy():
     r = RotatingKVCache(max_size=64)
     k = mx.zeros((1, 2, 4, 8))
