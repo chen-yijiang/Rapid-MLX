@@ -36,6 +36,17 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _authority(host: str) -> str:
+    """Render a host for a URL authority component.
+
+    IPv6 literals (and scoped literals like ``fe80::1%en0``) MUST be wrapped
+    in square brackets in a URI authority, e.g. ``http://[::1]:8000``.
+    Uses the same lexical ``":" in host`` rule as the serve CLI's
+    ``_is_ipv6_host`` so zone-id scoped addresses are also detected.
+    """
+    return f"[{host}]" if ":" in host else host
+
+
 @dataclass(frozen=True)
 class ServerEndpoints:
     """Immutable description of a running server's connection points."""
@@ -53,7 +64,7 @@ class ServerEndpoints:
         """Base ``http://host:port`` — the anchor every endpoint hangs off."""
         if self.listen_fd is not None:
             raise RuntimeError("socket-activation endpoint has no known base URL")
-        return f"http://{self.host}:{self.port}"
+        return f"http://{_authority(self.host)}:{self.port}"
 
     @property
     def openai_url(self) -> str:
@@ -196,7 +207,7 @@ def _probe_running_model(host: str, port: int) -> str | None:
     import urllib.error
     import urllib.request
 
-    base = f"http://{host}:{port}"
+    base = f"http://{_authority(host)}:{port}"
     try:
         with urllib.request.urlopen(f"{base}/v1/models", timeout=2.0) as resp:
             payload = json.loads(resp.read())

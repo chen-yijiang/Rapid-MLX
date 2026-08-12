@@ -7840,9 +7840,12 @@ def _connect_target(args, eps):
         return
 
     if target in {"claude", "claude-code"}:
-        # Anthropic endpoints are the base URL (the SDK adds /v1/messages itself).
+        # The setup command is rendered by ``agents`` via ``--base-url``. All
+        # agents CLIs uniformly accept the OpenAI-style ``/v1`` base URL (the
+        # adapter strips ``/v1`` for Claude's profile), so we always hand it
+        # the OpenAI endpoint — never the bare Anthropic base.
         _print_point_command(
-            "Claude Code", "agents claude-code --setup", eps.anthropic_url
+            "Claude Code", "agents claude-code --setup", eps.openai_url
         )
         return
     if target in {"continue", "continue-dev"}:
@@ -7855,11 +7858,19 @@ def _connect_target(args, eps):
 
 
 def _print_point_command(app: str, setup_verb: str, url: str) -> None:
-    """Print the canonical setup command for a first-class agent target."""
+    """Print the canonical setup command for a first-class agent target.
+
+    ``setup_verb`` is like ``agents claude-code --setup`` and ``url`` is the
+    endpoint that tool should target (OpenAI-style ``/v1`` base). We append
+    ``--base-url`` so the suggested command carries the requested host/port —
+    otherwise the agent would default to localhost:8000 and write a config
+    that silently points at the wrong server.
+    """
     print()
     print(f"  {app}  →  {url}")
     print()
-    print(f"      rapid-mlx {setup_verb}")
+    print(f"      rapid-mlx {setup_verb} \\")
+    print(f"        --base-url {url}")
     print()
     print("  This writes your tool's config to point at the running server")
     print("  (previews a diff, requires consent, verifies the connection).")
@@ -9826,9 +9837,9 @@ Examples:
     )
     connect_parser.add_argument(
         "--port",
-        type=int,
+        type=_port_arg,
         default=None,
-        help="Server port (default: auto-detect or 8000)",
+        help="Server port 1-65535 (default: auto-detect or 8000)",
     )
     connect_parser.add_argument(
         "--model",

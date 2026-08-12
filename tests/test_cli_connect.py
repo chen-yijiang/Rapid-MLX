@@ -183,3 +183,101 @@ def test_connect_unknown_target_exits(monkeypatch):
     assert exc.value.code == 1
     # The helpful supported-target list is printed before exiting.
     assert "Supported: claude-code, continue, openai-python" in buf.getvalue()
+
+
+# --- P1 fixes applied after #1872 revert ------------------------------------
+# (Reviewer feedback on #1871: remote `--host/--port` setup commands must
+# carry `--base-url`; IPv6 literals/scoped addresses must be bracket-wrapped;
+# `connect --port` must reuse the validated `_port_arg`.)
+
+
+def test_claude_remote_endpoint_passthrough(monkeypatch):
+    """`--host/--port` must flow into the suggested `--base-url` for claude."""
+    monkeypatch.setattr(
+        connect,
+        "resolve_endpoints",
+        lambda **kw: connect.ServerEndpoints("mini.local", 9000, model=None),
+    )
+    out = _run_connect(target="claude-code")
+    assert "http://mini.local:9000/v1" in out
+    assert "rapid-mlx agents claude-code --setup" in out
+    assert "--base-url http://mini.local:9000/v1" in out
+
+
+def test_continue_remote_endpoint_passthrough(monkeypatch):
+    """`--host/--port` must flow into the suggested `--base-url` for continue."""
+    monkeypatch.setattr(
+        connect,
+        "resolve_endpoints",
+        lambda **kw: connect.ServerEndpoints("mini.local", 9000, model=None),
+    )
+    out = _run_connect(target="continue")
+    assert "http://mini.local:9000/v1" in out
+    assert "--base-url http://mini.local:9000/v1" in out
+
+
+def test_claude_localhost_keeps_default_base_url(monkeypatch):
+    """Default localhost:8000 setup command still emits an explicit base url."""
+    monkeypatch.setattr(
+        connect,
+        "resolve_endpoints",
+        lambda **kw: connect.ServerEndpoints("localhost", 8000, model=None),
+    )
+    out = _run_connect(target="claude-code")
+    assert "--base-url http://localhost:8000/v1" in out
+
+
+def test_ipv6_literal_bracketing():
+    ep = _endpoints(host="::1", port=8000)
+    assert ep.base_url == "http://[::1]:8000"
+    assert ep.openai_url == "http://[::1]:8000/v1"
+    assert ep.anthropic_url == "http://[::1]:8000"
+
+
+def test_ipv6_scoped_address_bracketing():
+    # Scoped zone-id address must still be bracket-wrapped.
+    ep = _endpoints(host="fe80::1%en0", port=8000)
+    assert ep.base_url == "http://[fe80::1%en0]:8000"
+    assert ep.openai_url == "http://[fe80::1%en0]:8000/v1"
+
+
+def test_ipv6_banner_renders_bracketed(monkeypatch):
+    monkeypatch.setattr(
+        connect,
+        "resolve_endpoints",
+        lambda **kw: connect.ServerEndpoints("::1", 8000, model=None),
+    )
+    out = _run_connect()
+    assert "Ready: http://[::1]:8000" in out
+    assert "OpenAI:    http://[::1]:8000/v1" in out
+
+
+def test_ipv6_json_renders_bracketed(monkeypatch):
+    monkeypatch.setattr(
+        connect,
+        "resolve_endpoints",
+        lambda **kw: connect.ServerEndpoints("::1", 8000, model="m1"),
+    )
+    payload = json.loads(_run_connect(json_=True))
+    assert payload["ready"] == "http://[::1]:8000"
+    assert payload["openai"] == "http://[::1]:8000/v1"
+    assert payload["anthropic"] == "http://[::1]:8000"
+
+
+def test_connect_invalid_port_rejected():
+    """`connect --port` must reuse `_port_arg`, rejecting 0 / out-of-range."""
+    from vllm_mlx.cli import build_parser
+
+    parser = build_parser()
+    for bad in ("0", "70000", "-1", "65536"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["connect", "--port", bad])
+
+
+def test_connect_valid_port_accepted():
+    """`connect --port` accepts a legitimate in-range value."""
+    from vllm_mlx.cli import build_parser
+
+    args = build_parser().parse_args(["connect", "--port", "9000", "--host", "x"])
+    assert args.port == 9000
+    assert args.host == "x"
