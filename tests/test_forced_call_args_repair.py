@@ -66,6 +66,34 @@ def test_recovery_from_raw_text_preferred_over_empty():
     assert json.loads(tc.function.arguments) == {"note": "hi"}
 
 
+def test_dict_arguments_normalized_to_json_string():
+    """codex r3: a dict-typed arguments value is valid CONTENT but the
+    wrong wire SHAPE — normalize to a JSON-encoded string, preserving
+    the content, never discarding it."""
+    import json
+
+    tc = _call({"note": "keep me"})
+    err = _repair_forced_call_arguments([tc], "", "release_probe", [_tool()])
+    assert err is None
+    assert isinstance(tc.function.arguments, str)
+    assert json.loads(tc.function.arguments) == {"note": "keep me"}
+
+
+def test_recovery_skipped_when_valid_sibling_call_present():
+    """codex r3: recovery must not lift a VALID sibling call's
+    arguments into the broken one — with any other call present, the
+    broken call repairs to {}."""
+    import json
+
+    good = _call('{"note": "mine"}')
+    bad = _call("1")
+    raw = '<tool_call>{"name": "release_probe", "arguments": {"note": "mine"}}'
+    err = _repair_forced_call_arguments([good, bad], raw, "release_probe", [_tool()])
+    assert err is None
+    assert json.loads(good.function.arguments) == {"note": "mine"}
+    assert json.loads(bad.function.arguments) == {}
+
+
 def test_multiple_broken_calls_never_share_recovered_args():
     """codex r2: raw-text recovery is unambiguous only for a single
     broken call — several must all repair to {} rather than every one

@@ -2812,28 +2812,33 @@ def _repair_forced_call_arguments(tool_calls, raw_text, target, tools):
     string (caller 422s) or ``None``.
     """
 
-    def _is_object_args(args) -> bool:
+    broken = []
+    for tc in tool_calls or []:
+        args = tc.function.arguments
         if isinstance(args, dict):
-            return True
+            # Content is a valid object — normalize the SHAPE to the
+            # OpenAI wire (arguments is a JSON-encoded string), never
+            # discard it (codex r3 on #1880).
+            tc.function.arguments = json.dumps(args)
+            continue
         if isinstance(args, str):
             try:
-                return isinstance(json.loads(args), dict)
+                if isinstance(json.loads(args), dict):
+                    continue
             except (ValueError, TypeError):
-                return False
-        return False
-
-    broken = [
-        tc for tc in tool_calls or [] if not _is_object_args(tc.function.arguments)
-    ]
+                pass
+        broken.append(tc)
     if not broken:
         return None
-    # Raw-text recovery is only unambiguous for a SINGLE broken call —
-    # with several, they would all receive the same first recovered
-    # object, silently corrupting the later calls (codex r2). Ambiguous
-    # cases repair to "{}".
+    # Raw-text recovery is only unambiguous when the broken call is the
+    # ONLY call in the turn: with several broken they would all receive
+    # the same first recovered object (codex r2), and with a broken call
+    # NEXT TO valid ones the recovery would lift a VALID call's
+    # arguments into the broken one (codex r3). Ambiguous cases repair
+    # to "{}".
     recovered = (
         _recover_partial_tool_args(raw_text, expected_name=target)
-        if len(broken) == 1
+        if len(broken) == 1 and len(tool_calls or []) == 1
         else None
     )
     repaired = recovered if recovered is not None else "{}"
