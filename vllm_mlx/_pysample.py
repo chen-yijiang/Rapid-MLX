@@ -41,11 +41,17 @@ def install() -> bool:
     counters: dict[str, Counter] = {}
     names: dict[int, str] = {}
     self_ident: list[int] = []
+    # The atexit report races the daemon sampler over ``counters``
+    # (RuntimeError: dict changed size during iteration — codex r1 on
+    # #1878): snapshot under a lock shared with the sampling loop.
+    lock = threading.Lock()
 
     def _report():
+        with lock:
+            snapshot = {tname: ctr.copy() for tname, ctr in counters.items()}
         try:
             with open(out_path, "w") as fh:
-                for tname, ctr in sorted(counters.items()):
+                for tname, ctr in sorted(snapshot.items()):
                     total = sum(ctr.values())
                     fh.write(f"== thread {tname} samples={total}\n")
                     for sig, n in ctr.most_common(30):
@@ -61,11 +67,13 @@ def install() -> bool:
             time.sleep(_INTERVAL_S)
             for t in threading.enumerate():
                 names[t.ident] = t.name
-            for ident, frame in sys._current_frames().items():
-                if ident in self_ident:
-                    continue
-                tname = names.get(ident, str(ident))
-                counters.setdefault(tname, Counter())[_signature(frame)] += 1
+            frames = sys._current_frames()
+            with lock:
+                for ident, frame in frames.items():
+                    if ident in self_ident:
+                        continue
+                    tname = names.get(ident, str(ident))
+                    counters.setdefault(tname, Counter())[_signature(frame)] += 1
             now = time.monotonic()
             if now - last_report >= _REPORT_EVERY_S:
                 last_report = now

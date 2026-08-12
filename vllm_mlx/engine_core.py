@@ -563,17 +563,35 @@ class EngineCore:
                 ticks,
             )
 
-    def _step_coalesced(self, max_steps: int) -> list:
+    def _step_coalesced(self, max_steps: int) -> tuple[list, BaseException | None]:
         """Run up to ``max_steps`` scheduler steps on the mlx-step thread.
 
         Breaks early the moment a step finishes a request (its event must
         fire promptly), reports no work, or new requests are waiting for
         admission — so coalescing only ever batches the steady mid-stream
         decode ticks where the executor round-trip is pure overhead.
+
+        Returns ``(outputs, error)``: a later step can raise AFTER
+        earlier steps already advanced scheduler state, and those steps'
+        outputs must still reach the collectors — dropping them loses
+        tokens and leaves finish events unset (codex r1 on #1878). The
+        caller delivers ``outputs`` first, then handles ``error`` with
+        the same failure accounting as a single-step exception.
+
+        The waiting-queue early exit only covers work already pending at
+        dispatch time: an admission arriving MID-batch queues its
+        ``add_request`` behind this very executor call, so
+        ``get_num_waiting()`` cannot observe it — such a request waits
+        at most the remaining coalesced steps (bounded by max_steps=4).
         """
-        outs = []
+        outs: list = []
+        err: BaseException | None = None
         for _ in range(max_steps):
-            out = self.scheduler.step()
+            try:
+                out = self.scheduler.step()
+            except BaseException as exc:  # deliver partial outputs first
+                err = exc
+                break
             outs.append(out)
             if (
                 out.finished_request_ids
@@ -581,7 +599,7 @@ class EngineCore:
                 or self.scheduler.get_num_waiting() > 0
             ):
                 break
-        return outs
+        return outs, err
 
     def _run_pressure_evict_tick(self) -> None:
         """D-METAL-PFX: drive the scheduler pressure-eviction loop once.
@@ -721,8 +739,9 @@ class EngineCore:
                     # engine-loop tests predate this method; absent -> 0 ->
                     # no coalescing, i.e. the pre-coalescing behavior.
                     _active = getattr(self.scheduler, "get_num_running", lambda: 0)()
+                    _step_exc: BaseException | None = None
                     if _active >= 4:
-                        step_outputs = await loop.run_in_executor(
+                        step_outputs, _step_exc = await loop.run_in_executor(
                             _executor,
                             self._step_coalesced,
                             min(4, max(2, _active // 2)),
@@ -732,7 +751,8 @@ class EngineCore:
                             await loop.run_in_executor(_executor, self.scheduler.step)
                         ]
                     self._steps_executed += len(step_outputs)
-                    _consecutive_step_failures = 0
+                    if _step_exc is None:
+                        _consecutive_step_failures = 0
 
                     # Emergency memory pressure check. With coalescing the
                     # counter can jump past an exact multiple, so fire when
@@ -825,6 +845,13 @@ class EngineCore:
                             # request still in scheduler) block the entire event loop,
                             # making the server unresponsive to all HTTP requests.
                             await asyncio.sleep(0)
+
+                    # A later coalesced step may have failed AFTER the
+                    # outputs above were produced — surface it only now
+                    # that they are delivered, through the same failure
+                    # accounting as a single-step exception.
+                    if _step_exc is not None:
+                        raise _step_exc
                 else:
                     # No work — block until ``add_request`` sets the
                     # event, with a long fallback timeout for
