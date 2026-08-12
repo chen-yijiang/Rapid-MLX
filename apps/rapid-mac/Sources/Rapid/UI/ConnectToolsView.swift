@@ -36,9 +36,11 @@ struct ConnectToolsView: View {
     /// snapshot harness, which has no live server to resolve against.
     var readiness: ModelReadiness? = nil
     var onReadinessAction: (ModelReadiness.Action) -> Void = { _ in }
+    @State private var integrationTargets: [IntegrationTarget] = []
 
     private var openAIBaseURL: String { "http://\(host):\(port)/v1" }
     private var anthropicBaseURL: String { "http://\(host):\(port)" }
+    private var serverOrigin: String { "http://\(host):\(port)" }
 
     /// The model id to publish in a config, or ``nil`` when no real
     /// model is resolved yet. Deliberately not defaulted to a
@@ -106,6 +108,9 @@ struct ConnectToolsView: View {
         // so we keep it rather than the PR's inline frame.
         .modifier(ConnectToolsFrame(fixedSize: showsCloseButton))
         .background(RapidTheme.surfaceCanvas)
+        .task {
+            integrationTargets = await IntegrationCatalog.load()
+        }
     }
 
     /// The scrollable content. Factored out so the snapshot harness can
@@ -235,6 +240,31 @@ struct ConnectToolsView: View {
     // MARK: - Tool definitions
 
     private var tools: [ConnectTool] {
+        guard !integrationTargets.isEmpty else { return legacyTools }
+        return integrationTargets.map { target in
+            let isWriter = target.kind == .configWriter
+            let command: String
+            if isWriter {
+                command = "rapid-mlx launch \(target.id) --server-url \(serverOrigin) --model \(snippetModel)"
+            } else {
+                command = "rapid-mlx agents \(target.id) --base-url \(openAIBaseURL) --model \(snippetModel)"
+            }
+            let destination = target.configPath.map { " It writes \($0)." } ?? ""
+            return ConnectTool(
+                id: target.id,
+                name: target.name,
+                symbol: isWriter ? "slider.horizontal.3" : "point.3.connected.trianglepath.dotted",
+                blurb: isWriter
+                    ? "Configure this client to use Rapid-MLX.\(destination)"
+                    : "View this adapter's setup guide for the local endpoint.",
+                snippet: command,
+                displaySnippet: command
+            )
+        }
+    }
+
+    /// Available while an older or missing sidecar cannot expose the registry.
+    private var legacyTools: [ConnectTool] {
         [
             ConnectTool(
                 id: "claude-code",
@@ -451,6 +481,7 @@ private struct ConnectToolRow: View {
         }
         .padding(.horizontal, RapidTheme.Space.xl - 4)
         .padding(.vertical, RapidTheme.Space.lg + 1)
+        .accessibilityIdentifier("Launch.Integration.\(tool.id)")
     }
 
     private func copy() {
