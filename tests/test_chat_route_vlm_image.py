@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient
 
 from vllm_mlx.config import reset_config
 from vllm_mlx.engine.base import GenerationOutput
+from vllm_mlx.request import ClientRequestError
 from vllm_mlx.routes.chat import router as chat_router
 
 
@@ -89,7 +90,7 @@ class _StubMLLMEngine:
     async def stream_chat(self, messages, **kwargs):
         self.stream_calls.append({"messages": messages, "kwargs": kwargs})
         if self._raise_msg is not None:
-            raise ValueError(self._raise_msg)
+            raise ClientRequestError(self._raise_msg)
         text = "A blue background."
         yield GenerationOutput(
             text=text,
@@ -293,6 +294,54 @@ def test_chat_route_maps_image_fetch_error_to_http_400_still_works():
     }
     resp = client.post("/v1/chat/completions", json=payload)
     assert resp.status_code == 400
+
+
+def test_streaming_bad_image_returns_http_400_before_sse_headers():
+    """A lazy MLLM prefill rejection must not be disguised as SSE HTTP 200."""
+    engine = _StubMLLMEngine(
+        raise_msg=(
+            "Failed to process image: unable to decode the supplied image; "
+            "provide a valid PNG, JPEG, GIF, or WebP file."
+        )
+    )
+    client = _make_client(engine)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "qwen3-vl-8b-4bit",
+            "messages": [_multipart_user_message("describe")],
+            "max_tokens": 16,
+            "stream": True,
+        },
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert resp.headers["content-type"].startswith("application/json")
+    assert "Failed to process image" in resp.json()["detail"]
+    assert "data:" not in resp.text
+
+
+def test_streaming_valid_mllm_replays_preflight_chunks_once():
+    """Successful preflight preserves normal role/content/DONE ordering."""
+    engine = _StubMLLMEngine()
+    client = _make_client(engine)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "qwen3-vl-8b-4bit",
+            "messages": [_multipart_user_message("describe")],
+            "max_tokens": 16,
+            "stream": True,
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.text.count('"role":"assistant"') == 1
+    assert resp.text.count('"content":"A blue background."') == 1
+    assert resp.text.rstrip().endswith("data: [DONE]")
+    assert len(engine.stream_calls) == 1
 
 
 if __name__ == "__main__":
