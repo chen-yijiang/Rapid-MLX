@@ -244,21 +244,33 @@ struct ConnectToolsView: View {
         return integrationTargets.map { target in
             let isWriter = target.kind == .configWriter
             let command: String
+            let displayCommand: String
             if isWriter {
-                command = "rapid-mlx launch \(target.id) --server-url \(serverOrigin) --model \(snippetModel)"
+                command = IntegrationLaunchCommand.configWriter(
+                    id: target.id, serverURL: serverOrigin, key: snippetKey, model: snippetModel
+                )
+                displayCommand = IntegrationLaunchCommand.configWriter(
+                    id: target.id, serverURL: serverOrigin, key: snippetKeyMasked, model: snippetModel
+                )
             } else {
-                command = "rapid-mlx agents \(target.id) --base-url \(openAIBaseURL) --model \(snippetModel)"
+                command = IntegrationLaunchCommand.adapterGuide(
+                    id: target.id, baseURL: openAIBaseURL, model: snippetModel
+                )
+                displayCommand = command
             }
             let destination = target.configPath.map { " It writes \($0)." } ?? ""
+            let cursorCaveat = target.id == "cursor"
+                ? " Cursor requires a public HTTPS endpoint; localhost cannot be reached by Cursor's backend."
+                : ""
             return ConnectTool(
                 id: target.id,
                 name: target.name,
                 symbol: isWriter ? "slider.horizontal.3" : "point.3.connected.trianglepath.dotted",
                 blurb: isWriter
-                    ? "Configure this client to use Rapid-MLX.\(destination)"
+                    ? "Configure this client to use Rapid-MLX.\(destination)\(cursorCaveat)"
                     : "View this adapter's setup guide for the local endpoint.",
                 snippet: command,
-                displaySnippet: command
+                displaySnippet: displayCommand
             )
         }
     }
@@ -328,6 +340,16 @@ enum AgentLaunchCommand {
     static func hermes(baseURL: String, key: String, model: String) -> String {
         "env OPENAI_BASE_URL=\(baseURL) OPENAI_API_KEY=\(key) HERMES_INFERENCE_MODEL=\(model) "
             + "hermes --provider openai-api --ignore-user-config"
+    }
+}
+
+enum IntegrationLaunchCommand {
+    static func configWriter(id: String, serverURL: String, key: String, model: String) -> String {
+        "env RAPID_MLX_API_KEY=\(key) rapid-mlx launch \(id) --server-url \(serverURL) --model \(model)"
+    }
+
+    static func adapterGuide(id: String, baseURL: String, model: String) -> String {
+        "rapid-mlx agents \(id) --base-url \(baseURL) --model \(model)"
     }
 }
 
