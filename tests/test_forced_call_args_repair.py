@@ -80,6 +80,25 @@ def test_multiple_broken_calls_never_share_recovered_args():
     assert json.loads(b.function.arguments) == {}
 
 
+def test_wire_envelope_names_decodes_escapes_and_ignores_prose():
+    """codex r2 on #1880: envelope decoding (not a literal regex) so
+    escaped names cannot evade the mismatch gate and prose outside
+    envelopes contributes nothing."""
+    from vllm_mlx.routes.chat import _wire_envelope_names
+
+    # Escaped different-tool name decodes and mismatches.
+    raw = '<tool_call>{"name": "other\\u005ftool", "arguments": 1}</tool_call>'
+    assert _wire_envelope_names(raw) == ["other_tool"]
+    # Prose mentioning "name": "release_probe" outside an envelope is inert.
+    raw2 = 'the "name": "release_probe" field... <tool_call>{"name": "x", "arguments": 1}</tool_call>'
+    assert _wire_envelope_names(raw2) == ["x"]
+    # The live dogfood shape: valid JSON, scalar arguments, missing closer.
+    raw3 = '<tool_call>\n{"name": "release_probe", "arguments": 1}'
+    assert _wire_envelope_names(raw3) == ["release_probe"]
+    # Undecodable envelope refuses (None), never permits.
+    assert _wire_envelope_names("<tool_call>garbage no brace") is None
+
+
 def test_schema_required_violation_surfaces_error():
     """The repair must not fabricate a passing call when the tool's
     schema requires properties the repaired arguments cannot provide —

@@ -2764,6 +2764,36 @@ def _scrub_tool_wire_literals(text: str | None) -> str:
     return re.sub(r"\s+", " ", result).strip()
 
 
+def _wire_envelope_names(raw_text: str) -> list[str] | None:
+    """Decode the ``name`` fields of ``<tool_call>`` envelope bodies.
+
+    Used by the streaming detected-but-unemitted synthesis gate: JSON
+    decoding (not a literal regex) so escaped names cannot evade the
+    mismatch check, and prose OUTSIDE envelopes contributes nothing.
+    Returns ``None`` when any envelope body fails to decode — unknown
+    content must refuse synthesis, never permit it.
+    """
+    names: list[str] = []
+    for chunk in raw_text.split("<tool_call>")[1:]:
+        body = chunk.split("</tool_call>")[0].strip()
+        obj = None
+        try:
+            obj = json.loads(body)
+        except ValueError:
+            # Tolerate a stream cut after the closing brace (missing
+            # closer): retry up to the last balanced brace.
+            end = body.rfind("}")
+            if end >= 0:
+                try:
+                    obj = json.loads(body[: end + 1])
+                except ValueError:
+                    obj = None
+        if not isinstance(obj, dict):
+            return None
+        names.append(str(obj.get("name")))
+    return names
+
+
 def _repair_forced_call_arguments(tool_calls, raw_text, target, tools):
     """Repair parsed forced-call arguments that are not a JSON object.
 
@@ -6693,13 +6723,14 @@ async def stream_chat_completion(
                 # 2026-08-12: hermes ``"arguments": 1`` on 35B streams
                 # zero deltas) — synthesis then REPAIRS the same call,
                 # matching the non-stream arguments-repair path.
-                # ALL wire-shaped name literals must match the pinned
-                # target — the first-match form was bypassable by prose
-                # mentioning the target ahead of a real call to a
-                # different tool (codex r2). Any different name refuses
-                # (the conservative pre-fix behavior); prose that only
-                # repeats the target adds equal matches and stays safe.
-                _wire_names = re.findall(r'"name"\s*:\s*"([^"]*)"', _raw_text or "")
+                # Decode names from the tool-call ENVELOPES rather than
+                # regexing raw text: JSON decoding handles escaped
+                # names (codex r2 — a regex over literals could be
+                # evaded), and prose outside envelopes can no longer
+                # contribute matches. Any envelope that fails to decode,
+                # or names a different tool, refuses (the conservative
+                # pre-fix behavior).
+                _wire_names = _wire_envelope_names(_raw_text or "")
                 if not _wire_names or any(n != _synth_target for n in _wire_names):
                     _synth_target = None
             if _synth_target:
