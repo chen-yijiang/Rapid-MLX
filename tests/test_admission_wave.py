@@ -234,6 +234,17 @@ def test_warmup_detection_mllm_excluded():
     assert _detect_hybrid_for_warmup(_WarmupEngine(is_mllm=True)) is False
 
 
+def test_warmup_detection_mllm_wins_over_hybrid_probe():
+    """MLLM exclusion runs BEFORE the hybrid probe (pr_validate codex r3
+    BLOCKING): an MLLM engine whose probe answers True must still take
+    the bare-warmup path. Unreachable today (hybrid VLMs auto-downgrade
+    to the text lane, #352) but must fail closed if that ever changes."""
+    from vllm_mlx.server import _detect_hybrid_for_warmup
+
+    eng = _WarmupEngine(hybrid_probe=lambda: True, is_mllm=True)
+    assert _detect_hybrid_for_warmup(eng) is False
+
+
 def test_add_request_bumps_admission_seq():
     """Wiring guard: ``add_request`` must move the counter the window
     watches — the increment sits at the very top of the method, before

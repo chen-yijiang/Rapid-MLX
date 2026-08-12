@@ -527,13 +527,18 @@ def _detect_hybrid_for_warmup(engine) -> bool:
        detection through the wrapper layers — retained unchanged as the
        fallback for engine wrappers that do not expose the probe.
 
-    MLLM engines are excluded (their warmup path is separate).
+    MLLM engines are excluded FIRST, before either signal (their warmup
+    path is separate). Today the combination cannot arise — hybrid VLMs
+    auto-downgrade to the text lane because the MLLM engine cannot build
+    a BatchKVCache over an ArraysCache backbone (#352) — but if the MLLM
+    lane ever gains hybrid support, warmup must fail closed to the bare
+    path rather than silently entering the hybrid one.
     """
+    if getattr(engine, "_is_mllm", False):
+        return False
     probe = getattr(engine, "_is_hybrid_model", None)
     if callable(probe) and bool(probe()):
         return True
-    if getattr(engine, "_is_mllm", False):
-        return False
     model = getattr(engine, "_model", None) or getattr(engine, "_shared_model", None)
     if model and hasattr(model, "model") and not hasattr(model, "make_cache"):
         model = model.model
