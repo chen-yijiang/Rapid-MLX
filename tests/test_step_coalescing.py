@@ -22,16 +22,23 @@ def _out(finished=(), has_work=True):
 
 
 class _ScriptedScheduler:
-    """Yields scripted step results; an Exception instance raises."""
+    """Yields scripted step results; an Exception instance raises.
 
-    def __init__(self, script, waiting=0):
+    ``consume_waiting`` mirrors the real scheduler: step() ADMITS the
+    waiting queue into the batch, so the count reads 0 afterwards.
+    """
+
+    def __init__(self, script, waiting=0, consume_waiting=False):
         self.script = list(script)
         self.calls = 0
         self._waiting = waiting
+        self._consume = consume_waiting
 
     def step(self):
         self.calls += 1
         item = self.script.pop(0)
+        if self._consume:
+            self._waiting = 0
         if isinstance(item, Exception):
             raise item
         return item
@@ -74,6 +81,20 @@ def test_breaks_on_pending_admissions():
     outs, err = _engine(sched)._step_coalesced(4)
     assert err is None
     assert len(outs) == 1  # work was already waiting at dispatch time
+
+
+def test_breaks_when_step_consumes_waiting_queue():
+    """codex r3 BLOCKING: the real scheduler ADMITS the waiting queue
+    inside step(), so a post-step check reads 0 for exactly the request
+    whose first output must not sit out the rest of a coalesced batch.
+    The pre-step snapshot must stop coalescing after that step."""
+    sched = _ScriptedScheduler(
+        [_out(), _out(), _out()], waiting=1, consume_waiting=True
+    )
+    outs, err = _engine(sched)._step_coalesced(4)
+    assert err is None
+    assert len(outs) == 1
+    assert sched.calls == 1
 
 
 def test_partial_outputs_preserved_on_error():

@@ -587,6 +587,11 @@ class EngineCore:
         outs: list = []
         err: BaseException | None = None
         for _ in range(max_steps):
+            # Snapshot BEFORE stepping: step() itself admits waiting
+            # requests into the batch, so a post-step check reads 0 for
+            # exactly the request whose first output must not wait out
+            # the rest of a coalesced batch (codex r3 on #1878).
+            waiting_before = self.scheduler.get_num_waiting()
             try:
                 out = self.scheduler.step()
             except BaseException as exc:  # deliver partial outputs first
@@ -596,6 +601,7 @@ class EngineCore:
             if (
                 out.finished_request_ids
                 or not out.has_work
+                or waiting_before > 0
                 or self.scheduler.get_num_waiting() > 0
             ):
                 break
