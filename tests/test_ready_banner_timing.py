@@ -72,9 +72,16 @@ async def test_ready_banner_emitted_when_bind_fields_set():
     assert "OpenAI:    http://localhost:8765/v1" in out
     assert "Anthropic: http://localhost:8765" in out
     assert "Model:     qwen3.6-35b-4bit" in out
-    # Connect section mirrors what a user runs to wire up each tool.
-    assert "rapid-mlx agents claude-code --setup" in out
-    assert "rapid-mlx agents continue --setup" in out
+    # Connect section mirrors what a user runs to wire up each tool. The
+    # setup commands must carry the real endpoint (--base-url) so a user who
+    # copies them connects to the running server, not the localhost default.
+    assert (
+        "rapid-mlx agents claude-code --setup "
+        "--base-url http://localhost:8765/v1" in out
+    )
+    assert (
+        "rapid-mlx agents continue --setup --base-url http://localhost:8765/v1" in out
+    )
     assert "rapid-mlx connect openai-python" in out
     # `ready` flag must be flipped before the banner so /health/ready and
     # the banner agree on the moment of readiness.

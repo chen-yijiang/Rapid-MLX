@@ -43,8 +43,19 @@ def _authority(host: str) -> str:
     in square brackets in a URI authority, e.g. ``http://[::1]:8000``.
     Uses the same lexical ``":" in host`` rule as the serve CLI's
     ``_is_ipv6_host`` so zone-id scoped addresses are also detected.
+
+    The zone-id separator ``%`` is percent-encoded as ``%25`` to keep the
+    URL well-formed per RFC 6874 (zone identifiers are delimited by ``%25``
+    in URIs), e.g. ``http://[fe80::1%25en0]:8000``.
     """
-    return f"[{host}]" if ":" in host else host
+    if ":" not in host:
+        return host
+    bracketed = f"[{host}]"
+    if "%" in host:
+        # Percent-encode every raw `%` (the zone-id separator) so the URL
+        # stays well-formed and parser-friendly.
+        bracketed = bracketed.replace("%", "%25")
+    return bracketed
 
 
 @dataclass(frozen=True)
@@ -103,13 +114,16 @@ class ServerEndpoints:
 
 
 # The ``--setup`` verbs printed in the human banner's "Connect:" section.
-# These are the exact commands a user runs to point each tool at the
-# server. ``openai-python`` writes no config file, so its entry is the
-# ``rapid-mlx connect openai-python`` snippet-printing command.
-_CONNECT_ROWS: list[tuple[str, str]] = [
-    ("Claude Code", "rapid-mlx agents claude-code --setup"),
-    ("Continue", "rapid-mlx agents continue --setup"),
-    ("Python", "rapid-mlx connect openai-python"),
+# Each row is ``(app label, command prefix, OpenAI endpoint?)``. Rows that
+# point a first-class agent at the server (`claude-code`, `continue`) take an
+# OpenAI-style ``/v1`` base URL and get ``--base-url <url>`` appended so the
+# copied command targets the *actual* running server, not the localhost
+# default the agent would otherwise assume. ``openai-python`` writes no config
+# and just prints a snippet, so it carries no ``--base-url``.
+_CONNECT_ROWS: list[tuple[str, str, bool]] = [
+    ("Claude Code", "rapid-mlx agents claude-code --setup", True),
+    ("Continue", "rapid-mlx agents continue --setup", True),
+    ("Python", "rapid-mlx connect openai-python", False),
 ]
 
 
@@ -134,9 +148,12 @@ def render_banner(ep: ServerEndpoints, *, include_connect: bool = True) -> str:
     if include_connect and ep.listen_fd is None:
         lines.append("")
         lines.append("  Connect:")
-        width = max(len(a) for a, _ in _CONNECT_ROWS)
-        for app, cmd in _CONNECT_ROWS:
-            lines.append(f"    {app:<{width}}  {cmd}")
+        width = max(len(a) for a, _, _ in _CONNECT_ROWS)
+        for app, cmd, needs_endpoint in _CONNECT_ROWS:
+            rendered = cmd
+            if needs_endpoint:
+                rendered += f" --base-url {ep.openai_url}"
+            lines.append(f"    {app:<{width}}  {rendered}")
 
     return "\n".join(lines) + "\n"
 
@@ -189,12 +206,14 @@ def resolve_endpoints(
     else:
         out_port = 8000
 
+    # Explicit --model wins outright; then config model fields; neither
+    # present means we may fall back to probing a *running* server.
     out_model = model or cfg.model_alias or cfg.model_name
 
-    # Try live detection only when nothing authoritative was supplied.
-    if (out_model is None or out_host == "localhost" and out_port == 8000) and (
-        cfg.bind_host is None and cfg.bind_port is None
-    ):
+    # Probe (best-effort) only when no model was supplied anywhere AND no
+    # authoritative bind config pins the target. The probe result must never
+    # overwrite an explicit `--model` (flags > config > defaults).
+    if out_model is None and cfg.bind_host is None and cfg.bind_port is None:
         detected_model = _probe_running_model(out_host, out_port)
         if detected_model:
             out_model = detected_model

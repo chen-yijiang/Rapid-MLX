@@ -71,8 +71,15 @@ def test_render_banner_matches_spec():
     assert "OpenAI:    http://localhost:8000/v1" in out
     assert "Anthropic: http://localhost:8000" in out
     assert "Model:     qwen3.6-35b-4bit" in out
-    assert "rapid-mlx agents claude-code --setup" in out
-    assert "rapid-mlx agents continue --setup" in out
+    # First-class agent setup commands carry the real endpoint so a user
+    # copying from the banner wires up the actual server, not localhost.
+    assert (
+        "rapid-mlx agents claude-code --setup --base-url http://localhost:8000/v1"
+        in out
+    )
+    assert (
+        "rapid-mlx agents continue --setup --base-url http://localhost:8000/v1" in out
+    )
     assert "rapid-mlx connect openai-python" in out
 
 
@@ -235,10 +242,11 @@ def test_ipv6_literal_bracketing():
 
 
 def test_ipv6_scoped_address_bracketing():
-    # Scoped zone-id address must still be bracket-wrapped.
+    # Scoped (zone-id) address must be bracket-wrapped AND the zone-id `%`
+    # percent-encoded as %25 per RFC 6874.
     ep = _endpoints(host="fe80::1%en0", port=8000)
-    assert ep.base_url == "http://[fe80::1%en0]:8000"
-    assert ep.openai_url == "http://[fe80::1%en0]:8000/v1"
+    assert ep.base_url == "http://[fe80::1%25en0]:8000"
+    assert ep.openai_url == "http://[fe80::1%25en0]:8000/v1"
 
 
 def test_ipv6_banner_renders_bracketed(monkeypatch):
@@ -281,3 +289,74 @@ def test_connect_valid_port_accepted():
     args = build_parser().parse_args(["connect", "--port", "9000", "--host", "x"])
     assert args.port == 9000
     assert args.host == "x"
+
+
+# --- Review round 2: banner must carry endpoint; explicit --model must win ----
+def test_render_banner_connect_carries_remote_endpoint():
+    """Copying the Ready banner's setup command must target the real server."""
+    out = connect.render_banner(connect.ServerEndpoints("mini.local", 9000, model="m1"))
+    assert (
+        "rapid-mlx agents claude-code --setup "
+        "--base-url http://mini.local:9000/v1" in out
+    )
+    assert (
+        "rapid-mlx agents continue --setup --base-url http://mini.local:9000/v1" in out
+    )
+
+
+def test_render_banner_connect_carries_ipv6_endpoint():
+    out = connect.render_banner(connect.ServerEndpoints("::1", 8000, model="m1"))
+    assert "--base-url http://[::1]:8000/v1" in out
+
+
+def test_resolve_endpoints_preserves_explicit_model(monkeypatch):
+    """An explicit --model must never be overwritten by a live probe."""
+    from vllm_mlx.config import get_config
+
+    probe_called = []
+
+    def fake_probe(host, port):
+        probe_called.append((host, port))
+        return "server-says-other-model"
+
+    monkeypatch.setattr(connect, "_probe_running_model", fake_probe)
+
+    cfg = get_config()
+    cfg.bind_host = None
+    cfg.bind_port = None
+    cfg.model_alias = None
+    cfg.model_name = None
+
+    ep = connect.resolve_endpoints(model="explicitly-requested")
+    assert ep.model == "explicitly-requested"
+    assert probe_called == []  # probe must not run when --model is explicit
+
+
+def test_resolve_endpoints_probes_when_no_model(monkeypatch):
+    """Live probe still fills in the model when none was supplied anywhere."""
+    from vllm_mlx.config import get_config
+
+    probe_called = []
+
+    def fake_probe(host, port):
+        probe_called.append((host, port))
+        return "probed-model"
+
+    monkeypatch.setattr(connect, "_probe_running_model", fake_probe)
+
+    cfg = get_config()
+    cfg.bind_host = None
+    cfg.bind_port = None
+    cfg.model_alias = None
+    cfg.model_name = None
+
+    ep = connect.resolve_endpoints()
+    assert ep.model == "probed-model"
+    assert probe_called == [("localhost", 8000)]
+
+
+def test_ipv6_scoped_zone_id_config_and_banner_agree():
+    """Banner Connect command and endpoint rows both use the %25 form."""
+    out = connect.render_banner(connect.ServerEndpoints("fe80::1%en0", 8000, model="m"))
+    assert "Ready: http://[fe80::1%25en0]:8000" in out
+    assert "--base-url http://[fe80::1%25en0]:8000/v1" in out
