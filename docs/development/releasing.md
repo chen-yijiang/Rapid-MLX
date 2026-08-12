@@ -182,7 +182,9 @@ This is the rule. No exceptions. CI doesn't fake-inference with a tiny model on 
 
 **Every bump PR** (title matches `chore: bump version to X.Y.Z`) → `release-preflight.yml` adds PF-1, PF-2, G1, G10 (advisory), G11. The `preflight-summary` job aggregates them so the bump PR has a single required check.
 
-PF-2 derives its required set from `rapid-mac-release.yml` itself rather than a list maintained here, so a step that starts needing a new secret extends the gate without anyone remembering to. It checks presence only — an expired or under-scoped token is a non-empty string and passes. It is skipped on fork PRs, where Actions withholds secrets by design.
+PF-2 derives its required set from `rapid-mac-release.yml` itself rather than a list maintained here, so a step that starts needing a new secret extends the gate without anyone remembering to. It is skipped on fork PRs, where Actions withholds secrets by design.
+
+PF-2 then probes the Cloudflare credentials, because presence is not validity — an expired or revoked token is a non-empty string and passes every presence check. Only an authoritative "this token is not active" blocks: every valid token can call `/user/tokens/verify` regardless of its permissions, so that answer cannot false-block. The R2 bucket and zone lookups are advisory, because the release needs R2 *write* and *cache purge* and neither implies the read permission those lookups use — a token scoped to exactly what the release needs can legitimately be denied them. Cache-purge permission itself is left unproven: there is no dry run, and exercising it on every bump PR to prove it works is a worse trade than not knowing. Transport errors and 5xx are advisory everywhere, so a Cloudflare blip cannot block a release.
 
 **Every PR + push to main** → `ci.yml` runs lint (ruff + audit + mandatory
 GHA SHA-pin check + parser microbench) + test-matrix (linux curated) +

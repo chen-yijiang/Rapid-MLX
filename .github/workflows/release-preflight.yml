@@ -14,6 +14,7 @@ name: Release pre-flight
 #   G11  auto-routing escape-hatch registry    macOS-14 (needs MLX)
 #   PF-1 squash subject regex pre-check        ubuntu-latest
 #   PF-2 release secret + var presence         ubuntu-latest
+#        + Cloudflare credential probe (expiry blocks; scope gaps advise)
 #
 # What this workflow does NOT cover (M3-only, runs locally — see
 # releasing.md):
@@ -116,6 +117,17 @@ jobs:
         run: |
           python scripts/check_release_secrets.py \
             .github/workflows/rapid-mac-release.yml
+
+      - name: PF-2 — release credentials are usable, not just present
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          # Read into the environment rather than interpolated into the shell,
+          # so a repository-variable value can never be parsed as script.
+          R2_BUCKET: ${{ vars.RAPID_MAC_DIST_R2_BUCKET }}
+        run: |
+          python scripts/probe_release_credentials.py --bucket "$R2_BUCKET"
 
   g1-release-smoke:
     # G1 — clean-room install + import smoke on macOS-14. Catches the
