@@ -563,7 +563,21 @@ class EngineCore:
                 ticks,
             )
 
-    def _step_coalesced(self, max_steps: int) -> tuple[list, BaseException | None]:
+    def _coalesce_budget(self, active: int, memory_check_interval: int) -> int:
+        """Steps the next dispatch may coalesce: scales with batch depth
+        but never crosses the next memory-check boundary — otherwise a
+        boundary crossed on the batch's first step would tolerate up to
+        three extra Metal allocations before the pressure check fires
+        (codex r4 on #1878). Worst case one dispatch in ``interval`` is
+        truncated; the check keeps its exact pre-coalescing cadence.
+        """
+        depth = min(4, max(2, active // 2))
+        to_boundary = memory_check_interval - (
+            self._steps_executed % memory_check_interval
+        )
+        return min(depth, to_boundary)
+
+    def _step_coalesced(self, max_steps: int) -> tuple[list, Exception | None]:
         """Run up to ``max_steps`` scheduler steps on the mlx-step thread.
 
         Breaks early the moment a step finishes a request (its event must
@@ -585,7 +599,7 @@ class EngineCore:
         at most the remaining coalesced steps (bounded by max_steps=4).
         """
         outs: list = []
-        err: BaseException | None = None
+        err: Exception | None = None
         for _ in range(max_steps):
             # Snapshot BEFORE stepping: step() itself admits waiting
             # requests into the batch, so a post-step check reads 0 for
@@ -594,7 +608,9 @@ class EngineCore:
             waiting_before = self.scheduler.get_num_waiting()
             try:
                 out = self.scheduler.step()
-            except BaseException as exc:  # deliver partial outputs first
+            except Exception as exc:  # deliver partial outputs first;
+                # process-control exceptions (SystemExit/KI) propagate
+                # immediately (codex r4 NIT).
                 err = exc
                 break
             outs.append(out)
@@ -745,12 +761,12 @@ class EngineCore:
                     # engine-loop tests predate this method; absent -> 0 ->
                     # no coalescing, i.e. the pre-coalescing behavior.
                     _active = getattr(self.scheduler, "get_num_running", lambda: 0)()
-                    _step_exc: BaseException | None = None
+                    _step_exc: Exception | None = None
                     if _active >= 4:
                         step_outputs, _step_exc = await loop.run_in_executor(
                             _executor,
                             self._step_coalesced,
-                            min(4, max(2, _active // 2)),
+                            self._coalesce_budget(_active, _memory_check_interval),
                         )
                     else:
                         step_outputs = [

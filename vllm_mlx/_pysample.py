@@ -45,6 +45,7 @@ def install() -> bool:
     # (RuntimeError: dict changed size during iteration — codex r1 on
     # #1878): snapshot under a lock shared with the sampling loop.
     lock = threading.Lock()
+    _warned: list[int] = []
 
     def _report():
         # The whole snapshot + write runs under the lock: the periodic
@@ -60,8 +61,17 @@ def install() -> bool:
                         for sig, n in ctr.most_common(30):
                             fh.write(f"{n:8d} {100.0 * n / total:5.1f}% {sig}\n")
                         fh.write("\n")
-            except OSError:
-                pass
+            except OSError as exc:
+                # Warn once — silently dropping every report would leave
+                # an operator believing profiling is active while an
+                # unwritable RAPID_PYSAMPLE path produces nothing
+                # (codex r4 NIT).
+                if not _warned:
+                    _warned.append(1)
+                    print(
+                        f"[pysample] cannot write report to {out_path}: {exc}",
+                        file=sys.stderr,
+                    )
 
     def _loop():
         self_ident.append(threading.get_ident())

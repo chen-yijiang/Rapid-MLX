@@ -97,6 +97,23 @@ def test_breaks_when_step_consumes_waiting_queue():
     assert sched.calls == 1
 
 
+def test_coalesce_budget_caps_at_memory_boundary():
+    """codex r4 BLOCKING: a dispatch must not cross the memory-check
+    boundary, or a boundary crossed on the first step tolerates up to
+    3 extra Metal allocations before the pressure check fires."""
+    eng = EngineCore.__new__(EngineCore)
+    eng._steps_executed = 0
+    assert eng._coalesce_budget(8, 16) == 4  # fresh window, full depth
+    eng._steps_executed = 14
+    assert eng._coalesce_budget(8, 16) == 2  # 2 steps to boundary
+    eng._steps_executed = 15
+    assert eng._coalesce_budget(8, 16) == 1  # boundary next step
+    eng._steps_executed = 16
+    assert eng._coalesce_budget(8, 16) == 4  # window rolled over
+    eng._steps_executed = 0
+    assert eng._coalesce_budget(4, 16) == 2  # depth scales with active
+
+
 def test_partial_outputs_preserved_on_error():
     """codex r1 BLOCKING: a later step raising must not discard outputs
     from earlier steps that already advanced scheduler state — their
