@@ -7486,7 +7486,38 @@ class Scheduler:
                     # Tighten that chunk before dispatch when a long cold or
                     # cache-miss prefill is approaching the unified-memory cap.
                     self._apply_adaptive_prefill_size()
-                    raw_next = self.batch_generator.next()
+                    if os.environ.get("RAPID_STEP_TIMING"):
+                        st = getattr(self, "_steptime", None)
+                        if st is None:
+                            # [next_samples, outside_samples, count, end_stamp]
+                            st = self._steptime = [[], [], 0, 0.0]
+                        _t0 = time.perf_counter()
+                        if st[3]:
+                            st[1].append(_t0 - st[3])
+                            st[3] = 0.0
+                        raw_next = self.batch_generator.next()
+                        st[0].append(time.perf_counter() - _t0)
+                        st[2] += 1
+                        if st[2] % 256 == 0:
+                            _nx = sorted(st[0])
+                            _ou = sorted(st[1]) or [0.0]
+                            logger.warning(
+                                "[STEPTIME] n=%d next mean=%.2f p50=%.2f "
+                                "p90=%.2f max=%.1f | outside mean=%.2f "
+                                "p50=%.2f p90=%.2f max=%.1f (ms, window)",
+                                st[2],
+                                sum(_nx) / len(_nx) * 1e3,
+                                _nx[len(_nx) // 2] * 1e3,
+                                _nx[int(len(_nx) * 0.9)] * 1e3,
+                                _nx[-1] * 1e3,
+                                sum(_ou) / len(_ou) * 1e3,
+                                _ou[len(_ou) // 2] * 1e3,
+                                _ou[int(len(_ou) * 0.9)] * 1e3,
+                                _ou[-1] * 1e3,
+                            )
+                            st[0], st[1] = [], []
+                    else:
+                        raw_next = self.batch_generator.next()
                     # Bound functional recurrent-state graphs without forcing
                     # a host synchronization on every token. Step zero arms
                     # the barrier for a newly-created scheduler; thereafter a
@@ -7578,6 +7609,9 @@ class Scheduler:
                     )
                 output.finished_request_ids = aborted_ids
                 break
+
+        if os.environ.get("RAPID_STEP_TIMING") and hasattr(self, "_steptime"):
+            self._steptime[3] = time.perf_counter()
 
         # Clear finished tracking for next step
         self.finished_req_ids = set()
