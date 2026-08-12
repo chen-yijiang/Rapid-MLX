@@ -682,6 +682,12 @@ class EngineCore:
                     # a few ms to land so it prefills aligned (no-op when
                     # anything is already running).
                     await self._await_admission_wave()
+                    # Re-check after the hold: a cancellation landing
+                    # during the awaited window can drain the scheduler,
+                    # and stepping an empty scheduler is wasted executor
+                    # work (pr_validate codex r2).
+                    if not self.scheduler.has_requests():
+                        continue
                     output = await loop.run_in_executor(_executor, self.scheduler.step)
                     self._steps_executed += 1
                     _consecutive_step_failures = 0

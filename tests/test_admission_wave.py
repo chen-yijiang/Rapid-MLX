@@ -91,7 +91,11 @@ def sleep_spy(monkeypatch):
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def test_lone_request_pays_one_tick(sleep_spy, monkeypatch):
@@ -174,28 +178,60 @@ def test_nonfinite_env_falls_back_to_default(sleep_spy, monkeypatch, bad):
     assert calls == [pytest.approx(0.008)]
 
 
-def test_server_warmup_skips_hybrid_via_profile_probe():
-    """Round-1 MAJOR regression guard: the server warmup decides
-    hybrid-skip via the engine's fail-closed ``_is_hybrid_model()``
-    probe, NOT via ``_hybrid_throttle`` (which no longer implies
-    is-hybrid now that the #115 throttle defaults OFF). Source-level
-    pin: the warmup block must call the probe and must not read
-    ``_hybrid_throttle``."""
-    import inspect
+class _WarmupEngine:
+    """Stub engine for the warmup hybrid-detection contract."""
 
-    import vllm_mlx.server as server_mod
+    def __init__(self, hybrid_probe=None, is_mllm=False, model=None):
+        if hybrid_probe is not None:
+            self._is_hybrid_model = hybrid_probe
+        self._is_mllm = is_mllm
+        if model is not None:
+            self._model = model
 
-    src = inspect.getsource(server_mod)
-    start = src.index("Warming up (compiling Metal shaders)")
-    warmup_block = src[start : start + 2000]
-    # Assert the actual CALL-SITE pattern, not a bare substring — the
-    # method name also appears in prose comments, which would keep a
-    # bare-substring assertion green after the real probe is deleted
-    # (pr_validate codex BLOCKING on the first version of this test).
-    assert 'getattr(_engine, "_is_hybrid_model"' in warmup_block
-    # The old proxy read must be gone (comments may still MENTION the
-    # attribute when explaining why the probe replaced it).
-    assert 'getattr(_engine, "_hybrid_throttle"' not in warmup_block
+
+def test_warmup_detection_uses_profile_probe():
+    """Round-1 MAJOR regression guard, behavioral: the warmup gating
+    (``_detect_hybrid_for_warmup``) must follow the engine's fail-closed
+    ``_is_hybrid_model()`` probe — NOT ``_hybrid_throttle``, which no
+    longer implies is-hybrid now that the #115 throttle defaults OFF."""
+    from vllm_mlx.server import _detect_hybrid_for_warmup
+
+    assert _detect_hybrid_for_warmup(_WarmupEngine(hybrid_probe=lambda: True)) is True
+    assert _detect_hybrid_for_warmup(_WarmupEngine(hybrid_probe=lambda: False)) is False
+    # A throttle attribute must be IGNORED — it is not a hybrid signal.
+    eng = _WarmupEngine(hybrid_probe=lambda: False)
+    eng._hybrid_throttle = True
+    assert _detect_hybrid_for_warmup(eng) is False
+
+
+def test_warmup_detection_falls_back_to_arrays_cache():
+    """Wrappers without the probe keep the pre-existing structural
+    detection: a model whose make_cache() yields an ArraysCache layer is
+    hybrid (pr_validate codex r2 BLOCKING claimed this fallback was
+    lost — it is retained, and this pins it)."""
+    from mlx_lm.models.cache import ArraysCache, KVCache
+
+    from vllm_mlx.server import _detect_hybrid_for_warmup
+
+    class _HybridModel:
+        def make_cache(self):
+            return [KVCache(), ArraysCache(size=2)]
+
+    class _PlainModel:
+        def make_cache(self):
+            return [KVCache(), KVCache()]
+
+    assert _detect_hybrid_for_warmup(_WarmupEngine(model=_HybridModel())) is True
+    assert _detect_hybrid_for_warmup(_WarmupEngine(model=_PlainModel())) is False
+    # No probe, no model → fail closed (not hybrid → bare warmup, the
+    # pre-change behavior for opaque wrappers).
+    assert _detect_hybrid_for_warmup(_WarmupEngine()) is False
+
+
+def test_warmup_detection_mllm_excluded():
+    from vllm_mlx.server import _detect_hybrid_for_warmup
+
+    assert _detect_hybrid_for_warmup(_WarmupEngine(is_mllm=True)) is False
 
 
 def test_add_request_bumps_admission_seq():
@@ -206,7 +242,7 @@ def test_add_request_bumps_admission_seq():
     eng = EngineCore.__new__(EngineCore)
     eng._admission_seq = 0
     with contextlib.suppress(Exception):
-        asyncio.new_event_loop().run_until_complete(eng.add_request("hi"))
+        _run(eng.add_request("hi"))
     assert eng._admission_seq == 1
 
 
