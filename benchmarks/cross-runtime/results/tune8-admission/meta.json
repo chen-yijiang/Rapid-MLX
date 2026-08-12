@@ -1,0 +1,12 @@
+{
+  "run_id": "tune8-admission",
+  "lane": "parity",
+  "started_unix": 1786501055.1698308,
+  "versions": {
+    "rapid": "rapid-mlx 0.12.10",
+    "omlx": "0.5.8.dev3",
+    "ollama": "ollama version is 0.32.5",
+    "mlx_lm": "0.31.3",
+    "macos": "26.5.2"
+  }
+}

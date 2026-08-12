@@ -118,6 +118,72 @@ repeated-16k-prefix TTFT drops to 1.6–3.0 s on the qwen models
 (4B 1.74 s, 35B-A3B 1.58 s) — the agentic re-prompt case the cache exists
 for. ttft_short is unchanged (0.17–0.66 s, still first everywhere).
 
+## Overnight tuning — 2026-08-13, branch `perf/bench-driven-tuning`
+
+Bench-driven fix loop on the remaining gaps (runs `tune1`–`tune14`; engine
+= main@fd77321d + the tuning branch; mlx-lm conc column re-measured on the
+same harness so both sides carry the new per-request fields).
+
+**Root cause of the big-model concurrency gap — the #115 hybrid admission
+throttle.** Since 2026-04 every concurrent request to a hybrid model was
+admitted 200 ms apart (an ArraysCache-corruption workaround). Rows admitted
+at different scheduler steps carry ragged per-row offsets for the batch's
+whole lifetime, which keeps mlx-lm's batched attention on the array-mask
+slow path every decode step: next() p50 29.5 ms vs 20.3 ms aligned on
+qwen3.6-35b-a3b at B=8. The corruption no longer reproduces on mlx-lm
+0.31.3 (32/32 simultaneous-formation rounds clean), so the throttle is
+retired and an engine-side admission-wave window (default 8 ms tick)
+coalesces co-arriving bursts into one aligned prefill wave. Also removes
+the 200 ms TTFT tax on every hybrid request. Twelve other hypotheses
+(SSE volume, GIL, TurboQuant, GC, Metal limits, sampler params, config
+divergence, …) were each refuted by direct A/B first.
+
+**conc_8 — decode-phase aggregate (new preferred metric) + prefill barrier.**
+Wall-clock agg is workload-skewed whenever one runtime generates more
+tokens per request (thinking-template / early-EOS asymmetry — bit us twice);
+`decode_agg` excludes the shared prefill barrier and divides by the same
+decode span for both sides. report.py now prefers it for conc cells.
+
+| model | rapid decode_agg | mlx-lm decode_agg | Δ | prefill (rapid vs mlx-lm) |
+|---|---|---|---|---|
+| qwen3.5-4b | 409 | 341 | **+20 %** | 2.5 s vs 3.0 s |
+| qwen3.5-9b | 247 | 218 | **+13 %** | 4.3 s vs 4.7 s |
+| gpt-oss-20b | 316 | 283 | **+12 %** | 2.5 s vs 2.7 s |
+| qwen3.6-27b | 82† | 75 | **+8 %** | 14.0 s vs 14.4 s |
+| qwen3.6-35b-a3b | 374 | 319 | **+17 %** | 2.2 s vs 2.7 s |
+
+rapid now leads every conc_8 cell on BOTH phases. The 35B decode aggregate
+(374) equals the in-process BatchGenerator ceiling (376–379): server-side
+batching overhead is zero. Wall-agg for the record: 35B 190→268 (+41 %).
+† 27B still early-EOSes at ~100 tokens under rapid's thinking auto-disable
+(a product behavior) — decode_agg is the comparable number; the old
+33.7-vs-49.1 wall-agg "gap" was this workload skew again, not performance
+(rapid wins both phases on 27B too).
+
+**B=1 / 16 k decode residual is now fully characterized.** With the
+singleton KV-cache fast path (one-row batches keep plain caches and the
+aligned-causal attention path, promoted on mid-flight join) plus a B=1
+dense-sampler engage, the scheduler steps at oMLX's exact level: 4B
+next+outside p50 = 5.72 ms (= 174.8 tok/s) short-context and 6.78 ms
+(= 147.5 tok/s) at 16 k vs oMLX's client-measured 175 / 149. The remaining
+client-visible −5 % (165.6 / 140.9) is a constant ~0.32 ms/token delivery
+tax in the engine→SSE path (queue hop, task wake, chunk build, uvicorn
+write) — measured identically at both context lengths. Follow-up: thin the
+per-token delivery pipeline; the decode loop itself is at parity.
+
+**Other cells**: gpt-oss decode_b1 128.5 (tool-logits factory now gated on
+`has_tools` — a prod fix; parity servers never had the bias enabled), 35B
+decode_b1 TTFT 0.45→0.246 s (throttle tax gone), vision_ttft 0.318 s
+(unchanged; mlx-vlm 0.25 ±15 % remains the one soft cell, decode at
+parity). TurboQuant k8v4 measured ≈ 0 per-step cost at B=8 — but parity
+flags now pin `--kv-cache-turboquant none` since no competitor quantizes
+KV by default.
+
+Tuning-branch commits: singleton cache fast path, B=1 sampler engage,
+step coalescing, has_tools gate, throttle retirement + admission window,
+env-gated debug aids (STEPTIME / PYSAMPLE / SCHEDCONFIG dump), unit tests
+for the admission wave and singleton surfaces.
+
 ## Run `merged-final (parity-full+v2, product-key+v2, vision-lane)`
 
 Versions: rapid rapid-mlx 0.12.10, omlx 0.5.8.dev3, ollama ollama version is 0.32.5, mlx_lm 0.31.3, macos 26.5.2

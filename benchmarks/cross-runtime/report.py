@@ -74,8 +74,21 @@ def fmt(rec, scenario):
         return "FAIL"
     mark = "†" if undersaturated(rec) else ""
     if scenario.startswith("conc"):
+        # Prefer the decode-phase aggregate: it excludes the shared
+        # prefill barrier AND is robust to per-runtime workload skew
+        # (thinking-template / early-EOS asymmetry generated 800-vs-2048
+        # token cells twice — #1861, then again on 27B 2026-08-13 where
+        # rapid's thinking auto-disable EOSed at ~100 tokens while
+        # mlx-lm filled the 256 cap). Older runs without the field fall
+        # back to wall-clock agg, marked with '(w)'.
+        runs = [r for r in (rec.get("runs") or []) if isinstance(r, dict)]
+        dvals = [r["decode_agg_tps"] for r in runs if r.get("decode_agg_tps")]
+        if dvals:
+            dvals.sort()
+            v = dvals[len(dvals) // 2]
+            return f"{v:.0f}{mark}"
         v = rec.get("median_agg_tps")
-        return f"{v:.0f}{spread(rec, 'agg_tps')}{mark}" if v else "—"
+        return f"{v:.0f}(w){spread(rec, 'agg_tps')}{mark}" if v else "—"
     if "ttft" in scenario:
         v = rec.get("median_ttft_s")
         return f"{v:.2f}s{spread(rec, 'ttft_s')}" if v else "—"

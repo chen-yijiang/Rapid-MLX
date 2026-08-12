@@ -26,7 +26,10 @@ runtimes:
     kind: openai
     # {model} replaced with hf_mlx id. Launched from $HOME (neutral cwd).
     serve: "{venv}/bin/rapid-mlx serve {model} --port {port}"
-    parity_flags: "--disable-prefix-cache --no-spec-decode --pflash off"
+    # parity = matched KV config: no competitor quantizes KV by default,
+    # but rapid's k8v4_verified aliases (qwen3.5-9b, qwen3.6-35b-a3b)
+    # silently default to TurboQuant — costs ~9ms/step at B=8 on 35B.
+    parity_flags: "--disable-prefix-cache --no-spec-decode --pflash off --kv-cache-turboquant none"
     product_flags: ""
     ready_path: /v1/models
   omlx:
