@@ -2871,6 +2871,13 @@ class Scheduler:
         self.config = config or SchedulerConfig()
         self._tool_logits_processor_factory = tool_logits_processor_factory
         self.model_config = model_config
+        if os.environ.get("RAPID_DUMP_SCHED_CONFIG"):
+            import dataclasses as _dc
+
+            logger.warning(
+                "[SCHEDCONFIG] %s",
+                {k: v for k, v in sorted(_dc.asdict(self.config).items())},
+            )
 
         # Detect if tokenizer is a processor (MLLM) and get the actual tokenizer
         self._actual_tokenizer = self._get_actual_tokenizer(tokenizer)
