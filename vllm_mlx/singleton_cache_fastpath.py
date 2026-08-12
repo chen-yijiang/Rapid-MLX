@@ -48,6 +48,14 @@ checkpoints) while the row keeps decoding into the original buffers, so
 a shallow array-sharing clone is an aliasing hazard, not a payload. The
 zero-row ``filter`` reset is defensive only: mlx-lm's drain path clears
 the layer list without calling ``filter([])``.
+
+Admission is copy-on-admit for data-carrying layers: stock batched
+merging always copied per-request caches into fresh batch buffers, and
+prefix caches RELY on that — supersequence/LCP loans share the stored
+entry's arrays with only the offset rewound. Keeping the loaned object
+live would let in-place decode writes corrupt the stored prefix (the
+l1-smoke llama3-3b golden regression). Fresh (empty) layers admit
+unchanged, so the steady-state B=1 win is untouched.
 """
 
 from __future__ import annotations
@@ -157,6 +165,66 @@ def _singleton_filter(self, batch_indices):
 _SURFACE_NAMES = ("filter", "extract", "extend")
 
 
+def _copy_exact_layer(cache_obj: Any) -> Any:
+    """Independent copy of an exact-type layer (no shared array objects).
+
+    Shared body of ``extract`` (payload leaving the batch) and
+    copy-on-admit (loaned state entering the batch). KVCache copies are
+    offset-trimmed like ``BatchKVCache.extract``; RotatingKVCache is
+    deep-copied whole so its circular layout (offset/_idx/rotation)
+    continues decoding exactly as before. The bound singleton surface is
+    never carried over.
+    """
+    if isinstance(cache_obj, RotatingKVCache):
+        import copy as _copy
+
+        clone = _copy.deepcopy(cache_obj)
+        for name in _SURFACE_NAMES:
+            clone.__dict__.pop(name, None)
+        return clone
+    clone = type(cache_obj).__new__(type(cache_obj))
+    clone.__dict__.update(
+        (k, v) for k, v in cache_obj.__dict__.items() if k not in _SURFACE_NAMES
+    )
+    if cache_obj.keys is None:
+        return clone
+    clone.keys = mx.contiguous(cache_obj.keys[..., : cache_obj.offset, :])
+    clone.values = mx.contiguous(cache_obj.values[..., : cache_obj.offset, :])
+    clone.offset = cache_obj.offset
+    return clone
+
+
+def _detach_layer(cache_obj: Any) -> Any:
+    """Copy-on-admit: decouple a data-carrying layer from whoever loaned it.
+
+    Stock batched merging always copied per-request caches into fresh
+    batch buffers, and the prefix caches RELY on that: the memory-aware
+    cache's supersequence/LCP loans (``_trim_cache_offset``) share the
+    STORED entry's array objects with only the offset rewound. The
+    singleton pass-through keeps the admitted object live, and
+    ``KVCache.update_and_fetch`` writes in place — without this copy,
+    decode scribbles over the stored prefix entry and every later hit
+    on it returns corrupted state (l1-smoke llama3-3b golden regression
+    on #1874: fluent-but-wrong answers). Empty layers (fresh requests)
+    are untouched — the copy costs exactly what the retired batched
+    merge paid, once per admission with preloaded state.
+    """
+    sub = getattr(cache_obj, "caches", None)
+    if isinstance(sub, (list, tuple)):
+        converted = [_detach_layer(c) for c in sub]
+        if all(a is b for a, b in zip(sub, converted)):
+            return cache_obj
+        clone = type(cache_obj).__new__(type(cache_obj))
+        clone.__dict__.update(cache_obj.__dict__)
+        clone.caches = type(sub)(converted) if isinstance(sub, tuple) else converted
+        return clone
+    if type(cache_obj) not in _SINGLETON_EXACT_TYPES:
+        return cache_obj
+    if getattr(cache_obj, "keys", None) is None:
+        return cache_obj
+    return _copy_exact_layer(cache_obj)
+
+
 def _singleton_extract(self, idx: int):
     """Independent copy of row 0, mirroring ``BatchKVCache.extract``.
 
@@ -169,24 +237,7 @@ def _singleton_extract(self, idx: int):
     """
     if int(idx) != 0:
         raise IndexError(f"{type(self).__name__} singleton cache only has row 0")
-    clone = type(self).__new__(type(self))
-    clone.__dict__.update(
-        (k, v) for k, v in self.__dict__.items() if k not in _SURFACE_NAMES
-    )
-    if self.keys is None:
-        return clone
-    if isinstance(self, RotatingKVCache):
-        # Temporal-order unroll, then materialize — the rotating buffer
-        # rewrites slots in place, so a shared reference would corrupt.
-        clone.keys = mx.contiguous(self._temporal_order(self.keys))
-        clone.values = mx.contiguous(self._temporal_order(self.values))
-        clone.offset = self.offset
-        clone._idx = clone.keys.shape[2]
-    else:
-        clone.keys = mx.contiguous(self.keys[..., : self.offset, :])
-        clone.values = mx.contiguous(self.values[..., : self.offset, :])
-        clone.offset = self.offset
-    return clone
+    return _copy_exact_layer(self)
 
 
 def _singleton_extend(self, other):
@@ -246,9 +297,12 @@ def install_singleton_cache_fastpath() -> bool:
         if len(caches) == 1 and all(
             _is_singleton_passthrough_layer(c) for c in caches[0]
         ):
+            admitted = []
             for c in caches[0]:
+                c = _detach_layer(c)
                 _bind_singleton_surface(c)
-            return list(caches[0])
+                admitted.append(c)
+            return admitted
         # Promote any singleton layers a previous pass left behind before
         # the stock merge sees them (its BatchKVCache.merge expects raw
         # KVCache inputs, which promoted layers no longer are).
@@ -257,13 +311,18 @@ def install_singleton_cache_fastpath() -> bool:
     def _extend_cache_promote(cache_a, cache_b):
         if not cache_a:
             # cache_b normally arrives through the patched merge (which
-            # binds the singleton surface), but bind defensively in case
-            # a caller hands raw per-request layers straight to the
-            # extend seam (codex r3 on #1874).
+            # detaches loaned state and binds the singleton surface), but
+            # handle raw per-request layers handed straight to the extend
+            # seam defensively (codex r3 on #1874) — including the
+            # copy-on-admit, since a loaned layer is hazardous wherever
+            # it enters the batch.
+            admitted = []
             for c in cache_b:
                 if _is_singleton_passthrough_layer(c):
+                    c = _detach_layer(c)
                     _bind_singleton_surface(c)
-            return cache_b
+                admitted.append(c)
+            return admitted
         if not cache_b:
             return cache_a
         if len(cache_a) != len(cache_b):

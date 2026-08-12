@@ -59,10 +59,11 @@ def _filled_kv(n_tokens=4, n_heads=2, head_dim=8):
 
 def _passthrough(layer):
     """Run one layer through the patched merge seam, the way production
-    admits it to the singleton lane (this is what binds the surface)."""
+    admits it to the singleton lane (binds the surface; data-carrying
+    layers are detached into independent copies on admission)."""
     gen = importlib.import_module("mlx_lm.generate")
     merged = gen._merge_caches([[layer]])
-    assert merged[0] is layer
+    assert type(merged[0]) is type(layer)
     return merged[0]
 
 
@@ -222,12 +223,14 @@ def test_promote_composite_preserves_wrapper_state():
 
 def test_extend_into_empty_batch_binds_surface():
     """codex r3 BLOCKING: layers reaching the extend seam without going
-    through the patched merge must still get the singleton surface."""
+    through the patched merge must still get the singleton surface (and
+    the copy-on-admit detach — a loan is hazardous at any entry)."""
     gen = importlib.import_module("mlx_lm.generate")
     raw = _filled_kv()
     out = gen._extend_cache([], [raw])
-    assert out[0] is raw
-    assert "filter" in raw.__dict__ and "extract" in raw.__dict__
+    assert type(out[0]) is KVCache
+    assert out[0].keys is not raw.keys  # detached copy
+    assert "filter" in out[0].__dict__ and "extract" in out[0].__dict__
 
 
 # ----------------------------------------------- singleton batch surface
@@ -342,12 +345,37 @@ def test_extend_requires_promotion():
 # ------------------------------------------------------ patched seams
 
 
-def test_merge_caches_single_passthrough():
+def test_merge_caches_single_passthrough_empty_is_identity():
+    """Fresh (empty) caches admit unchanged — the hot path pays nothing."""
     gen = importlib.import_module("mlx_lm.generate")
-    layers = [_filled_kv(), _filled_kv()]
+    layers = [KVCache(), KVCache()]
     merged = gen._merge_caches([layers])
     assert merged[0] is layers[0]
     assert merged[1] is layers[1]
+
+
+def test_merge_caches_detaches_loaned_prefix_state():
+    """The l1-smoke llama3-3b golden regression: the memory-aware prefix
+    cache loans supersequence/LCP hits as shallow trims SHARING the
+    stored entry's arrays (offset rewound only). Admission must copy —
+    otherwise in-place decode writes corrupt the stored prefix and every
+    later hit returns poisoned state ('Transparent.' ≠ 'Paris')."""
+    gen = importlib.import_module("mlx_lm.generate")
+    store = _filled_kv(n_tokens=8)
+    # Replicate memory_cache._trim_cache_offset's loan: share arrays,
+    # rewind offset to 4.
+    loan = KVCache.__new__(KVCache)
+    loan.keys = store.keys
+    loan.values = store.values
+    loan.offset = 4
+    [live] = gen._merge_caches([[loan]])
+    # Decode writes past the trim point (positions 4..5).
+    k = mx.full((1, 2, 2, 8), 5.0)
+    v = mx.full((1, 2, 2, 8), 5.0)
+    live.update_and_fetch(k, v)
+    # The stored entry's own region must be untouched.
+    assert float(store.values[0, 0, 4, 0]) == 1.0
+    assert float(store.values[0, 0, 5, 0]) == 1.0
 
 
 def test_merge_caches_multi_uses_stock_merge():
