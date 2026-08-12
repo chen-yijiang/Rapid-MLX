@@ -587,10 +587,17 @@ async def lifespan(app: FastAPI):
         try:
             # Skip warmup for hybrid models (GatedDeltaNet) to avoid
             # contaminating compiled kernel state that interferes with
-            # batched inference.  Check multiple engine wrappers:
-            # BatchedEngine sets _hybrid_throttle via EngineCore,
-            # Check model for hybrid cache
-            _is_hybrid = getattr(_engine, "_hybrid_throttle", False)
+            # batched inference. Ask the engine's model profile directly
+            # (fail-closed helper) — the previous ``_hybrid_throttle``
+            # read stopped being an is-hybrid proxy when the #115
+            # admission throttle default flipped to OFF (codex review:
+            # hybrids would otherwise fall through to the make_cache
+            # detection below and, on a miss, into the contaminating
+            # ``generate_warmup`` path).
+            _is_hybrid = False
+            _hybrid_probe = getattr(_engine, "_is_hybrid_model", None)
+            if callable(_hybrid_probe):
+                _is_hybrid = bool(_hybrid_probe())
             if not _is_hybrid and not getattr(_engine, "_is_mllm", False):
                 # Try to find the raw model through wrapper layers
                 _model = getattr(_engine, "_model", None) or getattr(
