@@ -563,6 +563,26 @@ class EngineCore:
                 ticks,
             )
 
+    def _step_coalesced(self, max_steps: int) -> list:
+        """Run up to ``max_steps`` scheduler steps on the mlx-step thread.
+
+        Breaks early the moment a step finishes a request (its event must
+        fire promptly), reports no work, or new requests are waiting for
+        admission — so coalescing only ever batches the steady mid-stream
+        decode ticks where the executor round-trip is pure overhead.
+        """
+        outs = []
+        for _ in range(max_steps):
+            out = self.scheduler.step()
+            outs.append(out)
+            if (
+                out.finished_request_ids
+                or not out.has_work
+                or self.scheduler.get_num_waiting() > 0
+            ):
+                break
+        return outs
+
     def _run_pressure_evict_tick(self) -> None:
         """D-METAL-PFX: drive the scheduler pressure-eviction loop once.
 
@@ -688,12 +708,38 @@ class EngineCore:
                     # work (pr_validate codex r2).
                     if not self.scheduler.has_requests():
                         continue
-                    output = await loop.run_in_executor(_executor, self.scheduler.step)
-                    self._steps_executed += 1
+                    # Step coalescing (bench-tuning 2026-08-12): at high
+                    # aggregate token rates the per-step executor round-trip
+                    # plus GIL contention with the stream tasks costs ~10ms
+                    # per step (35B-A3B conc_8: in-process 375 agg tok/s vs
+                    # 253 live). Deep batches run up to 4 steps per dispatch
+                    # — _step_coalesced breaks early on finishes, pending
+                    # admissions, or no-work so request lifecycle latency is
+                    # unchanged; mid-stream tokens buffer at most ~3 extra
+                    # steps.
+                    # Defensive getattr: duck-typed scheduler stubs in the
+                    # engine-loop tests predate this method; absent -> 0 ->
+                    # no coalescing, i.e. the pre-coalescing behavior.
+                    _active = getattr(self.scheduler, "get_num_running", lambda: 0)()
+                    if _active >= 4:
+                        step_outputs = await loop.run_in_executor(
+                            _executor,
+                            self._step_coalesced,
+                            min(4, max(2, _active // 2)),
+                        )
+                    else:
+                        step_outputs = [
+                            await loop.run_in_executor(_executor, self.scheduler.step)
+                        ]
+                    self._steps_executed += len(step_outputs)
                     _consecutive_step_failures = 0
 
-                    # Emergency memory pressure check
-                    if self._steps_executed % _memory_check_interval == 0:
+                    # Emergency memory pressure check. With coalescing the
+                    # counter can jump past an exact multiple, so fire when
+                    # the interval boundary falls anywhere in this batch.
+                    if self._steps_executed % _memory_check_interval < len(
+                        step_outputs
+                    ):
                         try:
                             active_mem = mx.get_active_memory()
                             if active_mem > _memory_pressure_threshold:
@@ -726,56 +772,59 @@ class EngineCore:
                             self._run_pressure_evict_tick()
 
                     # Fast path: distribute outputs to collectors
-                    outputs = output.outputs
-                    if outputs:
-                        collectors = self._output_collectors
-                        states = self._stream_states
-                        events = self._finished_events
+                    for output in step_outputs:
+                        outputs = output.outputs
+                        if outputs:
+                            collectors = self._output_collectors
+                            states = self._stream_states
+                            events = self._finished_events
 
-                        for req_output in outputs:
-                            rid = req_output.request_id
-                            collector = collectors.get(rid)
+                            for req_output in outputs:
+                                rid = req_output.request_id
+                                collector = collectors.get(rid)
 
-                            if collector is not None:
-                                # Optimized: skip stream_interval check when interval=1
-                                if use_simple_streaming:
-                                    collector.put(req_output)
-                                else:
-                                    state = states.get(rid)
-                                    # Merge this step's delta into the buffer so
-                                    # tokens that fall between should_send() hits
-                                    # are not silently discarded. new_text,
-                                    # new_token_ids, and logprobs are all
-                                    # per-step deltas (scheduler emits one
-                                    # token's worth per step) and must
-                                    # accumulate; cumulative status fields take
-                                    # the latest value.
-                                    buf = self._stream_buffers.get(rid)
-                                    self._stream_buffers[rid] = (
-                                        self._merge_stream_buffer(buf, req_output)
-                                    )
-                                    if state and state.should_send(
-                                        req_output.completion_tokens,
-                                        req_output.finished,
-                                    ):
-                                        flushed = self._stream_buffers.pop(rid)
-                                        collector.put(flushed)
-                                        state.mark_sent(req_output.completion_tokens)
+                                if collector is not None:
+                                    # Optimized: skip stream_interval check when interval=1
+                                    if use_simple_streaming:
+                                        collector.put(req_output)
+                                    else:
+                                        state = states.get(rid)
+                                        # Merge this step's delta into the buffer so
+                                        # tokens that fall between should_send() hits
+                                        # are not silently discarded. new_text,
+                                        # new_token_ids, and logprobs are all
+                                        # per-step deltas (scheduler emits one
+                                        # token's worth per step) and must
+                                        # accumulate; cumulative status fields take
+                                        # the latest value.
+                                        buf = self._stream_buffers.get(rid)
+                                        self._stream_buffers[rid] = (
+                                            self._merge_stream_buffer(buf, req_output)
+                                        )
+                                        if state and state.should_send(
+                                            req_output.completion_tokens,
+                                            req_output.finished,
+                                        ):
+                                            flushed = self._stream_buffers.pop(rid)
+                                            collector.put(flushed)
+                                            state.mark_sent(
+                                                req_output.completion_tokens
+                                            )
 
-                            if req_output.finished:
-                                event = events.get(rid)
-                                if event:
-                                    event.set()
+                                if req_output.finished:
+                                    event = events.get(rid)
+                                    if event:
+                                        event.set()
 
-                        # Free Metal buffers after distributing finished outputs
-                        if output.finished_request_ids:
-                            mx.clear_cache()
+                            # Free Metal buffers after distributing finished outputs
+                            if output.finished_request_ids:
+                                mx.clear_cache()
 
-                        # Always yield to prevent event loop starvation.
-                        # Without this, orphaned requests (client disconnected but
-                        # request still in scheduler) block the entire event loop,
-                        # making the server unresponsive to all HTTP requests.
-                        await asyncio.sleep(0)
+                            # Always yield to prevent event loop starvation.
+                            # Without this, orphaned requests (client disconnected but
+                            # request still in scheduler) block the entire event loop,
+                            # making the server unresponsive to all HTTP requests.
+                            await asyncio.sleep(0)
                 else:
                     # No work — block until ``add_request`` sets the
                     # event, with a long fallback timeout for
