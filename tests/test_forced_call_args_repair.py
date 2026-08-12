@@ -125,6 +125,14 @@ def test_wire_envelope_names_decodes_escapes_and_ignores_prose():
     assert _wire_envelope_names(raw3) == ["release_probe"]
     # Undecodable envelope refuses (None), never permits.
     assert _wire_envelope_names("<tool_call>garbage no brace") is None
+    # Multiple same-target envelopes surface as multiple names — the
+    # streaming gate requires exactly one, since synthesis emits a
+    # single call and would otherwise collapse several (codex r4).
+    raw4 = (
+        '<tool_call>{"name": "release_probe", "arguments": 1}</tool_call>'
+        '<tool_call>{"name": "release_probe", "arguments": 2}</tool_call>'
+    )
+    assert _wire_envelope_names(raw4) == ["release_probe", "release_probe"]
 
 
 def test_schema_required_violation_surfaces_error():

@@ -6732,11 +6732,14 @@ async def stream_chat_completion(
                 # regexing raw text: JSON decoding handles escaped
                 # names (codex r2 — a regex over literals could be
                 # evaded), and prose outside envelopes can no longer
-                # contribute matches. Any envelope that fails to decode,
-                # or names a different tool, refuses (the conservative
-                # pre-fix behavior).
+                # contribute matches. EXACTLY ONE envelope naming the
+                # target is required: synthesis emits a single call, so
+                # multiple attempted envelopes would silently collapse
+                # into one (codex r4); anything undecodable or
+                # differently-named refuses (the conservative pre-fix
+                # behavior).
                 _wire_names = _wire_envelope_names(_raw_text or "")
-                if not _wire_names or any(n != _synth_target for n in _wire_names):
+                if len(_wire_names or []) != 1 or _wire_names[0] != _synth_target:
                     _synth_target = None
             if _synth_target:
                 _synth_call = _synthesize_forced_tool_call(
