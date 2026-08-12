@@ -15,9 +15,9 @@ have to load a model. They lock in the four behaviors that matter:
    (``self.samplers`` is observed as all-None inside the wrapped call;
    ``self.fallback_sampler`` is the shared sampler).
 2. Heterogeneous batch → leaves ``self.samplers`` untouched.
-3. B=1 → no swap (degenerate case; identity-equality with empty rest is
-   true but the patch must NOT engage since the fast-path savings only
-   exist for B ≥ 2).
+3. B=1 → swaps too (a single per-request sampler still trips mlx-lm's
+   ``any(self.samplers)`` per-row branch; the bench-tuning pass measured
+   real savings at B=1).
 4. Swap is reversed after the call returns — even on exception — so the
    per-request samplers are restored for the NEXT step.
 """
