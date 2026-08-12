@@ -2843,6 +2843,11 @@ class Scheduler:
     continuous batching at the token level, so we use it as the backend.
     """
 
+    # Class-level default so ``__new__``-built test stubs that bypass
+    # __init__ still step cleanly; __init__ resolves the real value once
+    # (an os.environ lookup per step would sit on the decode hot path).
+    _step_timing_enabled = False
+
     def __init__(
         self,
         model: Any,
@@ -2901,6 +2906,10 @@ class Scheduler:
         self.running: dict[str, Request] = {}  # Running requests by ID
         self.requests: dict[str, Request] = {}  # All requests by ID
         self.finished_req_ids: set[str] = set()  # Recently finished
+        # Debug aid (#1878): resolved ONCE — an os.environ lookup per
+        # step would put dict access on the decode hot path advertised
+        # as zero-cost when off.
+        self._step_timing_enabled = bool(os.environ.get("RAPID_STEP_TIMING"))
 
         # Mapping between our request IDs and BatchGenerator UIDs
         self.request_id_to_uid: dict[str, int] = {}
@@ -7493,7 +7502,7 @@ class Scheduler:
                     # Tighten that chunk before dispatch when a long cold or
                     # cache-miss prefill is approaching the unified-memory cap.
                     self._apply_adaptive_prefill_size()
-                    if os.environ.get("RAPID_STEP_TIMING"):
+                    if self._step_timing_enabled:
                         st = getattr(self, "_steptime", None)
                         if st is None:
                             # [next_samples, outside_samples, count, end_stamp]
@@ -7617,7 +7626,7 @@ class Scheduler:
                 output.finished_request_ids = aborted_ids
                 break
 
-        if os.environ.get("RAPID_STEP_TIMING") and hasattr(self, "_steptime"):
+        if self._step_timing_enabled and hasattr(self, "_steptime"):
             self._steptime[3] = time.perf_counter()
 
         # Clear finished tracking for next step

@@ -47,18 +47,21 @@ def install() -> bool:
     lock = threading.Lock()
 
     def _report():
+        # The whole snapshot + write runs under the lock: the periodic
+        # report and the atexit report target the same file, and
+        # interleaved writers would corrupt it (codex r2 NIT).
         with lock:
             snapshot = {tname: ctr.copy() for tname, ctr in counters.items()}
-        try:
-            with open(out_path, "w") as fh:
-                for tname, ctr in sorted(snapshot.items()):
-                    total = sum(ctr.values())
-                    fh.write(f"== thread {tname} samples={total}\n")
-                    for sig, n in ctr.most_common(30):
-                        fh.write(f"{n:8d} {100.0 * n / total:5.1f}% {sig}\n")
-                    fh.write("\n")
-        except OSError:
-            pass
+            try:
+                with open(out_path, "w") as fh:
+                    for tname, ctr in sorted(snapshot.items()):
+                        total = sum(ctr.values())
+                        fh.write(f"== thread {tname} samples={total}\n")
+                        for sig, n in ctr.most_common(30):
+                            fh.write(f"{n:8d} {100.0 * n / total:5.1f}% {sig}\n")
+                        fh.write("\n")
+            except OSError:
+                pass
 
     def _loop():
         self_ident.append(threading.get_ident())
