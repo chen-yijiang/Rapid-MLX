@@ -2781,24 +2781,45 @@ def _repair_forced_call_arguments(tool_calls, raw_text, target, tools):
     Mutates repaired calls in place. Returns a schema-violation error
     string (caller 422s) or ``None``.
     """
-    for tc in tool_calls or []:
-        args = tc.function.arguments
+
+    def _is_object_args(args) -> bool:
         if isinstance(args, dict):
-            continue
+            return True
         if isinstance(args, str):
             try:
-                if isinstance(json.loads(args), dict):
-                    continue
+                return isinstance(json.loads(args), dict)
             except (ValueError, TypeError):
-                pass
-        recovered = _recover_partial_tool_args(raw_text, expected_name=target)
-        repaired = recovered if recovered is not None else "{}"
+                return False
+        return False
+
+    broken = [
+        tc for tc in tool_calls or [] if not _is_object_args(tc.function.arguments)
+    ]
+    if not broken:
+        return None
+    # Raw-text recovery is only unambiguous for a SINGLE broken call —
+    # with several, they would all receive the same first recovered
+    # object, silently corrupting the later calls (codex r2). Ambiguous
+    # cases repair to "{}".
+    recovered = (
+        _recover_partial_tool_args(raw_text, expected_name=target)
+        if len(broken) == 1
+        else None
+    )
+    repaired = recovered if recovered is not None else "{}"
+    for tc in broken:
+        # Log shape only — tool arguments can carry user data / secrets
+        # and must not persist in production logs (codex r2).
         logger.warning(
-            "forced tool_choice call to %r carried non-object arguments %r; "
-            "repaired to %r (OpenAI wire requires an object)",
+            "forced tool_choice call to %r carried non-object arguments "
+            "(type=%s, len=%s); repaired to %s (OpenAI wire requires an "
+            "object)",
             target,
-            args,
-            repaired,
+            type(tc.function.arguments).__name__,
+            len(tc.function.arguments)
+            if isinstance(tc.function.arguments, str)
+            else "-",
+            "recovered object" if recovered is not None else '"{}"',
         )
         tc.function.arguments = repaired
         err = _forced_synth_schema_error(target, repaired, tools)
@@ -6672,8 +6693,14 @@ async def stream_chat_completion(
                 # 2026-08-12: hermes ``"arguments": 1`` on 35B streams
                 # zero deltas) — synthesis then REPAIRS the same call,
                 # matching the non-stream arguments-repair path.
-                _first_name = re.search(r'"name"\s*:\s*"([^"]*)"', _raw_text or "")
-                if not _first_name or _first_name.group(1) != _synth_target:
+                # ALL wire-shaped name literals must match the pinned
+                # target — the first-match form was bypassable by prose
+                # mentioning the target ahead of a real call to a
+                # different tool (codex r2). Any different name refuses
+                # (the conservative pre-fix behavior); prose that only
+                # repeats the target adds equal matches and stays safe.
+                _wire_names = re.findall(r'"name"\s*:\s*"([^"]*)"', _raw_text or "")
+                if not _wire_names or any(n != _synth_target for n in _wire_names):
                     _synth_target = None
             if _synth_target:
                 _synth_call = _synthesize_forced_tool_call(

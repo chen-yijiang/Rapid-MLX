@@ -57,11 +57,27 @@ def test_unparseable_arguments_repaired():
 
 
 def test_recovery_from_raw_text_preferred_over_empty():
+    import json
+
     tc = _call("1")
     raw = '<tool_call>{"name": "release_probe", "arguments": {"note": "hi"}}'
     err = _repair_forced_call_arguments([tc], raw, "release_probe", [_tool()])
     assert err is None
-    assert "note" in tc.function.arguments
+    assert json.loads(tc.function.arguments) == {"note": "hi"}
+
+
+def test_multiple_broken_calls_never_share_recovered_args():
+    """codex r2: raw-text recovery is unambiguous only for a single
+    broken call — several must all repair to {} rather than every one
+    receiving the same first recovered object."""
+    import json
+
+    a, b = _call("1"), _call("2")
+    raw = '<tool_call>{"name": "release_probe", "arguments": {"note": "hi"}}'
+    err = _repair_forced_call_arguments([a, b], raw, "release_probe", [_tool()])
+    assert err is None
+    assert json.loads(a.function.arguments) == {}
+    assert json.loads(b.function.arguments) == {}
 
 
 def test_schema_required_violation_surfaces_error():
