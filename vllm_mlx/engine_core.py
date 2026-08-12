@@ -773,7 +773,14 @@ class EngineCore:
                             await loop.run_in_executor(_executor, self.scheduler.step)
                         ]
                     self._steps_executed += len(step_outputs)
-                    if _step_exc is None:
+                    if step_outputs:
+                        # Any successful step resets the streak — the
+                        # pre-coalescing loop zeroed the counter on every
+                        # OK step, so ok,ok,FAIL batches must not let
+                        # non-consecutive failures accumulate into the
+                        # fatal handler (codex r5 on #1878). A trailing
+                        # _step_exc then counts as the FIRST failure of a
+                        # new streak via the except path below.
                         _consecutive_step_failures = 0
 
                     # Emergency memory pressure check. With coalescing the
