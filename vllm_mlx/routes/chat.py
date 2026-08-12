@@ -2764,6 +2764,49 @@ def _scrub_tool_wire_literals(text: str | None) -> str:
     return re.sub(r"\s+", " ", result).strip()
 
 
+def _repair_forced_call_arguments(tool_calls, raw_text, target, tools):
+    """Repair parsed forced-call arguments that are not a JSON object.
+
+    The OpenAI function-calling wire requires ``arguments`` to be a JSON
+    OBJECT (serialized as a string). The forced-choice prefix hands the
+    model ``..."arguments": `` mid-envelope, and a weak continuation can
+    close the envelope with a bare scalar — seen live on
+    Qwen3.5-35B-A3B-8bit at temp 0 continuing with ``1`` (dogfood
+    2026-08-12), which the parser dutifully surfaces as
+    ``arguments="1"``. Every OpenAI client ``json.loads``\\ es that into
+    a non-dict and breaks. Mirror the synthesis fallback: recover an
+    object from the raw text when possible, else ``"{}"``, and hold the
+    result to the same #1256 schema gate.
+
+    Mutates repaired calls in place. Returns a schema-violation error
+    string (caller 422s) or ``None``.
+    """
+    for tc in tool_calls or []:
+        args = tc.function.arguments
+        if isinstance(args, dict):
+            continue
+        if isinstance(args, str):
+            try:
+                if isinstance(json.loads(args), dict):
+                    continue
+            except (ValueError, TypeError):
+                pass
+        recovered = _recover_partial_tool_args(raw_text, expected_name=target)
+        repaired = recovered if recovered is not None else "{}"
+        logger.warning(
+            "forced tool_choice call to %r carried non-object arguments %r; "
+            "repaired to %r (OpenAI wire requires an object)",
+            target,
+            args,
+            repaired,
+        )
+        tc.function.arguments = repaired
+        err = _forced_synth_schema_error(target, repaired, tools)
+        if err:
+            return err
+    return None
+
+
 def _synthesize_forced_tool_call(
     name: str, arguments: str = "{}", *, raw_text: str | None = None
 ):
@@ -5578,6 +5621,20 @@ async def _create_chat_completion_impl(
                             "retry with a more direct user message."
                         ),
                     )
+                elif _names:
+                    # Every emitted call names the target, but the wire
+                    # can still be garbage INSIDE the envelope — repair
+                    # non-object arguments to the synthesis fallback's
+                    # semantics (dogfood 2026-08-12: 35B answered the
+                    # forced hermes prefix with a bare ``1``).
+                    _repair_err = _repair_forced_call_arguments(
+                        tool_calls,
+                        output.raw_text or output.text,
+                        _target,
+                        request.tools,
+                    )
+                    if _repair_err:
+                        raise HTTPException(status_code=422, detail=_repair_err)
 
     # Validate tool call parameter values against schemas
     if tool_calls and request.tools:
@@ -6580,7 +6637,6 @@ async def stream_chat_completion(
         if (
             not fallback_tool_calls
             and processor._tool_calls_emitted_to_wire == 0
-            and not processor.tool_calls_detected
             and request.tools
             and request.tool_choice is not None
         ):
@@ -6604,6 +6660,22 @@ async def stream_chat_completion(
                 _raw_text = (
                     processor.tool_accumulated_text or processor.accumulated_text or ""
                 )
+            if _synth_target and processor.tool_calls_detected:
+                # Detected-but-unemitted (codex r1 MAJOR on PR #948 kept
+                # this OFF unconditionally): the parser saw a tool-call
+                # shape but shipped zero deltas. When the wire text names
+                # a DIFFERENT tool, synthesizing would silently replace
+                # the model's intended call — keep refusing (mirrors the
+                # non-stream ``_mismatched`` 422). But when the wire
+                # names exactly the PINNED target, the model attempted
+                # THE forced call with an unusable body (dogfood
+                # 2026-08-12: hermes ``"arguments": 1`` on 35B streams
+                # zero deltas) — synthesis then REPAIRS the same call,
+                # matching the non-stream arguments-repair path.
+                _first_name = re.search(r'"name"\s*:\s*"([^"]*)"', _raw_text or "")
+                if not _first_name or _first_name.group(1) != _synth_target:
+                    _synth_target = None
+            if _synth_target:
                 _synth_call = _synthesize_forced_tool_call(
                     _synth_target, raw_text=_raw_text
                 )
