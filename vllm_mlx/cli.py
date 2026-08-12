@@ -5519,9 +5519,11 @@ def models_command(args):
             )
         print(video_sep)
 
-    # Image-generation aliases, tagged ``[image:gen]`` — same rationale as the
-    # video section above (#1603): a chat-catalog consumer must be able to
-    # exclude them by Kind tag rather than by hardcoded name.
+    # Image aliases carry an operation tag: text-to-image checkpoints use
+    # ``[image:gen]`` and instruction-edit checkpoints use ``[image:edit]``;
+    # FLUX.2 Klein accepts both request shapes and uses ``[image:both]``.
+    # Besides keeping both out of chat catalogs, this lets GUI consumers expose
+    # the right request shape without guessing capability from the alias.
     if image_profiles:
         image_alias_width = max(
             24, max((len(a) for a in image_profiles), default=0) + 2
@@ -5536,9 +5538,20 @@ def models_command(args):
         print(image_sep)
         for alias in sorted(image_profiles):
             p = image_profiles[alias]
+            folded_path = p.hf_path.casefold().replace("_", "-")
+            if (
+                "flux2" in folded_path
+                or "flux.2" in folded_path
+                or "klein" in folded_path
+            ):
+                kind_tag = "[image:both]"
+            elif "qwen-image-edit" in folded_path:
+                kind_tag = "[image:edit]"
+            else:
+                kind_tag = "[image:gen]"
             print(
                 f"  {alias:<{image_alias_width}} "
-                f"{format_size(p.hf_path):<10} {'[image:gen]':<11} "
+                f"{format_size(p.hf_path):<10} {kind_tag:<12} "
                 f"{p.hf_path:<40}"
             )
         print(image_sep)
@@ -7686,6 +7699,59 @@ def agents_command(args):
             # User specified model — look up *that* model's context window
             context_length = fetch_context_window(base_url, model_id)
 
+        # Claude Code and Continue are the first first-class setup flows. They
+        # preview an exact diff, require consent, back up existing config,
+        # write atomically, and verify the server afterwards. Keep the generic
+        # profile writer below for the remaining integrations until each one
+        # receives an equally precise adapter.
+        if profile.name in {"claude-code", "continue"}:
+            from vllm_mlx.agents.setup import (
+                apply_setup_plan,
+                build_setup_plan,
+                confirm_plan,
+                verify_server,
+            )
+
+            try:
+                plan = build_setup_plan(profile.name, base_url, model_id)
+            except (OSError, ValueError) as exc:
+                print(f"\n  {profile.display_name} setup failed: {exc}\n")
+                sys.exit(1)
+
+            print(f"\n  {profile.display_name} configuration: {plan.path}")
+            if plan.changed:
+                print(plan.diff())
+            else:
+                print("  Already configured; no file changes needed.")
+
+            if args.dry_run:
+                print("\n  Dry run only; nothing was written.\n")
+                return
+            if plan.changed and not args.yes and not confirm_plan(plan):
+                print("\n  Setup cancelled; nothing was written.\n")
+                return
+            if plan.changed:
+                try:
+                    apply_setup_plan(plan)
+                except RuntimeError as exc:
+                    print(f"\n  {profile.display_name} setup failed: {exc}\n")
+                    sys.exit(1)
+                print(f"\n  Configured {profile.display_name} at {plan.path}.")
+            if not args.no_check:
+                try:
+                    advertised = verify_server(base_url, model_id)
+                except RuntimeError as exc:
+                    status = (
+                        "Configuration was saved"
+                        if plan.changed
+                        else "Configuration is unchanged"
+                    )
+                    print(f"\n  {status}, but the connection check failed: {exc}\n")
+                    sys.exit(1)
+                print(f"  Connection check passed (model: {advertised}).")
+            print()
+            return
+
         summary = setup_agent_config(
             profile,
             base_url,
@@ -9606,6 +9672,22 @@ Examples:
         "--setup",
         action="store_true",
         help="Auto-configure the agent to point at this server",
+    )
+    agents_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview setup changes without writing configuration",
+    )
+    agents_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Apply setup without an interactive confirmation",
+    )
+    agents_parser.add_argument(
+        "--no-check",
+        action="store_true",
+        help="Skip the post-write server health and model check",
     )
     agents_parser.add_argument(
         "--test",
