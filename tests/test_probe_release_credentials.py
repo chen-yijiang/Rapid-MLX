@@ -181,6 +181,26 @@ def test_cloudflare_5xx_is_advisory(prc):
     assert _severities(findings) == {prc.ADVISORY}
 
 
+def test_rate_limit_on_token_verify_is_advisory_not_blocking(prc):
+    """A 429 carries ``success: false`` but is transient, not authoritative.
+
+    Blocking on it would false-block a legitimate bump PR on a Cloudflare
+    rate-limit blip, which the design keeps advisory alongside 5xx/transport.
+    """
+    findings = _run(
+        prc,
+        _fetch_map(
+            {
+                "tokens/verify": (
+                    429,
+                    {"success": False, "errors": [{"message": "rate limited"}]},
+                )
+            }
+        ),
+    )
+    assert _severities(findings) == {prc.ADVISORY}
+
+
 # ---------- the token must never leak ----------------------------------
 
 

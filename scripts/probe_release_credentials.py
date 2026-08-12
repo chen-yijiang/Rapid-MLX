@@ -96,6 +96,20 @@ def check_token_active(fetch, token: str) -> list[tuple[str, str]]:
         return [(ADVISORY, f"could not reach Cloudflare to verify the token: {exc}")]
     if status >= 500:
         return [(ADVISORY, f"Cloudflare returned HTTP {status} verifying the token")]
+    # Only an authoritative rejection blocks. 401/403 mean the token is
+    # invalid, revoked, or expired — the #1851 failure mode. A 429 (rate
+    # limit) or any other non-2xx also carries ``success: false``, but that
+    # is "could not check", not "checked and it is dead"; blocking on it
+    # would false-block a release on a transient Cloudflare blip, which the
+    # design keeps advisory (same rule as the 5xx and transport paths above).
+    if status not in (200, 401, 403):
+        return [
+            (
+                ADVISORY,
+                f"could not verify CLOUDFLARE_API_TOKEN (HTTP {status}): {_reason(body)}. "
+                "A transient response is not proof the token is bad.",
+            )
+        ]
     if status in (401, 403) or not body.get("success"):
         return [
             (

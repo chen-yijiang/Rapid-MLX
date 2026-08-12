@@ -50,12 +50,27 @@ import yaml
 # inside these, so prose in a ``run:`` block that happens to say "secrets.FOO"
 # is not mistaken for a requirement.
 EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
-SECRET_REF = re.compile(r"\bsecrets\.([A-Za-z_][A-Za-z0-9_]*)")
-VARS_REF = re.compile(r"\bvars\.([A-Za-z_][A-Za-z0-9_]*)")
+# A ``secrets.NAME`` / ``vars.NAME`` reference in either GitHub Actions form:
+# dot notation (``secrets.FOO``) or the equivalent index form
+# (``secrets['FOO']`` / ``secrets["FOO"]``). Both resolve identically, so a
+# workflow edit that switches to brackets must not silently drop out of the
+# derived required set — that would reopen the exact drift this gate closes.
+_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+SECRET_REF = re.compile(rf"""\bsecrets(?:\.({_NAME})|\[\s*['"]({_NAME})['"]\s*\])""")
+VARS_REF = re.compile(rf"""\bvars(?:\.({_NAME})|\[\s*['"]({_NAME})['"]\s*\])""")
 
 # Injected by Actions into every workflow; never a configured repo secret, so
 # its absence from the secrets context proves nothing.
 ALWAYS_PROVIDED = frozenset({"GITHUB_TOKEN"})
+
+
+def _names(pattern: re.Pattern, expr: str) -> set[str]:
+    """Names captured by *pattern* in *expr*.
+
+    Each match carries the name in exactly one group — group 1 for the dot
+    form, group 2 for the bracket form — so pick whichever is non-empty.
+    """
+    return {m.group(1) or m.group(2) for m in pattern.finditer(expr)}
 
 
 def walk(node):
@@ -84,8 +99,8 @@ def referenced_names(text: str) -> tuple[set[str], set[str]]:
     variables: set[str] = set()
     for scalar in walk(doc):
         for expr in EXPR.findall(scalar):
-            secrets.update(SECRET_REF.findall(expr))
-            variables.update(VARS_REF.findall(expr))
+            secrets.update(_names(SECRET_REF, expr))
+            variables.update(_names(VARS_REF, expr))
     return secrets - ALWAYS_PROVIDED, variables
 
 

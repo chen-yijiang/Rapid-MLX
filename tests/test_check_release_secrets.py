@@ -59,6 +59,31 @@ def test_collects_secret_and_var_references(crs, tmp_path):
     assert variables == {"RAPID_MAC_DIST_R2_BUCKET"}
 
 
+def test_collects_bracket_notation_references(crs, tmp_path):
+    """``secrets['FOO']`` / ``vars["BAR"]`` resolve exactly like the dot form.
+
+    A future edit to the release workflow that uses index syntax must not
+    silently drop out of the derived required set — that would reopen the
+    #1851 drift the gate exists to close.
+    """
+    wf = _make_workflow(
+        tmp_path,
+        """
+        jobs:
+          x:
+            steps:
+              - env:
+                  TOKEN: ${{ secrets['CLOUDFLARE_API_TOKEN'] }}
+                  ZONE: ${{ secrets["CLOUDFLARE_ZONE_ID"] }}
+                  BUCKET: ${{ vars['RAPID_MAC_DIST_R2_BUCKET'] }}
+                run: echo hi
+        """,
+    )
+    secrets, variables = crs.referenced_names(wf.read_text())
+    assert secrets == {"CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ZONE_ID"}
+    assert variables == {"RAPID_MAC_DIST_R2_BUCKET"}
+
+
 def test_github_token_is_not_a_requirement(crs, tmp_path):
     """Actions injects it; its absence from the context proves nothing."""
     wf = _make_workflow(
