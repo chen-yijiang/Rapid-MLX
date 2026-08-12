@@ -6476,9 +6476,13 @@ class Scheduler:
             # Wrap in try/except: if cache shapes are incompatible
             # (e.g. stale entry after BatchGenerator recreation),
             # fall back to no-cache insert instead of crashing.
-            # Create per-request logits processors
+            # Create per-request logits processors. The tool-bias factory is
+            # gated on ``has_tools``: a per-token Python processor on every
+            # row is pure decode overhead for plain-chat requests (minimax/
+            # gpt-oss attached one unconditionally before, ~every request on
+            # a --tool-call-parser minimax server).
             request_processors: list = []
-            if self._tool_logits_processor_factory:
+            if self._tool_logits_processor_factory and request.has_tools:
                 processor = self._tool_logits_processor_factory()
                 if processor is not None:
                     request_processors.append(processor)
