@@ -22,34 +22,45 @@ What
 * ``_extend_cache`` promotes singleton layers to their batched forms via
   ``cls.merge([self])`` the moment a second row joins, then extends as usual
   (returning a NEW list — promotion replaces layer objects);
-* plain ``KVCache`` / ``RotatingKVCache`` gain the minimal batch-API surface
-  the ``GenerationBatch`` touches while the row count remains one:
-  ``filter`` (pass-through for one row, reset for zero), ``extract``
-  (row 0 as a cheap shallow copy), ``extend`` (promote-first guard).
+* layers admitted to the pass-through gain an INSTANCE-scoped batch-API
+  surface — the minimal set ``GenerationBatch`` touches while the row
+  count remains one: ``filter`` (pass-through for one row), ``extract``
+  (independent copy of row 0), ``extend`` (promote-first guard). The
+  surface is bound per-object, never onto the classes: patching
+  ``KVCache`` itself would flip ``hasattr(cache, "extend")``-style
+  capability gates for EVERY plain cache in the process (the MLLM batch
+  path guards exactly like that and would silently skip cache merging —
+  codex MAJOR on #1874).
 
 Only exact ``KVCache`` / ``RotatingKVCache`` layers (and layers that already
 carry native batch surfaces, e.g. hybrid ``ArraysCache``) pass through.
-``_QuantizableKVCache`` (a ``KVCache`` subclass, #1197/#1862) is deliberately
-excluded by exact-type checks: its ``merge`` is what installs the quantized
-batch cache, and short-circuiting it would silently serve bf16 under
-``--kv-cache-dtype int4``.
+Subclasses are rejected even when they LOOK batch-capable: once instances
+of the base classes can carry the singleton surface, a duck-type probe
+cannot tell a native batch cache from an inherited shim, and
+``_QuantizableKVCache`` (#1197/#1862) must keep its own ``merge`` — the
+hook that installs the quantized batch cache; short-circuiting it would
+silently serve bf16 under ``--kv-cache-dtype int4``.
 
-``extract`` returns a shallow copy (fresh cache object sharing the arrays),
-NOT ``self``: ``GenerationBatch.next`` extracts the finished row's cache and
-then ``filter``\\ s it out of the batch, and the singleton ``filter`` for zero
-surviving rows resets ``keys``/``values`` — returning ``self`` would let that
-reset destroy the just-extracted prefix-cache payload.
+``extract`` mirrors the batched-path contract (``BatchKVCache.extract``):
+an independent, offset-trimmed ``mx.contiguous`` copy. The scheduler
+extracts caches from LIVE rows too (prompt-cache save callback, disk-KV
+checkpoints) while the row keeps decoding into the original buffers, so
+a shallow array-sharing clone is an aliasing hazard, not a payload. The
+zero-row ``filter`` reset is defensive only: mlx-lm's drain path clears
+the layer list without calling ``filter([])``.
 """
 
 from __future__ import annotations
 
 import logging
+import types
 from typing import Any
 
 from . import _mlx_compat as _mlx_compat
 
 _mlx_compat.install()
 
+import mlx.core as mx  # noqa: E402
 from mlx_lm.models.cache import KVCache, RotatingKVCache  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -65,6 +76,13 @@ def _is_singleton_passthrough_layer(cache_obj: Any) -> bool:
         return all(_is_singleton_passthrough_layer(c) for c in sub)
     if type(cache_obj) in _SINGLETON_EXACT_TYPES:
         return True
+    if isinstance(cache_obj, _SINGLETON_EXACT_TYPES):
+        # Subclasses carry merge() semantics that must apply (quantized
+        # batch cache install, #1197/#1862). They must never reach the
+        # duck-type fallback below: an inherited singleton surface would
+        # make them look natively batch-capable (pr_validate codex
+        # BLOCKING on #1874).
+        return False
     # Layers with native batch surfaces (hybrid ArraysCache/MambaCache)
     # already store B=1-leading state and need no conversion.
     return (
@@ -111,13 +129,38 @@ def _singleton_filter(self, batch_indices):
     )
 
 
+_SURFACE_NAMES = ("filter", "extract", "extend")
+
+
 def _singleton_extract(self, idx: int):
+    """Independent copy of row 0, mirroring ``BatchKVCache.extract``.
+
+    The scheduler extracts from LIVE rows (prompt-cache save, disk-KV
+    checkpoints) while decode keeps writing into the original buffers,
+    so the payload must not share array objects with the layer. The
+    copy is offset-trimmed exactly like the batched extract; the bound
+    singleton surface is NOT carried over — extract yields a plain
+    cache, same as the batched path.
+    """
     if int(idx) != 0:
         raise IndexError(f"{type(self).__name__} singleton cache only has row 0")
-    # Shallow copy: shares the arrays but survives the batch's subsequent
-    # filter([]) reset (see module docstring).
     clone = type(self).__new__(type(self))
-    clone.__dict__.update(self.__dict__)
+    clone.__dict__.update(
+        (k, v) for k, v in self.__dict__.items() if k not in _SURFACE_NAMES
+    )
+    if self.keys is None:
+        return clone
+    if isinstance(self, RotatingKVCache):
+        # Temporal-order unroll, then materialize — the rotating buffer
+        # rewrites slots in place, so a shared reference would corrupt.
+        clone.keys = mx.contiguous(self._temporal_order(self.keys))
+        clone.values = mx.contiguous(self._temporal_order(self.values))
+        clone.offset = self.offset
+        clone._idx = clone.keys.shape[2]
+    else:
+        clone.keys = mx.contiguous(self.keys[..., : self.offset, :])
+        clone.values = mx.contiguous(self.values[..., : self.offset, :])
+        clone.offset = self.offset
     return clone
 
 
@@ -126,6 +169,30 @@ def _singleton_extend(self, other):
         f"{type(self).__name__}.extend requires batched promotion first "
         "(singleton_cache_fastpath._promote_layer)"
     )
+
+
+def _bind_singleton_surface(cache_obj: Any) -> None:
+    """Attach the batch surface to THIS object only (never the class).
+
+    Class-level patching would flip ``hasattr``-based capability gates
+    for every plain cache in the process (MLLM batch merging guards that
+    way). Skips names the class provides natively so a future mlx-lm
+    that grows real batch methods on KVCache wins over the shims.
+    """
+    sub = getattr(cache_obj, "caches", None)
+    if isinstance(sub, (list, tuple)):
+        for c in sub:
+            _bind_singleton_surface(c)
+        return
+    if type(cache_obj) not in _SINGLETON_EXACT_TYPES:
+        return  # native-surface layers already expose the batch API
+    for name, fn in (
+        ("filter", _singleton_filter),
+        ("extract", _singleton_extract),
+        ("extend", _singleton_extend),
+    ):
+        if not hasattr(type(cache_obj), name) and name not in cache_obj.__dict__:
+            setattr(cache_obj, name, types.MethodType(fn, cache_obj))
 
 
 def install_singleton_cache_fastpath() -> bool:
@@ -150,18 +217,12 @@ def install_singleton_cache_fastpath() -> bool:
         )
         return False
 
-    for cls in _SINGLETON_EXACT_TYPES:
-        if not hasattr(cls, "filter"):
-            cls.filter = _singleton_filter
-        if not hasattr(cls, "extract"):
-            cls.extract = _singleton_extract
-        if not hasattr(cls, "extend"):
-            cls.extend = _singleton_extend
-
     def _merge_caches_singleton(caches):
         if len(caches) == 1 and all(
             _is_singleton_passthrough_layer(c) for c in caches[0]
         ):
+            for c in caches[0]:
+                _bind_singleton_surface(c)
             return list(caches[0])
         # Promote any singleton layers a previous pass left behind before
         # the stock merge sees them (its BatchKVCache.merge expects raw

@@ -6,10 +6,13 @@ one-row batch keeps plain ``KVCache``/``RotatingKVCache`` layers (aligned
 causal-mask attention) instead of converting to batched forms, and
 promotes them via ``cls.merge([self])`` the moment a second row joins.
 
-These tests cover the pure decision/promotion machinery and the
-minimal batch surface grafted onto the singleton classes. End-to-end
-correctness (mid-flight join produces identical tokens) was verified by
-the bench A/B (tune1-singleton: midflight-join counts {0:160, 1:120}).
+The batch surface (``filter``/``extract``/``extend``) is bound onto the
+admitted INSTANCES only — never the classes — so ``hasattr``-based
+capability detection elsewhere in the process (MLLM batch merging)
+stays truthful. ``extract`` returns an independent offset-trimmed copy,
+mirroring ``BatchKVCache.extract``. End-to-end correctness (mid-flight
+join produces identical tokens) was verified by the bench A/B
+(tune1-singleton: midflight-join counts {0:160, 1:120}).
 """
 
 from __future__ import annotations
@@ -42,6 +45,15 @@ def _filled_kv(n_tokens=4, n_heads=2, head_dim=8):
     return c
 
 
+def _passthrough(layer):
+    """Run one layer through the patched merge seam, the way production
+    admits it to the singleton lane (this is what binds the surface)."""
+    gen = importlib.import_module("mlx_lm.generate")
+    merged = gen._merge_caches([[layer]])
+    assert merged[0] is layer
+    return merged[0]
+
+
 # ------------------------------------------------------- gate decisions
 
 
@@ -58,6 +70,24 @@ def test_kvcache_subclass_excluded():
         pass
 
     assert _is_singleton_passthrough_layer(_QuantishKVCache()) is False
+
+
+def test_mlx_lm_module_subclass_still_excluded():
+    """pr_validate codex BLOCKING: a KVCache subclass must never qualify
+    via the native-batch-surface fallback — inherited (or instance-bound
+    base-object) surfaces plus an ``mlx_lm.`` module path would
+    otherwise re-admit it and bypass its merge() semantics."""
+
+    class _Spoof(KVCache):
+        pass
+
+    _Spoof.__module__ = "mlx_lm.models.cache"
+    # Exercise the fallback exactly: give the INSTANCE the surface too.
+    obj = _Spoof()
+    obj.filter = lambda keep: None
+    obj.extract = lambda idx: None
+    obj.extend = lambda other: None
+    assert _is_singleton_passthrough_layer(obj) is False
 
 
 def test_foreign_object_excluded():
@@ -82,6 +112,29 @@ def test_mlx_lm_native_batch_surface_accepted():
     assert _is_singleton_passthrough_layer(obj) is True
 
 
+# ------------------------------------------- instance-scoped binding
+
+
+def test_install_leaves_plain_instances_bare():
+    """Manual codex MAJOR: class-level patching would flip hasattr-based
+    capability gates for every cache in the process (the MLLM batch path
+    guards `hasattr(c, "extend")` and would silently skip merging). A
+    cache that never entered the singleton lane must stay bare."""
+    c = KVCache()
+    assert not hasattr(c, "filter")
+    assert not hasattr(c, "extract")
+    assert not hasattr(c, "extend")
+    r = RotatingKVCache(max_size=64)
+    assert not hasattr(r, "extend")
+
+
+def test_admitted_instance_gains_surface():
+    c = _passthrough(_filled_kv())
+    assert callable(c.filter) and callable(c.extract) and callable(c.extend)
+    # ...and only that instance — the class remains untouched.
+    assert not hasattr(KVCache, "filter")
+
+
 # ----------------------------------------------------------- promotion
 
 
@@ -100,11 +153,20 @@ def test_promote_is_identity_for_batched():
     assert _promote_layer(promoted) is promoted
 
 
+def test_promote_admitted_instance_still_merges():
+    """The bound surface must not confuse promotion: an admitted
+    singleton still converts through cls.merge on a join."""
+    c = _passthrough(_filled_kv())
+    promoted = _promote_layer(c)
+    assert type(promoted) is not KVCache
+    assert promoted.keys.shape[0] == 1
+
+
 # ----------------------------------------------- singleton batch surface
 
 
 def test_filter_keep_one_row_is_noop():
-    c = _filled_kv()
+    c = _passthrough(_filled_kv())
     keys_before = c.keys
     c.filter([0])
     assert c.keys is keys_before
@@ -112,7 +174,9 @@ def test_filter_keep_one_row_is_noop():
 
 
 def test_filter_zero_rows_resets():
-    c = _filled_kv()
+    """Defensive branch only: mlx-lm's drain path clears the layer list
+    without calling filter([]) — but if a caller ever does, reset."""
+    c = _passthrough(_filled_kv())
     c.filter([])
     assert c.keys is None
     assert c.values is None
@@ -120,33 +184,63 @@ def test_filter_zero_rows_resets():
 
 
 def test_filter_multi_row_raises():
-    c = _filled_kv()
+    c = _passthrough(_filled_kv())
     with pytest.raises(NotImplementedError):
         c.filter([0, 1])
 
 
-def test_extract_returns_shallow_copy_surviving_reset():
-    """GenerationBatch.next() extracts the finished row's cache and then
-    filter([])s the batch — the extracted payload must survive that
-    reset (prefix-cache contract, see module docstring)."""
-    c = _filled_kv()
+def test_extract_returns_independent_trimmed_copy():
+    """Manual codex MAJOR: the scheduler extracts from LIVE rows
+    (prompt-cache save, disk-KV checkpoints) while decode keeps writing
+    into the original buffers — the payload must mirror the batched
+    extract contract: independent arrays, trimmed to offset."""
+    c = _passthrough(_filled_kv())
     clone = c.extract(0)
     assert type(clone) is KVCache
-    assert clone.offset == c.offset
-    assert clone.keys is c.keys  # shallow: shares arrays
-    c.filter([])  # batch resets the (now-empty) slot
+    assert clone.offset == 4
+    assert clone.keys is not c.keys
+    assert clone.values is not c.values
+    assert clone.keys.shape[2] == 4  # trimmed to offset, not buffer size
+    # A payload is a plain cache — no singleton surface rides along.
+    assert "extract" not in clone.__dict__
+    # Live row keeps decoding: in-place writes into the original buffer
+    # must not show through the clone.
+    c.values[..., 0:4, :] = c.values[..., 0:4, :] * 0.0 + 7.0
+    assert float(clone.values[0, 0, 0, 0]) == 1.0
+
+
+def test_extract_rotating_is_independent_copy():
+    r = RotatingKVCache(max_size=64)
+    k = mx.zeros((1, 2, 4, 8))
+    v = mx.ones((1, 2, 4, 8))
+    r.update_and_fetch(k, v)
+    r = _passthrough(r)
+    clone = r.extract(0)
+    assert type(clone) is RotatingKVCache
+    assert clone.keys is not r.keys
+    assert clone.keys.shape[2] == clone._idx
+    assert clone.offset == r.offset
+
+
+def test_extract_survives_batch_drop():
+    """The extracted payload outlives whatever the batch does to the
+    slot afterwards (drop or reset)."""
+    c = _passthrough(_filled_kv())
+    clone = c.extract(0)
+    c.filter([])  # defensive reset path
     assert clone.keys is not None
     assert clone.offset == 4
 
 
 def test_extract_nonzero_row_raises():
-    c = _filled_kv()
+    c = _passthrough(_filled_kv())
     with pytest.raises(IndexError):
         c.extract(1)
 
 
 def test_extend_requires_promotion():
-    a, b = _filled_kv(), _filled_kv()
+    a = _passthrough(_filled_kv())
+    b = _filled_kv()
     with pytest.raises(NotImplementedError):
         a.extend(b)
 
