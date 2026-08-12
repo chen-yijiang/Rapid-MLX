@@ -5519,9 +5519,11 @@ def models_command(args):
             )
         print(video_sep)
 
-    # Image-generation aliases, tagged ``[image:gen]`` — same rationale as the
-    # video section above (#1603): a chat-catalog consumer must be able to
-    # exclude them by Kind tag rather than by hardcoded name.
+    # Image aliases carry an operation tag: text-to-image checkpoints use
+    # ``[image:gen]`` and instruction-edit checkpoints use ``[image:edit]``;
+    # FLUX.2 Klein accepts both request shapes and uses ``[image:both]``.
+    # Besides keeping both out of chat catalogs, this lets GUI consumers expose
+    # the right request shape without guessing capability from the alias.
     if image_profiles:
         image_alias_width = max(
             24, max((len(a) for a in image_profiles), default=0) + 2
@@ -5536,9 +5538,20 @@ def models_command(args):
         print(image_sep)
         for alias in sorted(image_profiles):
             p = image_profiles[alias]
+            folded_path = p.hf_path.casefold().replace("_", "-")
+            if (
+                "flux2" in folded_path
+                or "flux.2" in folded_path
+                or "klein" in folded_path
+            ):
+                kind_tag = "[image:both]"
+            elif "qwen-image-edit" in folded_path:
+                kind_tag = "[image:edit]"
+            else:
+                kind_tag = "[image:gen]"
             print(
                 f"  {alias:<{image_alias_width}} "
-                f"{format_size(p.hf_path):<10} {'[image:gen]':<11} "
+                f"{format_size(p.hf_path):<10} {kind_tag:<12} "
                 f"{p.hf_path:<40}"
             )
         print(image_sep)
@@ -5640,6 +5653,19 @@ def _print_pull_summary(repo_id: str, snapshot_dir, elapsed: float) -> None:
     print(
         f"  Downloaded {repo_id} — {_format_bytes(size)} in "
         f"{_format_pull_duration(elapsed)}"
+    )
+
+    # Activation funnel (docs/telemetry-activation.md): a successful pull is
+    # the ``model_pull`` milestone (an activation, NOT inference-engaged).
+    # This helper is only reached on the two success exits of ``pull_command``,
+    # so it is the single "pull succeeded" chokepoint. Fired once per install,
+    # consent-gated + ``@_safe``, so it is a no-op when telemetry is off and
+    # can never affect the pull.
+    from vllm_mlx.telemetry import emit as _telemetry_emit
+    from vllm_mlx.telemetry.activation_spec import ACTIVATION_MODEL_PULL, SURFACE_CLI
+
+    _telemetry_emit.activation(
+        activation_kind=ACTIVATION_MODEL_PULL, surface=SURFACE_CLI
     )
 
 
@@ -7933,7 +7959,17 @@ def telemetry_command(args) -> None:
         return
 
     if action == "reset":
-        reset_state()
+        try:
+            reset_state()
+        except OSError as exc:
+            print()
+            print(f"  Reset incomplete — some files could not be removed: {exc}")
+            print("  Telemetry state may still be present; check ~/.rapid-mlx/.")
+            print()
+            # Non-zero exit so automation (`rapid-mlx telemetry reset` in a
+            # script) sees the failure instead of a false success — state may
+            # still be on disk and telemetry may still be enabled.
+            sys.exit(1)
         print()
         print("  Removed consent + client-id files. Next interactive run re-prompts.")
         print()
