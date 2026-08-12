@@ -203,6 +203,33 @@ def test_promote_admitted_instance_still_merges():
     assert promoted.keys.shape[0] == 1
 
 
+def test_promote_composite_preserves_wrapper_state():
+    """codex r3 BLOCKING: composite promotion must clone the wrapper,
+    not rebuild it via ``type(obj)(*children)`` — wrappers holding extra
+    constructor state would crash on a second request's join."""
+
+    class _StatefulWrapper:
+        def __init__(self, tag, caches):
+            self.tag = tag
+            self.caches = caches
+
+    w = _StatefulWrapper("keep-me", [_filled_kv()])
+    promoted = _promote_layer(w)
+    assert promoted is not w
+    assert promoted.tag == "keep-me"
+    assert type(promoted.caches[0]) is not KVCache  # child promoted
+
+
+def test_extend_into_empty_batch_binds_surface():
+    """codex r3 BLOCKING: layers reaching the extend seam without going
+    through the patched merge must still get the singleton surface."""
+    gen = importlib.import_module("mlx_lm.generate")
+    raw = _filled_kv()
+    out = gen._extend_cache([], [raw])
+    assert out[0] is raw
+    assert "filter" in raw.__dict__ and "extract" in raw.__dict__
+
+
 # ----------------------------------------------- singleton batch surface
 
 

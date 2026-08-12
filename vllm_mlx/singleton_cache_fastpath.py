@@ -107,10 +107,16 @@ def _promote_layer(cache_obj: Any) -> Any:
     """Convert a singleton layer to its batched form (idempotent)."""
     sub = getattr(cache_obj, "caches", None)
     if isinstance(sub, (list, tuple)):
-        converted = tuple(_promote_layer(c) for c in sub)
+        converted = [_promote_layer(c) for c in sub]
         if all(a is b for a, b in zip(sub, converted)):
             return cache_obj
-        return type(cache_obj)(*converted)
+        # Clone the wrapper and swap the children — reconstructing via
+        # ``type(obj)(*converted)`` assumes a splat constructor and
+        # would crash wrappers holding extra state (codex r3 on #1874).
+        clone = type(cache_obj).__new__(type(cache_obj))
+        clone.__dict__.update(cache_obj.__dict__)
+        clone.caches = type(sub)(converted) if isinstance(sub, tuple) else converted
+        return clone
     if type(cache_obj) in _SINGLETON_EXACT_TYPES:
         return type(cache_obj).merge([cache_obj])
     return cache_obj
@@ -250,6 +256,13 @@ def install_singleton_cache_fastpath() -> bool:
 
     def _extend_cache_promote(cache_a, cache_b):
         if not cache_a:
+            # cache_b normally arrives through the patched merge (which
+            # binds the singleton surface), but bind defensively in case
+            # a caller hands raw per-request layers straight to the
+            # extend seam (codex r3 on #1874).
+            for c in cache_b:
+                if _is_singleton_passthrough_layer(c):
+                    _bind_singleton_surface(c)
             return cache_b
         if not cache_b:
             return cache_a
