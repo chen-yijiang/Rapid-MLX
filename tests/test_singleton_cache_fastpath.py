@@ -32,9 +32,21 @@ from vllm_mlx.singleton_cache_fastpath import (
 
 @pytest.fixture(scope="module", autouse=True)
 def installed():
+    gen = importlib.import_module("mlx_lm.generate")
+    saved = (
+        gen._merge_caches,
+        gen._extend_cache,
+        getattr(gen, "_rapid_singleton_cache_fastpath", False),
+    )
     assert install_singleton_cache_fastpath() is True
     # Idempotent: second install is a no-op success.
     assert install_singleton_cache_fastpath() is True
+    yield
+    # Restore so unrelated test modules are not order-dependent on the
+    # patch (if the process had already installed before this module,
+    # this restores that same patched state — a no-op).
+    gen._merge_caches, gen._extend_cache = saved[0], saved[1]
+    gen._rapid_singleton_cache_fastpath = saved[2]
 
 
 def _filled_kv(n_tokens=4, n_heads=2, head_dim=8):
@@ -95,6 +107,35 @@ def test_foreign_object_excluded():
         pass
 
     assert _is_singleton_passthrough_layer(_NotACache()) is False
+
+
+def test_composite_without_own_surface_rejected():
+    """codex r2 BLOCKING: a wrapper is not admissible on child
+    qualification alone — batch ops run on the WRAPPER, and one without
+    its own filter/extract/extend would AttributeError at batch time."""
+
+    class _BareWrapper:
+        def __init__(self):
+            self.caches = [KVCache()]
+
+    assert _is_singleton_passthrough_layer(_BareWrapper()) is False
+
+
+def test_composite_with_surface_and_qualifying_children_accepted():
+    class _SurfacedWrapper:
+        def __init__(self):
+            self.caches = [KVCache()]
+
+        def filter(self, keep):
+            pass
+
+        def extract(self, idx):
+            pass
+
+        def extend(self, other):
+            pass
+
+    assert _is_singleton_passthrough_layer(_SurfacedWrapper()) is True
 
 
 def test_mlx_lm_native_batch_surface_accepted():
@@ -189,6 +230,14 @@ def test_filter_multi_row_raises():
         c.filter([0, 1])
 
 
+def test_filter_wrong_row_raises():
+    """codex r2 BLOCKING: filter([1]) must not silently keep row 0 —
+    that would hand another request this row's KV state."""
+    c = _passthrough(_filled_kv())
+    with pytest.raises(IndexError):
+        c.filter([1])
+
+
 def test_extract_returns_independent_trimmed_copy():
     """Manual codex MAJOR: the scheduler extracts from LIVE rows
     (prompt-cache save, disk-KV checkpoints) while decode keeps writing
@@ -271,3 +320,12 @@ def test_extend_cache_promotes_then_extends():
     assert type(out[0]) is not KVCache  # promoted to batched form
     # Batched cache now holds two rows' worth of state.
     assert out[0].keys.shape[0] == 2
+
+
+def test_extend_cache_layer_count_mismatch_raises():
+    """codex r2 BLOCKING: a bare zip would silently drop trailing layers
+    and serve incomplete KV state. Same-model joins always agree on
+    layer count, so a mismatch is corruption — fail loudly."""
+    gen = importlib.import_module("mlx_lm.generate")
+    with pytest.raises(ValueError, match="layer count mismatch"):
+        gen._extend_cache([_filled_kv(), _filled_kv()], [_filled_kv()])

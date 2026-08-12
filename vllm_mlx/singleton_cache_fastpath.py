@@ -73,6 +73,16 @@ _SINGLETON_EXACT_TYPES = (KVCache, RotatingKVCache)
 def _is_singleton_passthrough_layer(cache_obj: Any) -> bool:
     sub = getattr(cache_obj, "caches", None)
     if isinstance(sub, (list, tuple)):
+        # The composite itself must carry the batch surface (CacheList
+        # does natively) — child qualification alone would admit a
+        # wrapper whose own filter/extract/extend calls AttributeError
+        # at batch time (codex r2 on #1874).
+        if not (
+            hasattr(cache_obj, "filter")
+            and hasattr(cache_obj, "extract")
+            and hasattr(cache_obj, "extend")
+        ):
+            return False
         return all(_is_singleton_passthrough_layer(c) for c in sub)
     if type(cache_obj) in _SINGLETON_EXACT_TYPES:
         return True
@@ -122,6 +132,15 @@ def _singleton_filter(self, batch_indices):
             self._idx = 0
         return
     if n == 1:
+        # The kept index must actually be row 0 — silently accepting
+        # filter([1]) would associate another request with this row's
+        # KV state (codex r2 on #1874).
+        kept = int(batch_indices[0])
+        if kept != 0:
+            raise IndexError(
+                f"{type(self).__name__} singleton cache only has row 0; "
+                f"filter kept row {kept}"
+            )
         return
     raise NotImplementedError(
         f"{type(self).__name__}.filter is singleton pass-through only; "
@@ -234,6 +253,14 @@ def install_singleton_cache_fastpath() -> bool:
             return cache_b
         if not cache_b:
             return cache_a
+        if len(cache_a) != len(cache_b):
+            # Stock _extend_cache zips just like this and would silently
+            # drop trailing layers; same-model joins always agree on
+            # layer count, so a mismatch is corruption — fail loudly.
+            raise ValueError(
+                "cache layer count mismatch on extend: "
+                f"{len(cache_a)} != {len(cache_b)}"
+            )
         out = []
         for ca, cb in zip(cache_a, cache_b):
             pa, pb = _promote_layer(ca), _promote_layer(cb)
