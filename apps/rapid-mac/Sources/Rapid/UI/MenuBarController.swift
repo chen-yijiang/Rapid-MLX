@@ -193,9 +193,9 @@ final class MenuBarController: NSObject {
                 return
             }
             // Unsigned build: Sparkle is off and there is no in-app installer
-            // to fall back to any more. Settings → App renders the version
-            // status and the release-page link, so send the user there rather
-            // than to a dead end.
+            // to fall back to any more. Settings → App names the running
+            // version and, in this state, offers a link to the release page,
+            // so send the user there rather than to a dead end.
             NSApp.activate(ignoringOtherApps: true)
             AppDelegate.openSettingsWindowAt?(.app)
         case .checkForUpdates:

@@ -41,7 +41,6 @@ struct SettingsView: View {
     /// without re-triggering the one-time prompt, plus a "Reset
     /// onboarding alerts" affordance that brings the prompt back.
     @Environment(DockVisibilityPromptStore.self) private var dockPromptStore
-    @Environment(\.openWindow) private var openWindow
 
     /// Stable reference shared by the sidebar and detail canvas. Keeping the
     /// frequently-mutated category outside this large view's value state means
@@ -922,20 +921,36 @@ struct SettingsView: View {
                 )
                 Spacer(minLength: RapidTheme.Space.sm)
                 // Hands off to Sparkle's own update panel, which owns the
-                // download/verify/install-on-quit UI. Disabled on unsigned
-                // builds, where Sparkle has no public key to verify against
-                // and there is no in-app installer to fall back to.
-                Button {
-                    sparkleUpdater.checkForUpdates()
-                } label: {
-                    Label("Update Rapid-MLX", systemImage: "arrow.down.circle.fill")
+                // download/verify/install-on-quit UI.
+                //
+                // Unsigned builds have no Sparkle key and, since the in-app
+                // installer was removed, no install path at all — so a bare
+                // disabled button would be a dead end on the one screen the
+                // tray sends those users to. Offer the release page instead,
+                // through the same allowlist check the missing-runtime overlay
+                // uses, so a compromised manifest cannot turn this into a
+                // phishing redirect.
+                if sparkleUpdater.isEnabled {
+                    Button {
+                        sparkleUpdater.checkForUpdates()
+                    } label: {
+                        Label("Update Rapid-MLX", systemImage: "arrow.down.circle.fill")
+                    }
+                    .buttonStyle(.rapidPrimary)
+                    .help("Opens the updater to download and install this release.")
+                    .accessibilityIdentifier("Settings.App.UpdateCTA")
+                } else if let releaseURL = ContentView.missingOverlayDownloadURL(
+                    for: appUpdater.availableUpdate
+                ) {
+                    Button {
+                        NSWorkspace.shared.open(releaseURL)
+                    } label: {
+                        Label("Download from the release page", systemImage: "arrow.up.right.square")
+                    }
+                    .buttonStyle(.rapidPrimary)
+                    .help("In-app updates need a signed release build; download this version manually.")
+                    .accessibilityIdentifier("Settings.App.UpdateCTA")
                 }
-                .buttonStyle(.rapidPrimary)
-                .disabled(!sparkleUpdater.isEnabled)
-                .help(sparkleUpdater.isEnabled
-                      ? "Opens the updater to download and install this release."
-                      : "In-app updates are available in signed release builds.")
-                .accessibilityIdentifier("Settings.App.UpdateCTA")
             case .upToDate(let version):
                 statusLine(
                     symbol: "checkmark.circle.fill",
