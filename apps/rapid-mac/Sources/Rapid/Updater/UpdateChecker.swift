@@ -43,19 +43,16 @@ import Observation
 ///
 /// `dmg_sha256` / `dmg_size` are emitted by the publish script
 /// (`rapidmlx.com/scripts/publish-desktop-release.sh`) but the
-/// `Release` Codable struct below does NOT decode them yet —
-/// the in-app installer still relies on `codesign --verify` on the
-/// mounted bundle for integrity (see ``Installer.swift``).
-/// Decoding + verifying `dmg_sha256` is the next reinforcement step;
-/// when added, the Installer should fail closed if the hash is
-/// present in the manifest and the downloaded bytes don't match.
+/// `Release` Codable struct below does NOT decode them — nothing in
+/// this process downloads the DMG any more. Sparkle fetches its own
+/// appcast and verifies the EdDSA signature over the payload it
+/// downloads, so integrity lives there, not here.
 /// Codable silently drops unknown keys, so existing manifests don't
 /// need a schema bump when those fields appear/disappear.
 ///
 /// `sidecar_*` / `model_*` are bootstrapper-only fields read by
 /// ``BootstrapCoordinator`` on first-install (slice γ + slice δ).
-/// The v0.8.x in-app UpdateChecker does NOT take action on them —
-/// `Installer.swift` keeps using `dmg_url` regardless. Declaring
+/// The in-app UpdateChecker does NOT take action on them. Declaring
 /// them here as `Codable Optional` so a future migration (e.g.
 /// surfacing "sidecar fix-up download" in Settings, or driving the
 /// in-app installer through the bootstrapper machinery) only has
@@ -83,9 +80,9 @@ import Observation
 ///     leaves the app on its current version (no alert, no crash),
 ///     and it is skipped entirely when the user has opted out (see
 ///     ``updateChecksEnabled``).
-///   * Signed production builds delegate installation to Sparkle. Builds
-///     without an injected Sparkle public key retain ``Installer.swift`` as a
-///     migration fallback: download DMG, verify, mount, swap, relaunch.
+///   * Installation is Sparkle's job entirely. This type never downloads,
+///     verifies or swaps a bundle; it reports what the manifest says so the
+///     version pill and the Settings panel have something to render.
 @MainActor
 @Observable
 final class UpdateChecker {

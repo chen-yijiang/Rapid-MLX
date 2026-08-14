@@ -806,10 +806,8 @@ struct SettingsView: View {
     }
 
     /// Top action row inside ``appPanel``. Three states, all
-    /// non-blocking (the actual download + install runs in the
-    /// dedicated ``UpdateInstallView`` scene so this row stays
-    /// responsive even if the user closed the update window
-    /// mid-install).
+    /// non-blocking: the CTA only hands off to Sparkle, which drives the
+    /// download and install behind its own panel.
     /// Coarse status the App panel renders. Keyed off the app
     /// self-update poller's observable surface so the "Up to date"
     /// green check only fires after a check has actually established
@@ -1051,10 +1049,10 @@ struct SettingsView: View {
         )
     }
 
-    /// Release-notes preview inside ``appPanel``. The dedicated
-    /// ``UpdateInstallView`` window shows the full notes; here we
-    /// render an inline scroll-bounded preview so the user can see
-    /// "what's new" without opening another window.
+    /// Release-notes preview inside ``appPanel``. Sparkle's own update
+    /// panel shows the notes embedded in the appcast; here we render an
+    /// inline scroll-bounded preview so the user can see "what's new"
+    /// without starting an update.
     private func appReleaseNotesPanel(notes: String) -> some View {
         VStack(alignment: .leading, spacing: RapidTheme.Space.sm) {
             SectionHeader("Release notes")

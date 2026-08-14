@@ -90,6 +90,11 @@ enum DevSnapshot {
                     .environment(appearance)
                     .environment(settingsRouter)
                     .environment(installTracker)
+                    // ``FailedReplaceBanner`` (rendered by ContentView when a
+                    // Finder Replace silently failed) hands off to Sparkle, so
+                    // the controller has to be in this chain too — SwiftUI
+                    // traps on a missing observable the first time it renders.
+                    .environment(snapshotSparkleUpdater)
                     .environment(quickstart)
                     .environment(dockPromptStore)
                     .environment(browseApproval)
