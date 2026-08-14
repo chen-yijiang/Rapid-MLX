@@ -41,8 +41,8 @@ import Observation
 ///          }
 ///     5xx — CF / R2 transient error
 ///
-/// `dmg_sha256` / `dmg_size` are emitted by the publish script
-/// (`rapidmlx.com/scripts/publish-desktop-release.sh`) but the
+/// `dmg_sha256` / `dmg_size` are emitted by the desktop release workflow
+/// (`.github/workflows/rapid-mac-release.yml`) but the
 /// `Release` Codable struct below does NOT decode them — nothing in
 /// this process downloads the DMG any more. Sparkle fetches its own
 /// appcast and verifies the EdDSA signature over the payload it
@@ -66,8 +66,10 @@ import Observation
 ///
 /// Decisions:
 ///
-///   * Per-launch + 6-hour timer poll. Mac users typically restart
-///     apps weekly+, so per-launch is the dominant cadence anyway.
+///   * Per-launch only, no timer. Sparkle owns the recurring
+///     "is there a newer version" schedule; a second timer beside it was
+///     pure duplication. Mac users restart apps weekly+, so per-launch was
+///     the dominant cadence anyway.
 ///   * No background fetch via NSURLSession schedulers.
 ///   * No auth header — the endpoint is public.
 ///   * **Privacy contract.** The ONLY thing this request sends is
@@ -202,8 +204,9 @@ final class UpdateChecker {
     private(set) var latest: Release?
     /// Last error from a check, or nil. Cleared on a successful poll.
     private(set) var lastError: String?
-    /// When the last check finished (success OR failure), used by the
-    /// 6-hour timer to decide whether to skip.
+    /// When the last check finished (success OR failure). Surfaced for
+    /// diagnostics; nothing schedules off it now that the check is
+    /// per-launch.
     private(set) var lastCheckedAt: Date?
 
     /// Currently-installed version, read once from the bundle. Kept

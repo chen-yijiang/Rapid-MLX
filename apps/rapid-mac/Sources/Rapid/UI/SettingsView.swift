@@ -656,9 +656,8 @@ struct SettingsView: View {
     ///     MenuBarExtra menu entry. Disabled on unsigned builds where
     ///     Sparkle is not configured.
     ///   * Otherwise → calm "Up to date" check + a Recheck button.
-    ///     The poller also runs on a 6 h timer from ``RapidApp``;
-    ///     manual recheck is for users who saw the menubar tint
-    ///     change and want to confirm.
+    ///     The status is refreshed once per launch from ``RapidApp``;
+    ///     manual recheck is how a user refreshes it without relaunching.
     @ViewBuilder
     private var appPanel: some View {
         VStack(alignment: .leading, spacing: RapidTheme.Space.xl) {
