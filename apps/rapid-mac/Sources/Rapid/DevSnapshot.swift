@@ -70,7 +70,6 @@ enum DevSnapshot {
             catalog: snapshotMCPCatalog,
             approval: snapshotMCPApproval
         )
-        let snapshotInstaller = Installer()
         let snapshotSparkleUpdater = SparkleUpdateController(infoDictionary: [:])
         let snapshotWebSearch = WebSearchConfig()
         let snapshotPerfDefaults = UserDefaults(suiteName: "rapid.dev-snapshot.perf")!
@@ -608,7 +607,6 @@ enum DevSnapshot {
                     .environment(server)
                     .environment(downloads)
                     .environment(updater)
-                    .environment(snapshotInstaller)
                     .environment(snapshotSparkleUpdater)
                     .environment(dockPromptStore)
                     .environment(snapshotWebSearch)

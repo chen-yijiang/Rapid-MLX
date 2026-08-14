@@ -34,12 +34,6 @@ struct SettingsView: View {
     /// environment chain so the panel can render the same
     /// "available update" state the MenuBarExtra already drives.
     @Environment(UpdateChecker.self) private var appUpdater
-    /// #191 companion: the in-app installer is what powers the
-    /// "Install and Restart" button in ``UpdateInstallView``; we
-    /// also bind it here so the panel can show "Updating…" /
-    /// "Failed: …" inline when the dedicated update window is
-    /// closed.
-    @Environment(Installer.self) private var appInstaller
     @Environment(SparkleUpdateController.self) private var sparkleUpdater
     @Environment(\.dismissWindow) private var dismissWindow
     /// #260: persisted "hide Dock icon on close" choice. Settings →
@@ -47,10 +41,6 @@ struct SettingsView: View {
     /// without re-triggering the one-time prompt, plus a "Reset
     /// onboarding alerts" affordance that brings the prompt back.
     @Environment(DockVisibilityPromptStore.self) private var dockPromptStore
-    /// #191: the App panel's "Update Rapid-MLX Desktop" CTA
-    /// opens the existing ``update-install`` scene — the same
-    /// one the MenuBarExtra menu drives. We need
-    /// ``\Environment.openWindow`` for the open call.
     @Environment(\.openWindow) private var openWindow
 
     /// Stable reference shared by the sidebar and detail canvas. Keeping the
@@ -662,11 +652,10 @@ struct SettingsView: View {
     /// users here to install a newer Rapid-MLX Desktop.
     ///
     /// State table:
-    ///   * ``availableUpdate`` non-nil → prominent "Update Rapid-MLX
-    ///     Desktop" CTA that opens the existing in-app installer
-    ///     window, mirroring the MenuBarExtra menu entry. Falls
-    ///     back to the GitHub Releases page when the release
-    ///     payload doesn't carry a DMG URL.
+    ///   * ``availableUpdate`` non-nil → prominent "Update Rapid-MLX"
+    ///     CTA that hands off to Sparkle's update panel, mirroring the
+    ///     MenuBarExtra menu entry. Disabled on unsigned builds where
+    ///     Sparkle is not configured.
     ///   * Otherwise → calm "Up to date" check + a Recheck button.
     ///     The poller also runs on a 6 h timer from ``RapidApp``;
     ///     manual recheck is for users who saw the menubar tint
@@ -934,22 +923,20 @@ struct SettingsView: View {
                     identifier: "Settings.App.UpdateHeadline"
                 )
                 Spacer(minLength: RapidTheme.Space.sm)
-                // Codex r1 P2 (CTA never disabled): the CTA only
-                // opens the existing update-install scene — leaving
-                // it tappable while ``appInstaller.isRunning`` lets
-                // the user reopen the progress window if they
-                // accidentally closed it mid-download. ``Updating…``
-                // copy makes the live state obvious.
+                // Hands off to Sparkle's own update panel, which owns the
+                // download/verify/install-on-quit UI. Disabled on unsigned
+                // builds, where Sparkle has no public key to verify against
+                // and there is no in-app installer to fall back to.
                 Button {
-                    appOpenUpdateWindow()
+                    sparkleUpdater.checkForUpdates()
                 } label: {
-                    if appInstaller.isRunning {
-                        Label("Updating…", systemImage: "arrow.down.circle")
-                    } else {
-                        Label("Update Rapid-MLX", systemImage: "arrow.down.circle.fill")
-                    }
+                    Label("Update Rapid-MLX", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.rapidPrimary)
+                .disabled(!sparkleUpdater.isEnabled)
+                .help(sparkleUpdater.isEnabled
+                      ? "Opens the updater to download and install this release."
+                      : "In-app updates are available in signed release builds.")
                 .accessibilityIdentifier("Settings.App.UpdateCTA")
             case .upToDate(let version):
                 statusLine(
@@ -1088,24 +1075,6 @@ struct SettingsView: View {
             )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// Open the in-app installer window — same window the
-    /// MenuBarExtra menu drives. Wrapped here so the panel reads
-    /// cleanly. v0.5.4 documented the runloop-tick workaround for
-    /// ``openWindow`` against a never-instantiated scene; we
-    /// mirror the same pattern (small sleep + activate first)
-    /// for the same reason.
-    private func appOpenUpdateWindow() {
-        if sparkleUpdater.isEnabled {
-            sparkleUpdater.checkForUpdates()
-            return
-        }
-        Task { @MainActor in
-            NSApp.activate(ignoringOtherApps: true)
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            openWindow(id: "update-install")
-        }
     }
 
     /// A label/value pair inside the Version section.

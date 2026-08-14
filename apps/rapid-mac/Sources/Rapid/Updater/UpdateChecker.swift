@@ -417,11 +417,10 @@ final class UpdateChecker {
             throw UpdateError.decode("html_url is not in the release allowlist: \(release.htmlURL)")
         }
         // DMG URL is optional; when present it must be HTTPS on the
-        // download-host allowlist (the same set the in-app installer
-        // accepts). Otherwise the installer would refuse it at the
-        // download gate — failing closed here surfaces the cause
-        // earlier and avoids a half-state where the user sees the
-        // "Install in app" CTA but it can never succeed.
+        // download-host allowlist. Sparkle owns the real download, so this
+        // no longer guards a fetch we perform — it keeps a manifest that
+        // names an unexpected download host from being accepted as
+        // well-formed, which is the shape the status UI trusts.
         if let dmg = release.dmgURL {
             guard let dmgURL = URL(string: dmg),
                   dmgURL.scheme?.lowercased() == "https",

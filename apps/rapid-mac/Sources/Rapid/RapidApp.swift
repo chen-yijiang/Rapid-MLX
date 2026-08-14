@@ -20,6 +20,26 @@ let updateReleaseHostAllowlist: Set<String> = [
     "www.rapidmlx.com",
 ]
 
+/// Hosts a manifest's `dmg_url` is allowed to name. Sparkle owns the
+/// actual download now (its own appcast, its own EdDSA verification), so
+/// nothing in-process fetches this URL any more — the check survives as a
+/// manifest-shape gate: a payload naming an unexpected download host is
+/// treated as a malformed manifest rather than quietly accepted into the
+/// version status the UI renders.
+///
+/// The ``UpdateCheckerTests`` superset invariant requires every host in
+/// ``updateReleaseHostAllowlist`` to appear here too; keep the two in sync.
+/// Lower-cased ASCII hostnames only.
+let updateDownloadHostAllowlist: Set<String> = [
+    "github.com",
+    "www.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "dl.rapidmlx.com",
+    "rapidmlx.com",
+    "www.rapidmlx.com",
+]
+
 struct RapidApp: App {
     @Environment(\.openWindow) private var openWindow
 
@@ -39,11 +59,10 @@ struct RapidApp: App {
     /// Self-update poller. GETs a public static manifest on R2 at
     /// `https://dl.rapidmlx.com/latest.json`. See ``UpdateChecker``.
     @State private var updater: UpdateChecker
-    /// In-app DMG installer that drives download → mount → swap → relaunch.
-    @State private var installer: Installer
-    /// Sparkle is the production update path once a release build carries its
-    /// injected EdDSA public key. The legacy checker/installer above remains a
-    /// transition fallback for local builds and already-published clients.
+    /// Sparkle owns the whole update pipeline — check, download, EdDSA
+    /// verification, install-on-quit — for release builds carrying an injected
+    /// public key. ``UpdateChecker`` above no longer installs anything; it is
+    /// the read-only version/status source the pill and Settings render.
     @State private var sparkleUpdater: SparkleUpdateController
     /// Persisted sampling knobs exposed via Settings → Sampling.
     @State private var sampling: SamplingConfig
@@ -211,26 +230,7 @@ struct RapidApp: App {
             customInstructions: customInstructionsConfig,
             server: manager
         )
-        let updateChecker: UpdateChecker
-        if ProcessInfo.processInfo.environment["RAPID_GUI_UPDATE_CURRENT"] == "1" {
-            // Deterministic GUI-golden fixture: exercise the restored update
-            // window while the published release equals the running build.
-            // Production launches never set this harness-only variable.
-            let current = UpdateChecker.bundleVersion()
-            let fixture = UpdateChecker.Release(
-                schemaVersion: 1,
-                version: current,
-                tagName: "rapid-mac-v\(current)",
-                htmlURL: "https://github.com/machinefi/rapid-desktop/releases/tag/rapid-mac-v\(current)",
-                notes: "",
-                publishedAt: "2026-08-10T00:00:00Z",
-                dmgURL: "https://dl.rapidmlx.com/rapid-mac/\(current)/rapid-mlx-desktop.dmg"
-            )
-            updateChecker = UpdateChecker(currentVersion: current) { fixture }
-        } else {
-            updateChecker = UpdateChecker()
-        }
-        let installerInstance = Installer()
+        let updateChecker = UpdateChecker()
         let sparkleUpdateController = SparkleUpdateController()
         let downloadsInstance = DownloadManager(binaryPath: manager.binaryPath)
         // #253: let ``ServerManager.start(alias:)`` await any in-flight
@@ -247,7 +247,6 @@ struct RapidApp: App {
         _imageGen = State(initialValue: ImageGenViewModel(server: manager))
         _audio = State(initialValue: AudioViewModel(server: manager))
         _updater = State(initialValue: updateChecker)
-        _installer = State(initialValue: installerInstance)
         _sparkleUpdater = State(initialValue: sparkleUpdateController)
         _sampling = State(initialValue: samplingConfig)
         _customInstructions = State(initialValue: customInstructionsConfig)
@@ -259,7 +258,6 @@ struct RapidApp: App {
         AppDelegate.shared.server = manager
         AppDelegate.shared.downloads = downloadsInstance
         AppDelegate.shared.updater = updateChecker
-        AppDelegate.shared.installer = installerInstance
         AppDelegate.shared.sparkleUpdater = sparkleUpdateController
         AppDelegate.shared.chat = chat
         AppDelegate.shared.appearance = appearanceConfig
@@ -306,12 +304,9 @@ struct RapidApp: App {
                 .task {
                     // Register the AppKit→SwiftUI bridges so the Dock
                     // reopen hook and the menu-bar tray can materialise
-                    // the main / update scenes through ``openWindow``.
+                    // the main / settings scenes through ``openWindow``.
                     AppDelegate.openMainWindow = {
                         openWindow(id: "main")
-                    }
-                    AppDelegate.openUpdateWindow = {
-                        openWindow(id: "update-install")
                     }
                     AppDelegate.openSettingsWindow = {
                         openWindow(id: "settings")
@@ -323,9 +318,6 @@ struct RapidApp: App {
                         settingsRouter.route(to: category) {
                             openWindow(id: "settings")
                         }
-                    }
-                    if ProcessInfo.processInfo.environment["RAPID_GUI_OPEN_UPDATE_WINDOW"] == "1" {
-                        openWindow(id: "update-install")
                     }
                 }
                 .task {
@@ -417,7 +409,6 @@ struct RapidApp: App {
                 .environment(server)
                 .environment(downloads)
                 .environment(updater)
-                .environment(installer)
                 .environment(sparkleUpdater)
                 .environment(dockPromptStore)
                 .environment(webSearch)
@@ -430,15 +421,6 @@ struct RapidApp: App {
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 900, height: 720)
-
-        // Dedicated window for the in-app update flow.
-        Window("Update Rapid-MLX", id: "update-install") {
-            UpdateInstallView()
-                .environment(updater)
-                .environment(installer)
-        }
-        .windowResizability(.contentSize)
-        .defaultSize(width: 480, height: 360)
     }
 
     /// Walk ``NSApp.windows`` and flip the main chat window's level to
@@ -488,7 +470,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// like ``server`` / ``sessionStore`` above; weak because the SwiftUI
     /// ``@State`` on ``RapidApp`` owns each for the app's lifetime.
     weak var updater: UpdateChecker?
-    weak var installer: Installer?
     weak var sparkleUpdater: SparkleUpdateController?
     /// The single AppKit menu-bar (tray) surface. Installed in
     /// ``applicationDidFinishLaunching`` and held strongly so the
@@ -740,7 +721,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 25.x / Tahoe), so it was removed entirely rather than run
         // alongside this one — two surfaces at once is the #475
         // double-icon bug. The controller reads its live state
-        // (server / updater / installer / sessionStore / quickAsk)
+        // (server / updater / sparkleUpdater / sessionStore / quickAsk)
         // through ``AppDelegate.shared``, all populated by
         // ``RapidApp.init`` above.
         menuBarController = MenuBarController()
@@ -831,12 +812,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// once — guarded with ``?.()`` so a reopen click before first
     /// launch is a no-op, not a crash.
     static var openMainWindow: (@MainActor () -> Void)?
-
-    /// Companion bridge for the update window, driven from the menu-bar
-    /// tray's "Update available" / "Updating…" item. Same contract as
-    /// ``openMainWindow``: written from the main scene's ``.task``,
-    /// invoked from ``MenuBarController`` via ``?.()``.
-    static var openUpdateWindow: (@MainActor () -> Void)?
 
     /// Bridge for the Settings window, driven from the tray's
     /// "Settings…" item AND the ⌘, command. Uses a real ``Window``
