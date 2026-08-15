@@ -10,10 +10,12 @@
 `qwen3.8-27b-mixed-3.5bpw` serves [`rapid-mlx/Qwen3.8-27B-mixed-3.5bpw-MLX`](https://huggingface.co/rapid-mlx/Qwen3.8-27B-mixed-3.5bpw-MLX)
 — a Rapid-MLX quantization that spends its bits where they matter instead of
 flattening every tensor to 4-bit. It lands at **13.0 GB of weights against the
-4-bit build's 15.0 GB**, so it fits a 24 GB Mac with room for real context.
+4-bit build's 15.0 GB**.
 
-Measured through `rapid-mlx serve` on an M3 Ultra (8K prompt, whole process
-tree): **20 GB peak, 323 tok/s prefill, 40 tok/s decode, zero swap.** In the
+Measured through `rapid-mlx serve` on an M3 Ultra (8K prompt, peak across the
+whole process tree): **20 GB peak, 323 tok/s prefill, 40 tok/s decode, zero
+swap.** Plan for a 48 GB Mac or larger — at that peak a 32 GB machine has very
+little left for anything else, and the app's own fit warning will say so. In the
 release eval it answers **10/10 coding tasks and 25/30 tool-calling scenarios**,
 including the parallel and sequential multi-tool levels.
 
@@ -22,10 +24,10 @@ rapid-mlx chat qwen3.8-27b-mixed-3.5bpw
 ```
 
 One honest caveat: on the 10-task MATH subset it scored 5/10 with thinking
-disabled, below its 4-bit sibling's league. It is a strong coding and
-tool-calling model at this footprint; if your work is arithmetic-heavy,
-`qwen3.6-35b-4bit` or `gemma-4-26b-4bit` remain the safer picks. That is also
-why it is **not** a built-in RAM-tier recommendation yet.
+disabled. It is a strong coding and tool-calling model at this footprint; if
+your work is arithmetic-heavy, `qwen3.6-35b-4bit` or `gemma-4-26b-4bit` remain
+the safer picks. That is also why it is **not** a built-in RAM-tier
+recommendation.
 
 ### Name your own models
 
