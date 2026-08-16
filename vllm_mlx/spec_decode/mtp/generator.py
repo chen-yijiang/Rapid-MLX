@@ -360,7 +360,9 @@ def mtp_generate_step(
                 snapshots = c.rollback_state
                 if isinstance(snapshots, list):
                     if verify_size is None:
-                        raise AssertionError("verify_size is required for SSM K>1 rollback")
+                        raise AssertionError(
+                            "verify_size is required for SSM K>1 rollback"
+                        )
                     keep = verify_size - n_to_drop
                     if keep < 1 or keep > len(snapshots):
                         raise AssertionError(
@@ -871,9 +873,7 @@ def mtp_generate_step(
                 # error fires before this round's fresh accept count is known,
                 # never let stale state leak into a fallback path: keep the
                 # committed ``y`` position and drop every uncommitted draft.
-                _rollback_verify_round(
-                    k_len - accepted_count, verify_size=k_len + 1
-                )
+                _rollback_verify_round(k_len - accepted_count, verify_size=k_len + 1)
                 raise
 
             # Bump attempts by K (one per draft position considered).

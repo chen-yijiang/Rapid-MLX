@@ -195,6 +195,7 @@ _TARGET_VERIFY_QARGMAX_SOURCE = r"""
     }
 """
 
+
 @functools.cache
 def _target_verify_qargmax_kernel(bits, group_size, dtype, verify_t, k_size, n_size):
     dtype_name = {mx.bfloat16: "bf16", mx.float16: "fp16"}.get(dtype, "unk")
