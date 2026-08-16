@@ -189,10 +189,8 @@ def mtp_generate_step(
     # the process-global controller registry so cost + acceptance state
     # persists across requests for the same model+drafter combination.
     # ``max_k`` bounds the depth the controller may pick; the current
-    # generator body only implements K∈{0,1} (park + chain-of-1), so
-    # picks above 1 are clamped and logged. ``disable_auto_k=True``
-    # keeps the pre-PR-B chain-of-1 behavior unchanged — useful for
-    # A/B benching the controller against a fixed K=1 baseline.
+    # generator supports K∈[0,max_k], including per-position rollback for
+    # hybrid SSM targets. ``disable_auto_k=True`` fixes depth at max_k.
     model_id: str | None = None,
     max_k: int = 1,
     disable_auto_k: bool = False,
@@ -351,16 +349,8 @@ def mtp_generate_step(
         """Restore caches by dropping the last ``n_to_drop`` draft tokens.
 
         SSM layers (ArraysCache): restore the conv/ssm snapshot saved
-        by GatedDeltaNet at the confirmed boundary. The snapshot is
-        taken at a SINGLE offset (``n_confirmed`` positions from end),
-        so ``n_to_drop`` MUST match that offset — chain-of-K with
-        partial accept is not representable in the current one-snapshot
-        model. The generator prevents this by clamping ``max_k`` to 1
-        when any SSM cache is present (see ``_has_ssm_cache`` at
-        decode-loop start); callers that reach this path with
-        ``n_to_drop > 1`` on an SSM cache trip an assertion because a
-        silent partial-rollback would corrupt the SSM state and break
-        the lossless contract.
+        after the accepted verify prefix. K=1 retains the legacy tuple;
+        K>1 stores one tuple per possible accepted boundary.
 
         Attention layers (KVCache): trim the last ``n_to_drop`` draft
         entries.
@@ -625,26 +615,17 @@ def mtp_generate_step(
     # 0.9.13 PR-B Fix 3: K≥2 chain-of-K lifted. The verify path now
     # accepts K sequential drafts with a single ``(K+1)``-position
     # backbone forward, per Ollama's ``speculate.go::accept`` batching.
-    # The SSM-hybrid (ArraysCache) rollback is not compatible with the
-    # per-position snapshot Ollama uses, so any model whose cache list
-    # contains an SSM slot is clamped to K=1 at loop-start below —
-    # chain-of-K on SSM targets needs the ``PrepareSnapshots([offsets])``
-    # per-position machinery, which is a separate work item.
+    # Hybrid ArraysCache layers retain a per-position recurrent snapshot,
+    # allowing the same partial-accept semantics without replay.
     # ------------------------------------------------------------------
-    # SSM detection: patched ArraysCache carries a ``rollback_state``
-    # class attribute (see ``cache_patch.py``); KVCache does not. This
-    # is the cheapest, most stable class-level signal for the SSM path
-    # available without importing the two cache classes here.
-    _has_ssm_cache = any(hasattr(c, "rollback_state") for c in model_cache)
     if not disable_auto_k:
         max_k_effective = max(0, max_k)
         _controller: DepthController | None = get_or_create_controller(
             model_id or "__default__", max_k=max_k_effective
         )
     else:
-        # ``disable_auto_k`` keeps the pre-0.9.13 fixed-K=1 A/B-bench
-        # behavior — verbatim chain-of-1, no chain-of-K, and no depth
-        # SELECTION.
+        # Fixed-depth A/B mode: no depth selection, but the configured
+        # max_k is exercised exactly.
         #
         # The controller is still created, and still observes, because
         # fixed-K is precisely the mode an operator measures in: with
@@ -662,11 +643,8 @@ def mtp_generate_step(
         # ``authoritative=False``: the registry is process-global and
         # normally keeps whatever ceiling the FIRST caller set. This mode
         # has no business fixing that ceiling — seeding the configured
-        # ``max_k`` (3 by default) could let a later auto-K run exceed a
-        # clamp it needs, and seeding the 1 this mode can actually reach
-        # would cap a later auto-K run at chain-of-1 forever. Marking it
-        # provisional lets the first run that really selects depth set
-        # the real ceiling.
+        # ``max_k`` is provisional so the first run that really selects
+        # depth remains authoritative.
         max_k_effective = max(0, max_k)
         _controller = get_or_create_controller(
             model_id or "__default__",
@@ -796,9 +774,8 @@ def mtp_generate_step(
             # greedy temp=0 because residual == verify-argmax there).
             # K>=2: batched (K+1)-position backbone forward, sequential
             # accept-reject per Ollama's ``speculate.go::accept``. The
-            # SSM path is clamped at loop-start so K>=2 only reaches
-            # this branch on pure-attention targets (KVCache.trim() is
-            # the only rollback needed).
+            # SSM targets use per-position snapshots; attention targets
+            # use KVCache.trim() for the same accepted-prefix boundary.
             # -------------------------------------------------------
             k_len = len(pending_drafts)
             draft_toks_arr = [rec[0] for rec in pending_drafts]
@@ -821,10 +798,8 @@ def mtp_generate_step(
                 y_with_drafts,
                 prev_tokens,
                 n_predict=k_len + 1,
-                # n_confirmed = k_len only matters on SSM targets (which
-                # are clamped to k_len=1 above). Passing k_len keeps the
-                # semantics uniform: "the last k_len positions are
-                # drafts, snapshot before them".
+                # Any positive value activates per-position SSM snapshots;
+                # k_len preserves the legacy K=1 boundary semantics too.
                 n_confirmed=k_len,
                 xtc_draw=first_xtc_draw,
             )
