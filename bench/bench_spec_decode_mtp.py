@@ -558,7 +558,9 @@ def main() -> int:
     if args.require_lossless and args.temp != 0:
         raise SystemExit("--require-lossless requires --temp 0")
     if (args.require_lossless or args.min_speedup is not None) and args.mtp_only:
-        raise SystemExit("landing gates require the paired AR baseline; remove --mtp-only")
+        raise SystemExit(
+            "landing gates require the paired AR baseline; remove --mtp-only"
+        )
     if args.min_speedup is not None and args.min_speedup <= 0:
         raise SystemExit("--min-speedup must be greater than zero")
 
