@@ -750,13 +750,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // write inline so the data lands before this delegate hook
         // returns to AppKit.
         MainActor.assumeIsolated {
-            AppDelegate.runTerminationSequence(
-                stopStream: { AppDelegate.shared.chat?.stopAndPersist() },
-                signalServer: { AppDelegate.shared.server?.beginShutdown() },
-                signalDownloads: { AppDelegate.shared.downloads?.beginShutdown() },
-                reapServer: { AppDelegate.shared.server?.shutdownSync() },
-                reapDownloads: { AppDelegate.shared.downloads?.finishShutdown() }
-            )
+            AppDelegate.runStandardTermination()
         }
         // Last write before AppKit pulls the plug — clears this
         // launch's crash marker so the NEXT launch doesn't
@@ -905,5 +899,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // edit / deletion isn't lost when the process exits before the
         // async save lands.
         ConversationStore.flush()
+    }
+
+    /// The single clean-shutdown wiring, shared by ``applicationWillTerminate``
+    /// and the re-onboarding relaunch (``ReonboardingReset``). Both paths end
+    /// the process, so both must persist the chat, reap the server, and stop
+    /// the download children — keeping this in one place stops the two from
+    /// drifting (the re-onboarding path originally teardown only the server
+    /// and orphaned in-flight downloads / lost the last chat edit, #1973).
+    @MainActor
+    static func runStandardTermination() {
+        runTerminationSequence(
+            stopStream: { AppDelegate.shared.chat?.stopAndPersist() },
+            signalServer: { AppDelegate.shared.server?.beginShutdown() },
+            signalDownloads: { AppDelegate.shared.downloads?.beginShutdown() },
+            reapServer: { AppDelegate.shared.server?.shutdownSync() },
+            reapDownloads: { AppDelegate.shared.downloads?.finishShutdown() }
+        )
     }
 }

@@ -747,7 +747,7 @@ Open the picker any time to switch models.
     /// falls), in-memory flag lost, welcome permanently skipped.
     private(set) var awaitingWelcomeSeed: Bool {
         didSet {
-            UserDefaults.standard.set(awaitingWelcomeSeed, forKey: Self.awaitingSeedKey)
+            defaults.set(awaitingWelcomeSeed, forKey: Self.awaitingSeedKey)
             // #1524: pin the alias the deferred seed is waiting on. Before
             // #1524 every comparison used the single pinned static, so a
             // quit-mid-flow relaunch trivially matched. Now the live
@@ -759,9 +759,9 @@ Open the picker any time to switch models.
             // against the model that was actually in flight, so a
             // non-default pick's welcome message survives the relaunch.
             if awaitingWelcomeSeed {
-                UserDefaults.standard.set(selection.alias, forKey: Self.awaitingSeedAliasKey)
+                defaults.set(selection.alias, forKey: Self.awaitingSeedAliasKey)
             } else {
-                UserDefaults.standard.removeObject(forKey: Self.awaitingSeedAliasKey)
+                defaults.removeObject(forKey: Self.awaitingSeedAliasKey)
             }
         }
     }
@@ -809,9 +809,9 @@ Open the picker any time to switch models.
     private(set) var pendingReadyAlias: String? {
         didSet {
             if let pendingReadyAlias {
-                UserDefaults.standard.set(pendingReadyAlias, forKey: Self.pendingReadyAliasKey)
+                defaults.set(pendingReadyAlias, forKey: Self.pendingReadyAliasKey)
             } else {
-                UserDefaults.standard.removeObject(forKey: Self.pendingReadyAliasKey)
+                defaults.removeObject(forKey: Self.pendingReadyAliasKey)
             }
         }
     }
@@ -819,21 +819,28 @@ Open the picker any time to switch models.
     /// True while an unconfirmed Ready flow is on the books.
     var hasPendingReady: Bool { pendingReadyAlias != nil }
 
-    init() {
-        self.done = UserDefaults.standard.bool(forKey: Self.storageKey)
-        self.legacyDone = UserDefaults.standard.bool(forKey: Self.legacyStorageKey)
+    /// Injectable so tests validate erasure against a scratch suite instead
+    /// of mutating the developer's real ``defaults`` when they
+    /// run the suite (#1973). Defaults to ``.standard`` — production is
+    /// unchanged.
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        self.done = defaults.bool(forKey: Self.storageKey)
+        self.legacyDone = defaults.bool(forKey: Self.legacyStorageKey)
         // Codex r5: read the persisted awaiting-seed flag so a
         // quit-mid-deferred-flow relaunch can resume the welcome
         // injection once an active session lands. (Assigning a stored
         // property in ``init`` does NOT trigger the didSet, so this read
         // can't clobber the persisted alias below.)
-        self.awaitingWelcomeSeed = UserDefaults.standard.bool(forKey: Self.awaitingSeedKey)
-        self.pendingReadyAlias = UserDefaults.standard.string(forKey: Self.pendingReadyAliasKey)
+        self.awaitingWelcomeSeed = defaults.bool(forKey: Self.awaitingSeedKey)
+        self.pendingReadyAlias = defaults.string(forKey: Self.pendingReadyAliasKey)
         // #1524: if a deferred seed survived a quit, restore the model it
         // was waiting on so the seed observers match the served alias and
         // the welcome copy names the right model (not the reset default).
         if self.awaitingWelcomeSeed,
-           let alias = UserDefaults.standard.string(forKey: Self.awaitingSeedAliasKey) {
+           let alias = defaults.string(forKey: Self.awaitingSeedAliasKey) {
             self.selection = Self.choice(forAlias: alias)
         }
         // An unconfirmed Ready flow restores its model and drops the user
@@ -874,7 +881,7 @@ Open the picker any time to switch models.
     /// in-memory mirror. Idempotent.
     func markDone() {
         done = true
-        UserDefaults.standard.set(true, forKey: Self.storageKey)
+        defaults.set(true, forKey: Self.storageKey)
     }
 
     /// Put the wizard back to the state a Mac has before it has ever run.
@@ -902,10 +909,10 @@ Open the picker any time to switch models.
         hasSeededWelcome = false
         awaitingWelcomeSeed = false
         pendingReadyAlias = nil
-        UserDefaults.standard.removeObject(forKey: Self.storageKey)
-        UserDefaults.standard.removeObject(forKey: Self.awaitingSeedKey)
-        UserDefaults.standard.removeObject(forKey: Self.awaitingSeedAliasKey)
-        UserDefaults.standard.removeObject(forKey: Self.pendingReadyAliasKey)
+        defaults.removeObject(forKey: Self.storageKey)
+        defaults.removeObject(forKey: Self.awaitingSeedKey)
+        defaults.removeObject(forKey: Self.awaitingSeedAliasKey)
+        defaults.removeObject(forKey: Self.pendingReadyAliasKey)
     }
 
     /// The name 44 call sites in the suite and ``DevSnapshot`` already use.

@@ -80,7 +80,7 @@ struct ReonboardingResetTests {
         let defaults = UserDefaults(suiteName: suite)!
         defaults.set(true, forKey: TelemetryConfig.enabledKey)
 
-        let quickstart = QuickstartCoordinator()
+        let quickstart = QuickstartCoordinator(defaults: defaults)
         quickstart.markDone()
 
         ReonboardingReset.eraseState(
@@ -109,7 +109,7 @@ struct ReonboardingResetTests {
 
         ReonboardingReset.eraseState(
             scope: [.onboarding, .conversations],
-            quickstart: QuickstartCoordinator(),
+            quickstart: QuickstartCoordinator(defaults: defaults),
             conversationsURL: conversations,
             telemetryDirectory: telemetry,
             defaults: defaults,
@@ -121,7 +121,7 @@ struct ReonboardingResetTests {
 
         ReonboardingReset.eraseState(
             scope: [.onboarding, .telemetry],
-            quickstart: QuickstartCoordinator(),
+            quickstart: QuickstartCoordinator(defaults: defaults),
             conversationsURL: conversations,
             telemetryDirectory: telemetry,
             defaults: defaults,
@@ -145,7 +145,7 @@ struct ReonboardingResetTests {
         let defaults = UserDefaults(suiteName: suite)!
         defaults.set("something", forKey: "rapid.appearance.v1")
 
-        let quickstart = QuickstartCoordinator()
+        let quickstart = QuickstartCoordinator(defaults: defaults)
         quickstart.markDone()
 
         ReonboardingReset.eraseState(
@@ -176,7 +176,7 @@ struct ReonboardingResetTests {
 
         ReonboardingReset.eraseState(
             scope: .onboarding,
-            quickstart: QuickstartCoordinator(),
+            quickstart: QuickstartCoordinator(defaults: defaults),
             conversationsURL: conversations,
             telemetryDirectory: telemetry,
             defaults: defaults,
@@ -221,7 +221,10 @@ struct ReonboardingResetTests {
     func emptyScopeIsANoOp() throws {
         let (conversations, telemetry) = try scratch()
         defer { try? FileManager.default.removeItem(at: conversations.deletingLastPathComponent()) }
-        let quickstart = QuickstartCoordinator()
+        let suite = TestDefaultsScope.mintSuiteName(prefix: "reonboard")
+        defer { TestDefaultsScope.cleanup(suiteNames: [suite]) }
+        let defaults = UserDefaults(suiteName: suite)!
+        let quickstart = QuickstartCoordinator(defaults: defaults)
         quickstart.markDone()
 
         ReonboardingReset.eraseState(
@@ -229,7 +232,7 @@ struct ReonboardingResetTests {
             quickstart: quickstart,
             conversationsURL: conversations,
             telemetryDirectory: telemetry,
-            defaults: UserDefaults.standard,
+            defaults: defaults,
             bundleIdentifier: nil
         )
 

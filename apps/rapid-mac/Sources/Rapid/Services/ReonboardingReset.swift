@@ -214,6 +214,14 @@ enum ReonboardingReset {
     /// reason spelled out on ``relaunch(bundleURL:processIdentifier:spawn:terminate:)``.
     @MainActor
     static func exitAfterCleanShutdown() {
+        // The relaunch replaces a normal quit, so it must run the SAME
+        // teardown ``applicationWillTerminate`` does — persist the last chat
+        // edit and stop in-flight download children — not just the server
+        // ``perform`` already stopped. Without this an onboarding-only reset
+        // loses the last conversation edit and orphans pull subprocesses
+        // (#1973). The sequence is the terminal path and safe to re-run after
+        // ``perform``'s ``server.stop()``.
+        AppDelegate.runStandardTermination()
         CrashReporter.recordCleanShutdown()
         exit(0)
     }
