@@ -44,7 +44,12 @@ def _parse_args() -> argparse.Namespace:
         default="mmlu-pro",
     )
     parser.add_argument("--samples", type=int, default=None)
+    parser.add_argument(
+        "--indices",
+        help="Comma-separated zero-based dataset row indices for targeted reruns",
+    )
     parser.add_argument("--draft-block-size", type=int, default=3)
+    parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--code-timeout", type=float, default=4.0)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--dry-run", action="store_true")
@@ -274,10 +279,22 @@ def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 def main() -> int:
     args = _parse_args()
-    default_samples, max_tokens = _task_defaults(args.task)
+    default_samples, task_max_tokens = _task_defaults(args.task)
+    max_tokens = args.max_tokens or task_max_tokens
     samples = args.samples if args.samples is not None else default_samples
     if samples <= 0:
         raise SystemExit("--samples must be positive")
+    if max_tokens <= 0:
+        raise SystemExit("--max-tokens must be positive")
+    indices = None
+    if args.indices:
+        try:
+            indices = [int(value) for value in args.indices.split(",")]
+        except ValueError as exc:
+            raise SystemExit("--indices must be comma-separated integers") from exc
+        if not indices or min(indices) < 0 or len(indices) != len(set(indices)):
+            raise SystemExit("--indices must contain unique non-negative integers")
+        samples = len(indices)
     plan = {
         "model": args.model,
         "mtp_sidecar": args.mtp_sidecar,
@@ -287,6 +304,7 @@ def main() -> int:
         "temperature": 0,
         "thinking": args.task == "humaneval",
         "draft_block_size": args.draft_block_size,
+        "indices": indices,
     }
     if args.dry_run:
         print(json.dumps(plan, indent=2))
@@ -295,14 +313,18 @@ def main() -> int:
     from mlx_vlm import load
     from mlx_vlm.speculative.drafters import load_drafter
 
-    rows = _dataset(args.task, samples)
+    if indices is None:
+        indexed_rows = list(enumerate(_dataset(args.task, samples)))
+    else:
+        source_rows = _dataset(args.task, max(indices) + 1)
+        indexed_rows = [(index, source_rows[index]) for index in indices]
     model, processor = load(args.model)
     drafter, draft_kind = load_drafter(args.mtp_sidecar, kind="mtp")
     output = args.output
     stream = output.open("w") if output is not None else sys.stdout
     records: list[dict[str, Any]] = []
     try:
-        for index, row in enumerate(rows):
+        for index, row in indexed_rows:
             raw_prompt, gold = _render_item(args.task, row)
             prompt = _chat_prompt(
                 processor,
