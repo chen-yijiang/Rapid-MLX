@@ -218,7 +218,14 @@ def test_resolve_base_url_strips_v1_suffix():
 
 def test_harness_profiles_list_has_five_in_correct_order():
     """The 5 first-class harnesses must be in the documented order."""
-    assert HARNESS_PROFILES == ("codex", "opencode", "hermes", "aider", "langchain")
+    assert HARNESS_PROFILES == (
+        "codex",
+        "opencode",
+        "hermes",
+        "aider",
+        "langchain",
+        "deepseek-harness",
+    )
 
 
 def test_find_free_port_in_range_uses_band():
