@@ -172,22 +172,14 @@ def test_a_failed_run_gets_no_credit_for_what_it_printed_on_stderr():
 
 
 def test_a_failed_run_gets_no_credit_for_a_sentinel_on_stderr():
-    """Same rule for the sibling probes — one place decides, not three."""
+    """Same rule for the file-read probe — one place decides, not two."""
     file_read = _test_e2e_file_read(
         sys.executable,
         _fake_cli(stderr=f"ERROR: never found {E2E_FIRST_LINE}\n", exit_code=1),
         _TIMEOUT_S,
     )
-    marker = "rapidmlx_codex_test"
-    terminal = _test_e2e_terminal(
-        sys.executable,
-        _fake_cli(stderr=f"ERROR: could not run echo {marker}\n", exit_code=1),
-        _TIMEOUT_S,
-        "codex",
-    )
 
     assert file_read.status is TestStatus.ERROR, file_read.message
-    assert terminal.status is TestStatus.ERROR, terminal.message
 
 
 def test_a_hung_run_gets_no_credit_for_what_it_printed_on_stderr():
@@ -195,27 +187,23 @@ def test_a_hung_run_gets_no_credit_for_what_it_printed_on_stderr():
 
     ``TIMEOUT`` is the other err that loses to evidence, so if a hung CLI's
     stderr counted, the stderr-diagnostic false green would simply move here.
-    Both e2e probes with a marker-style assertion are checked, because
-    `_test_e2e_terminal` only gained its carve-out in this change.
     """
-    marker = "rapidmlx_codex_test"
     chat = _test_e2e_chat(
         sys.executable,
         _hanging_cli(stderr=f"ERROR: expected {E2E_CHAT_EXPECTED}\n"),
         timeout=1,
     )
-    terminal = _test_e2e_terminal(
+    file_read = _test_e2e_file_read(
         sys.executable,
-        _hanging_cli(stderr=f"ERROR: could not run echo {marker}\n"),
-        1,
-        "codex",
+        _hanging_cli(stderr=f"ERROR: never found {E2E_FIRST_LINE}\n"),
+        timeout=1,
     )
 
     assert chat.status is TestStatus.ERROR, (
         f"a hung run passed on its own error text: {chat.message!r}"
     )
-    assert terminal.status is TestStatus.ERROR, (
-        f"a hung run passed on its own error text: {terminal.message!r}"
+    assert file_read.status is TestStatus.ERROR, (
+        f"a hung run passed on its own error text: {file_read.message!r}"
     )
 
 
@@ -235,7 +223,7 @@ def test_e2e_chat_rejects_a_malformed_digit_grouping():
     Deleting every separator that sat between two digits also turned "7777 77"
     into the expected sum — a fresh way to pass without answering.
     """
-    for reply in ("7777 77\n", "77 7777\n", "7,77777\n"):
+    for reply in ("7777 77\n", "77 7777\n", "7,77777\n", "1,777777\n", "777777,000\n"):
         result = _test_e2e_chat(sys.executable, _fake_cli(stdout=reply), _TIMEOUT_S)
         assert result.status is TestStatus.FAIL, (
             f"{reply.strip()!r} was normalized into the expected answer: "
@@ -344,16 +332,37 @@ def test_file_read_still_passes_when_the_cli_exits_nonzero_with_the_sentinel():
     assert result.status is TestStatus.PASS, result.message
 
 
-def test_terminal_still_passes_when_the_cli_exits_nonzero_with_the_marker():
+def test_terminal_keeps_a_broken_run_fatal_because_its_marker_is_in_the_prompt():
+    """The terminal probe gets no evidence carve-out, and that is on purpose.
+
+    Its marker is handed to the agent in the prompt ("Run 'echo <marker>'"),
+    so a CLI that echoes the prompt on its way out prints the marker without
+    ever opening a shell. Letting that overrule a crash would be the #1981
+    false green again, one probe over (codex review, round 4).
+    """
     marker = "rapidmlx_codex_test"
-    result = _test_e2e_terminal(
+    echoed = _test_e2e_terminal(
+        sys.executable, _echoing_cli(exit_code=1), _TIMEOUT_S, "codex"
+    )
+    printed = _test_e2e_terminal(
         sys.executable,
         _fake_cli(stdout=f"{marker}\n", exit_code=1),
         _TIMEOUT_S,
         "codex",
     )
 
-    assert result.status is TestStatus.PASS, result.message
+    assert echoed.status is TestStatus.ERROR, (
+        f"a CLI that echoed the prompt and died passed the terminal probe: "
+        f"{echoed.message!r}"
+    )
+    assert printed.status is TestStatus.ERROR, (
+        f"a broken run must stay fatal for the terminal probe: {printed.message!r}"
+    )
+    # ...while a healthy run that echoes the marker is still a PASS.
+    healthy = _test_e2e_terminal(
+        sys.executable, _fake_cli(stdout=f"{marker}\n"), _TIMEOUT_S, "codex"
+    )
+    assert healthy.status is TestStatus.PASS, healthy.message
 
 
 def test_file_read_reports_the_launch_failure_instead_of_a_wrong_answer():
@@ -387,7 +396,7 @@ def test_plain_chat_wants_the_number_four_not_the_digit(monkeypatch):
     Same family as the e2e false green: grading a digit rather than a number
     lets an unrelated value satisfy the assertion (codex review, round 3).
     """
-    for wrong in ("1234", "0.4", "-4", "4.5", "The id is a4b."):
+    for wrong in ("1234", "0.4", "-4", "4.5", "The id is a4b.", "4,000"):
         assert _plain_chat_verdict(wrong, monkeypatch) is TestStatus.FAIL, (
             f"{wrong!r} was accepted as the answer to 2+2"
         )

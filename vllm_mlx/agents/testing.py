@@ -78,9 +78,20 @@ def _exact_number_re(digits: str, *, grouped: bool = False) -> re.Pattern[str]:
     the "4" in a request id like "a4b" is not an answer to anything. A
     trailing period stays fine: that is a sentence ending, which is why only
     ``.<digit>`` is rejected on the right.
+
+    A group separator with a digit on its far side is rejected as well, or
+    the tolerance for "777,777" would accept "4,000", "1,777777" and
+    "777777,000" — each a different number that merely starts or ends with
+    the expected digits.
     """
     body = _grouped_number_pattern(digits) if grouped else digits
-    return re.compile("(?<![\\w.\\-−–])" + body + "(?!\\w)(?!\\.\\d)")
+    return re.compile(
+        "(?<![\\w.\\-−–])"
+        + f"(?<!\\d{_DIGIT_GROUP_SEP})"
+        + body
+        + f"(?!{_DIGIT_GROUP_SEP}\\d)"
+        + "(?!\\w)(?!\\.\\d)"
+    )
 
 
 # `_test_plain_chat` asks for 2+2 over HTTP; see the comment at its assertion
@@ -1171,9 +1182,12 @@ def _err_loses_to_evidence(err: str | None) -> bool:
     — binary missing, init refusal, server error, crash — means the output
     cannot be trusted at all and wins outright.
 
-    What counts as evidence is narrowed at the source: on a non-zero exit
-    ``_agent_query`` returns stdout only, so a failure diagnostic quoting
-    the expected token back at us on stderr cannot buy a PASS here.
+    What counts as evidence is narrowed at the source: on a non-zero exit or
+    a timeout ``_agent_query`` returns stdout only, so a failure diagnostic
+    quoting the expected token back at us on stderr cannot buy a PASS here.
+
+    Callers may only use this where their evidence cannot be produced by
+    echoing the prompt — `_test_e2e_terminal` deliberately does not.
     """
     return bool(err) and (err == "TIMEOUT" or err.startswith(_EXIT_ERR_PREFIX))
 
@@ -1357,7 +1371,18 @@ def _test_e2e_terminal(
             workdir,
             env_overrides,
         )
-    if err and not (_err_loses_to_evidence(err) and marker in (out or "")):
+    # NO evidence carve-out here, unlike the chat and file-read probes, and
+    # the difference is the marker itself: it is handed to the agent IN THE
+    # PROMPT ("Run 'echo <marker>'"), so any CLI that echoes its prompt prints
+    # it without having run anything. That is fine while the run is otherwise
+    # healthy — a healthy run that echoed the prompt and stopped would also
+    # have to survive `err is None` — but it is exactly what a broken CLI does
+    # on its way out, so letting a marker overrule a crash or a hang would
+    # hand a PASS to an agent that never opened a shell (codex review round 4).
+    # Chat and file-read can afford the carve-out because their evidence — a
+    # derived sum, a sentinel that lives only in the workspace file — cannot
+    # be produced by echoing the question.
+    if err:
         status = _err_to_status(err)
         return TestResult(
             "e2e_terminal",
@@ -1371,7 +1396,6 @@ def _test_e2e_terminal(
             "e2e_terminal",
             TestStatus.PASS,
             duration_ms=(time.time() - t0) * 1000,
-            message=_evidence_note(err, "terminal-marker evidence"),
             category="e2e",
         )
     return TestResult(
