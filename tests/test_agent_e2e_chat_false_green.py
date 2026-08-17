@@ -46,6 +46,7 @@ from vllm_mlx.agents.testing import (
     _test_e2e_chat,
     _test_e2e_file_read,
     _test_e2e_terminal,
+    _test_plain_chat,
 )
 
 # Long enough that a slow machine never flakes, short enough that a regression
@@ -364,6 +365,39 @@ def test_file_read_reports_the_launch_failure_instead_of_a_wrong_answer():
     assert result.status is TestStatus.ERROR, (
         f"got {result.status} / {result.message!r}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The API-level sibling                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def _plain_chat_verdict(content: str, monkeypatch) -> TestStatus:
+    """Grade `content` as `_test_plain_chat` would, without a live server."""
+    monkeypatch.setattr(
+        "vllm_mlx.agents.testing._api_call",
+        lambda *_a, **_k: {"choices": [{"message": {"content": content}}]},
+    )
+    return _test_plain_chat("http://localhost:8000/v1", "model").status
+
+
+def test_plain_chat_wants_the_number_four_not_the_digit(monkeypatch):
+    """ "1234", "0.4", "-4" and "4.5" are not answers to "what is 2+2".
+
+    Same family as the e2e false green: grading a digit rather than a number
+    lets an unrelated value satisfy the assertion (codex review, round 3).
+    """
+    for wrong in ("1234", "0.4", "-4", "4.5", "The id is a4b."):
+        assert _plain_chat_verdict(wrong, monkeypatch) is TestStatus.FAIL, (
+            f"{wrong!r} was accepted as the answer to 2+2"
+        )
+
+
+def test_plain_chat_still_accepts_a_real_answer(monkeypatch):
+    for right in ("4", "4.", "2+2 = 4", "The answer is **4**"):
+        assert _plain_chat_verdict(right, monkeypatch) is TestStatus.PASS, (
+            f"{right!r} was rejected — plain_chat must stay the easy control"
+        )
 
 
 # --------------------------------------------------------------------------- #

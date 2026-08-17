@@ -49,6 +49,44 @@ _ANTHROPIC_REMOTE_ENV = (
 # from the child's own prose.
 _EXIT_ERR_PREFIX = "EXIT:"
 
+# One separator character models actually use for thousands: comma, no-break
+# space, narrow no-break space, plain space.
+_DIGIT_GROUP_SEP = "[,\u00a0\u202f ]"
+
+
+def _grouped_number_pattern(digits: str) -> str:
+    """``777777`` → ``(?:777777|777<sep>777)`` — bare or thousands-grouped.
+
+    Only these two shapes. An earlier version stripped every separator that
+    sat between two digits before matching, which also turned malformed or
+    entirely different numbers ("7777 77") into the expected one — a fresh
+    way to pass without answering, which is the bug this module exists to
+    prevent (codex review round 2).
+    """
+    head = len(digits) % 3 or 3
+    groups = [digits[:head]] + [digits[i : i + 3] for i in range(head, len(digits), 3)]
+    return f"(?:{digits}|{_DIGIT_GROUP_SEP.join(groups)})"
+
+
+def _exact_number_re(digits: str, *, grouped: bool = False) -> re.Pattern[str]:
+    """Match `digits` as that number, not as a run of digits inside another.
+
+    Boundaries are numeric rather than merely non-digit: a leading sign or a
+    decimal point makes it a DIFFERENT number, so "-4", "0.4", "4.5",
+    "12.777777" and "777777.5" are wrong answers rather than sloppy right
+    ones. Word characters are excluded on both sides for the same reason —
+    the "4" in a request id like "a4b" is not an answer to anything. A
+    trailing period stays fine: that is a sentence ending, which is why only
+    ``.<digit>`` is rejected on the right.
+    """
+    body = _grouped_number_pattern(digits) if grouped else digits
+    return re.compile("(?<![\\w.\\-−–])" + body + "(?!\\w)(?!\\.\\d)")
+
+
+# `_test_plain_chat` asks for 2+2 over HTTP; see the comment at its assertion
+# for why its question stays easy while the e2e sibling's does not.
+_PLAIN_CHAT_EXPECTED_RE = _exact_number_re("4")
+
 
 # ---------------------------------------------------------------------------
 # Test result types
@@ -241,9 +279,10 @@ def _test_plain_chat(base_url: str, model_id: str) -> TestResult:
             [{"role": "user", "content": "What is 2+2? Reply with just the number."}],
         )
         content = r["choices"][0]["message"]["content"]
-        # A standalone "4", not the digit anywhere in the string: "1234",
-        # "0.4" or a request id ending in 4 are not answers to "what is
-        # 2+2" (#1981, sibling of the `_test_e2e_chat` false green).
+        # The number 4, not the digit anywhere in the string: "1234", "0.4",
+        # "-4", "4.5" and a request id ending in 4 are none of them answers to
+        # "what is 2+2" (#1981, sibling of the `_test_e2e_chat` false green).
+        # Same matcher as the e2e probe so the two cannot drift apart.
         #
         # The question itself stays 2+2, unlike its e2e sibling, and the
         # threat models are why. This grades ``choices[0].message.content``
@@ -254,7 +293,7 @@ def _test_plain_chat(base_url: str, model_id: str) -> TestResult:
         # probe of "the server answers coherently", which is what makes it
         # a useful control: when e2e_chat fails and plain_chat passes, the
         # fault is in the agent CLI path, not the model.
-        if re.search(r"(?<!\d)4(?!\d)", content):
+        if _PLAIN_CHAT_EXPECTED_RE.search(content):
             return TestResult(
                 "plain_chat", TestStatus.PASS, duration_ms=(time.time() - t0) * 1000
             )
@@ -775,35 +814,9 @@ E2E_FIRST_LINE = f"{E2E_FIRST_LINE_TOKEN} = true"
 # id or a hash.
 E2E_CHAT_QUERY = "What is 123456 + 654321? Reply with just the number."
 E2E_CHAT_EXPECTED = "777777"
-# One separator character models actually use for thousands: comma, no-break
-# space, narrow no-break space, plain space.
-_DIGIT_GROUP_SEP = "[,\u00a0\u202f ]"
-
-
-def _grouped_number_pattern(digits: str) -> str:
-    """``777777`` → ``(?:777777|777<sep>777)`` — bare or thousands-grouped.
-
-    Only these two shapes. An earlier version stripped every separator that
-    sat between two digits before matching, which also turned malformed or
-    entirely different numbers ("7777 77") into the expected one — a fresh
-    way to pass without answering, which is the bug this module exists to
-    prevent (codex review round 2).
-    """
-    head = len(digits) % 3 or 3
-    groups = [digits[:head]] + [digits[i : i + 3] for i in range(head, len(digits), 3)]
-    return f"(?:{digits}|{_DIGIT_GROUP_SEP.join(groups)})"
-
-
-# Boundaries are numeric, not merely non-digit: a leading sign or a decimal
-# point makes the number a DIFFERENT number, so "-777777", "12.777777" and
-# "777777.5" are all wrong answers rather than sloppy right ones. A trailing
-# period is still fine — that is a sentence ending, not a decimal, which is
-# why only ``.<digit>`` is rejected on the right.
-_E2E_CHAT_EXPECTED_RE = re.compile(
-    "(?<![\\d.\\-−–])"
-    + _grouped_number_pattern(E2E_CHAT_EXPECTED)
-    + "(?!\\d)(?!\\.\\d)"
-)
+# Grouped as well as bare: a model that writes "777,777" has answered the
+# question. `_exact_number_re` explains the boundaries.
+_E2E_CHAT_EXPECTED_RE = _exact_number_re(E2E_CHAT_EXPECTED, grouped=True)
 
 
 def _e2e_chat_answered(out: str | None) -> bool:
@@ -1087,6 +1100,16 @@ def _agent_query(
             return proc.stdout, (
                 f"{_EXIT_ERR_PREFIX}{proc.returncode} agent CLI exited non-zero{detail}"
             )
+        # A CLEAN exit keeps the combined capture, and that boundary is
+        # deliberate. Narrowing every run to stdout was considered (codex
+        # review round 3) and declined: it would change grading on the normal
+        # path for all 13 profiles to defend against a failure message that
+        # contains the expected six-digit sum, which a CLI has no way to know.
+        # The cost is not hypothetical — the Hermes binary writes user-facing
+        # text to STDERR (see the hard-wrap note in the refusal detection
+        # above), so stdout-only grading could fail a Tier-1 profile that
+        # answered correctly. Suppressing evidence is only justified once the
+        # run itself has reported that it went wrong.
         return output, None
     except subprocess.TimeoutExpired as exc:
         # A headless agent can finish the capability under test, print the
