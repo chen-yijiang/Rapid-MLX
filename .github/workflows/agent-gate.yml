@@ -55,10 +55,26 @@ jobs:
     # serve). Each check is individually bounded, but they stack, and a
     # run where every check PASSES near its own limit could otherwise be
     # cancelled by Actions for exceeding the job budget.
-    # Raised from 75: DeepSeek Harness is the fifth Tier-1 agent, adding one
-    # more 2x480s worst case (~16 min) to the script's ~42 min four-agent tail
-    # → ~58 min. Preserving the same ~33 min of stacked-extras headroom that
-    # justified 75 gives ~91, rounded to 90.
+    #
+    # Raised from 75: DeepSeek Harness is the fifth Tier-1 agent.
+    #
+    # This job and auto-release.yml's tier1-agent-gate run the SAME
+    # agent_smoke.sh, so they must not quote different worst cases. The one
+    # arithmetic, from the script's own budgets (AGENT_TO=480 x2 attempts for
+    # claude/codex/aider/dsh, HERMES_TO=600 x3 for hermes):
+    #   four agents  3x960 + 1800 = 4680s ~= 78 min
+    #   five agents  4x960 + 1800 = 5640s ~= 94 min
+    # An earlier revision of this comment claimed ~42 min for the four-agent
+    # tail; that predated the 35B gate model and the 600s hermes budget and was
+    # simply stale. Do not reintroduce it — recompute from AGENT_TO/HERMES_TO.
+    #
+    # 90 rather than auto-release's 125 because this manual job does NOT run
+    # the release-gate extras (coherence golden + perf) — those are gated on
+    # RAPID_MLX_RELEASE_GATE=1, which only the release path sets. 94 min of
+    # pathological-retry tail still exceeds 90, but that path requires every
+    # agent to burn every retry; a genuine hang fails on its own per-agent
+    # budget long before, and this job is operator-triggered rather than
+    # release-blocking, so the tighter cap is the deliberate trade.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
