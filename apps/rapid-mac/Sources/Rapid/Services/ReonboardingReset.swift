@@ -106,11 +106,16 @@ enum ReonboardingReset {
     @MainActor
     static func perform(
         scope: ReonboardingScope,
-        quickstart: QuickstartCoordinator,
-        server: ServerManager
+        quickstart: QuickstartCoordinator
     ) async {
         guard !scope.isEmpty else { return }
-        await server.stop()
+        // Persist the last chat edit and reap the server + download children
+        // BEFORE erasing, so ``eraseState``'s conversation delete is the LAST
+        // write. The other order lets the termination flush — and a streaming
+        // ``stopAndPersist`` — resurrect the conversations we just erased
+        // (#1973). ``runStandardTermination`` reaps the server too, so the
+        // file handles on the state we're about to delete are already gone.
+        AppDelegate.runStandardTermination()
         eraseState(scope: scope, quickstart: quickstart)
     }
 
@@ -214,14 +219,11 @@ enum ReonboardingReset {
     /// reason spelled out on ``relaunch(bundleURL:processIdentifier:spawn:terminate:)``.
     @MainActor
     static func exitAfterCleanShutdown() {
-        // The relaunch replaces a normal quit, so it must run the SAME
-        // teardown ``applicationWillTerminate`` does — persist the last chat
-        // edit and stop in-flight download children — not just the server
-        // ``perform`` already stopped. Without this an onboarding-only reset
-        // loses the last conversation edit and orphans pull subprocesses
-        // (#1973). The sequence is the terminal path and safe to re-run after
-        // ``perform``'s ``server.stop()``.
-        AppDelegate.runStandardTermination()
+        // ``perform`` already ran ``AppDelegate.runStandardTermination`` (chat
+        // persisted, server + downloads reaped) BEFORE erasing state — doing
+        // it here instead would re-persist the conversations ``eraseState``
+        // just deleted (#1973). So this only records the clean-shutdown marker
+        // and leaves.
         CrashReporter.recordCleanShutdown()
         exit(0)
     }

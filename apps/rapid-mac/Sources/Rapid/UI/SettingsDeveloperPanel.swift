@@ -119,7 +119,7 @@ struct SettingsDeveloperPanel: View {
         isWorking = true
         Task { @MainActor in
             await ReonboardingReset.perform(
-                scope: scope, quickstart: quickstart, server: server
+                scope: scope, quickstart: quickstart
             )
             ReonboardingReset.relaunch()
         }

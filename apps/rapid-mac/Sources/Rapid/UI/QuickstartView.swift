@@ -910,6 +910,14 @@ Open the picker any time to switch models.
         awaitingWelcomeSeed = false
         pendingReadyAlias = nil
         defaults.removeObject(forKey: Self.storageKey)
+        // Clear the legacy v1 flag too. A user upgraded from a build that
+        // wrote ``rapid.quickstart.v1.done`` would otherwise relaunch reading
+        // ``legacyDone == true``, which ``onboardingOwed`` treats as "already
+        // onboarded" and suppresses Quickstart — silently defeating the reset
+        // unless "erase all settings" was also chosen (#1973). ``legacyDone``
+        // is a launch-time ``let``, so removing the key is what takes effect
+        // on the relaunch this reset triggers.
+        defaults.removeObject(forKey: Self.legacyStorageKey)
         defaults.removeObject(forKey: Self.awaitingSeedKey)
         defaults.removeObject(forKey: Self.awaitingSeedAliasKey)
         defaults.removeObject(forKey: Self.pendingReadyAliasKey)
