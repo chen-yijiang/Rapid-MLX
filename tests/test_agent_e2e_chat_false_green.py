@@ -136,6 +136,63 @@ def test_e2e_chat_rejects_the_expected_answer_inside_a_longer_number():
     )
 
 
+def test_a_failed_run_gets_no_credit_for_what_it_printed_on_stderr():
+    """The same false green from the other side (codex review, round 1).
+
+    Evidence beats a non-zero exit — so a failure diagnostic that happens to
+    quote the expected token would buy a PASS if diagnostics counted as
+    evidence. They do not: a process that reported failure is credited only
+    with what it wrote to stdout, where every profile's CLI writes its answer.
+    """
+    result = _test_e2e_chat(
+        sys.executable,
+        _fake_cli(
+            stderr=f"ERROR: expected {E2E_CHAT_EXPECTED}; request failed\n",
+            exit_code=1,
+        ),
+        _TIMEOUT_S,
+    )
+
+    assert result.status is TestStatus.ERROR, (
+        f"a failed run passed because its own error message mentioned the "
+        f"expected answer; got {result.status} / {result.message!r}"
+    )
+
+
+def test_a_failed_run_gets_no_credit_for_a_sentinel_on_stderr():
+    """Same rule for the sibling probes — one place decides, not three."""
+    file_read = _test_e2e_file_read(
+        sys.executable,
+        _fake_cli(stderr=f"ERROR: never found {E2E_FIRST_LINE}\n", exit_code=1),
+        _TIMEOUT_S,
+    )
+    marker = "rapidmlx_codex_test"
+    terminal = _test_e2e_terminal(
+        sys.executable,
+        _fake_cli(stderr=f"ERROR: could not run echo {marker}\n", exit_code=1),
+        _TIMEOUT_S,
+        "codex",
+    )
+
+    assert file_read.status is TestStatus.ERROR, file_read.message
+    assert terminal.status is TestStatus.ERROR, terminal.message
+
+
+def test_e2e_chat_rejects_a_signed_or_fractional_near_miss():
+    """ "-777777" and "777777.5" are different numbers, not sloppy right ones."""
+    for reply in ("-777777\n", "777777.5\n", "12.777777\n"):
+        result = _test_e2e_chat(sys.executable, _fake_cli(stdout=reply), _TIMEOUT_S)
+        assert result.status is TestStatus.FAIL, (
+            f"{reply.strip()!r} was accepted as the answer to "
+            f"{E2E_CHAT_QUERY!r}: {result.status}"
+        )
+    # ...while a sentence-ending period is punctuation, not a decimal point.
+    ok = _test_e2e_chat(
+        sys.executable, _fake_cli(stdout="The answer is 777777.\n"), _TIMEOUT_S
+    )
+    assert ok.status is TestStatus.PASS, ok.message
+
+
 def test_e2e_chat_is_not_satisfied_by_a_cli_echoing_the_prompt():
     """Why the expected value is derived, not a sentinel handed to the agent.
 
@@ -187,6 +244,10 @@ def test_e2e_chat_passes_when_the_agent_answered_then_exited_nonzero():
     Some CLIs answer and then exit non-zero on their way out. Making a
     non-zero exit fatal would turn those into a red release gate, so evidence
     wins — the exit status only decides what an evidence-LESS run is called.
+
+    The answer is on stdout and the noise on stderr, which is the split
+    `_agent_query` relies on: see the stderr-diagnostic test above for the
+    other half of this rule.
     """
     result = _test_e2e_chat(
         sys.executable,

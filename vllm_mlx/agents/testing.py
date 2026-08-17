@@ -775,7 +775,14 @@ E2E_FIRST_LINE = f"{E2E_FIRST_LINE_TOKEN} = true"
 # id or a hash.
 E2E_CHAT_QUERY = "What is 123456 + 654321? Reply with just the number."
 E2E_CHAT_EXPECTED = "777777"
-_E2E_CHAT_EXPECTED_RE = re.compile(rf"(?<!\d){E2E_CHAT_EXPECTED}(?!\d)")
+# Boundaries are numeric, not merely non-digit: a leading sign or a decimal
+# point makes the number a DIFFERENT number, so "-777777", "12.777777" and
+# "777777.5" are all wrong answers rather than sloppy right ones. A trailing
+# period is still fine — that is a sentence ending, not a decimal, which is
+# why only ``.<digit>`` is rejected on the right.
+_E2E_CHAT_EXPECTED_RE = re.compile(
+    "(?<![\\d.\\-−–])" + E2E_CHAT_EXPECTED + "(?!\\d)(?!\\.\\d)"
+)
 # Models group long numbers ("777,777", "777 777").  Join digit groups before
 # matching — a single separator BETWEEN two digits only, never a newline, so
 # unrelated numbers on adjacent lines cannot be welded into the expected one.
@@ -1044,10 +1051,23 @@ def _agent_query(
         # Capability evidence therefore still wins; this only decides what an
         # evidence-LESS run gets called, and turns a silent "wrong answer"
         # FAIL into an ERROR naming the launch failure.
+        #
+        # But a process that reported failure only gets credit for what it put
+        # on STDOUT: the returned output narrows to ``proc.stdout`` so a
+        # diagnostic that quotes the expected evidence back at us ("expected
+        # 777777; request failed", printed on stderr) cannot be mistaken for
+        # the answer and re-open this very bug from the other side. Every agent
+        # CLI the profiles drive writes its answer to stdout and its complaints
+        # to stderr; the failure text is not discarded, it is summarized into
+        # the err below, which is what gets reported.
+        #
+        # The TIMEOUT path deliberately keeps its combined stdout+stderr
+        # capture: that behavior is #1598's and predates this change, and
+        # narrowing it is not needed to close #1981.
         if proc.returncode != 0:
             tail = " ".join(output.split())[-160:]
             detail = f" — {tail}" if tail else ""
-            return output, (
+            return proc.stdout, (
                 f"{_EXIT_ERR_PREFIX}{proc.returncode} agent CLI exited non-zero{detail}"
             )
         return output, None
@@ -1105,6 +1125,10 @@ def _err_loses_to_evidence(err: str | None) -> bool:
     a caller holding the expected evidence keeps its PASS. Every other err
     — binary missing, init refusal, server error, crash — means the output
     cannot be trusted at all and wins outright.
+
+    What counts as evidence is narrowed at the source: on a non-zero exit
+    ``_agent_query`` returns stdout only, so a failure diagnostic quoting
+    the expected token back at us on stderr cannot buy a PASS here.
     """
     return bool(err) and (err == "TIMEOUT" or err.startswith(_EXIT_ERR_PREFIX))
 
