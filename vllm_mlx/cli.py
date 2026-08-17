@@ -2705,8 +2705,8 @@ def serve_command(args):
         print(
             "\n  Error: MTP fast mode requires an explicit sidecar model, e.g. "
             "--speculative-config "
-            "'{\"method\":\"mtp-fast\",\"model\":"
-            "\"mlx-community/Qwen3.8-27B-MTP-4bit\"}'.\n",
+            '\'{"method":"mtp-fast","model":'
+            '"mlx-community/Qwen3.8-27B-MTP-4bit"}\'.\n',
             file=sys.stderr,
         )
         sys.exit(2)

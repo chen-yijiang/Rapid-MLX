@@ -36,9 +36,7 @@ def _render(processor: Any, content: str) -> str:
     messages = [{"role": "user", "content": content}]
     kwargs = {"tokenize": False, "add_generation_prompt": True}
     try:
-        return processor.apply_chat_template(
-            messages, enable_thinking=False, **kwargs
-        )
+        return processor.apply_chat_template(messages, enable_thinking=False, **kwargs)
     except TypeError:
         return processor.apply_chat_template(messages, **kwargs)
 
@@ -66,7 +64,9 @@ def _controlled_prompt(processor: Any, target: int) -> tuple[str, int]:
         else:
             high = middle - 1
     if best_count < int(target * 0.98):
-        raise RuntimeError(f"could only construct {best_count} tokens for target {target}")
+        raise RuntimeError(
+            f"could only construct {best_count} tokens for target {target}"
+        )
     return best, best_count
 
 

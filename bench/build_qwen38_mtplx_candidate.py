@@ -116,7 +116,9 @@ def _build_overlay(
     quant = config["quantization"]
     for module in sorted(modules):
         if module not in ref_quant:
-            raise RuntimeError(f"reference config has no quantization rule for {module}")
+            raise RuntimeError(
+                f"reference config has no quantization rule for {module}"
+            )
         quant[module] = ref_quant[module]
     return set(selected)
 
@@ -153,7 +155,9 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
 
     if args.promote and not args.materialize_backbone:
-        raise SystemExit("--promote requires --materialize-backbone for MLX glob loaders")
+        raise SystemExit(
+            "--promote requires --materialize-backbone for MLX glob loaders"
+        )
 
     for source in base.iterdir():
         if source.name in {"config.json", "model.safetensors.index.json"}:

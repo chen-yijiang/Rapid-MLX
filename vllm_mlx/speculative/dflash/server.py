@@ -2257,7 +2257,9 @@ def run_dflash_server(
             rt = load_runtime(drafter_repo, kind=draft_kind)
         return m, p, rt
 
-    logger.info("%s: loading main model via mlx-vlm: %s", runtime_label, main_model_repo)
+    logger.info(
+        "%s: loading main model via mlx-vlm: %s", runtime_label, main_model_repo
+    )
     model, processor, runtime = _dflash_executor.submit(_load_all).result()
 
     app = _build_app(
