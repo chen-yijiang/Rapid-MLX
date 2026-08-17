@@ -75,6 +75,17 @@ def _fake_cli(stdout: str = "", stderr: str = "", exit_code: int = 0) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} '{{query}}'"
 
 
+def _hanging_cli(stdout: str = "", stderr: str = "") -> str:
+    """A CLI that prints, flushes, and then never terminates."""
+    script = (
+        "import sys, time; "
+        f"sys.stdout.write({stdout!r}); sys.stdout.flush(); "
+        f"sys.stderr.write({stderr!r}); sys.stderr.flush(); "
+        "time.sleep(30)"
+    )
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} '{{query}}'"
+
+
 def _echoing_cli(exit_code: int = 1) -> str:
     """A CLI that prints the prompt back and never answers it."""
     script = "import sys; sys.stdout.write('> ' + sys.argv[1] + chr(10)); "
@@ -176,6 +187,63 @@ def test_a_failed_run_gets_no_credit_for_a_sentinel_on_stderr():
 
     assert file_read.status is TestStatus.ERROR, file_read.message
     assert terminal.status is TestStatus.ERROR, terminal.message
+
+
+def test_a_hung_run_gets_no_credit_for_what_it_printed_on_stderr():
+    """The timeout carve-out obeys the same rule (codex review, round 2).
+
+    ``TIMEOUT`` is the other err that loses to evidence, so if a hung CLI's
+    stderr counted, the stderr-diagnostic false green would simply move here.
+    Both e2e probes with a marker-style assertion are checked, because
+    `_test_e2e_terminal` only gained its carve-out in this change.
+    """
+    marker = "rapidmlx_codex_test"
+    chat = _test_e2e_chat(
+        sys.executable,
+        _hanging_cli(stderr=f"ERROR: expected {E2E_CHAT_EXPECTED}\n"),
+        timeout=1,
+    )
+    terminal = _test_e2e_terminal(
+        sys.executable,
+        _hanging_cli(stderr=f"ERROR: could not run echo {marker}\n"),
+        1,
+        "codex",
+    )
+
+    assert chat.status is TestStatus.ERROR, (
+        f"a hung run passed on its own error text: {chat.message!r}"
+    )
+    assert terminal.status is TestStatus.ERROR, (
+        f"a hung run passed on its own error text: {terminal.message!r}"
+    )
+
+
+def test_a_hung_run_still_passes_on_evidence_it_printed_on_stdout():
+    """...and #1598's carve-out itself must survive that narrowing."""
+    result = _test_e2e_chat(
+        sys.executable, _hanging_cli(stdout=f"{E2E_CHAT_EXPECTED}\n"), timeout=1
+    )
+
+    assert result.status is TestStatus.PASS, result.message
+    assert "did not terminate" in result.message, result.message
+
+
+def test_e2e_chat_rejects_a_malformed_digit_grouping():
+    """Separator tolerance must not manufacture the answer out of other digits.
+
+    Deleting every separator that sat between two digits also turned "7777 77"
+    into the expected sum — a fresh way to pass without answering.
+    """
+    for reply in ("7777 77\n", "77 7777\n", "7,77777\n"):
+        result = _test_e2e_chat(sys.executable, _fake_cli(stdout=reply), _TIMEOUT_S)
+        assert result.status is TestStatus.FAIL, (
+            f"{reply.strip()!r} was normalized into the expected answer: "
+            f"{result.status}"
+        )
+    # Real thousands grouping still counts.
+    for reply in ("777 777\n", "777,777\n"):
+        ok = _test_e2e_chat(sys.executable, _fake_cli(stdout=reply), _TIMEOUT_S)
+        assert ok.status is TestStatus.PASS, f"{reply.strip()!r}: {ok.message}"
 
 
 def test_e2e_chat_rejects_a_signed_or_fractional_near_miss():

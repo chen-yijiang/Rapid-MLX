@@ -775,25 +775,42 @@ E2E_FIRST_LINE = f"{E2E_FIRST_LINE_TOKEN} = true"
 # id or a hash.
 E2E_CHAT_QUERY = "What is 123456 + 654321? Reply with just the number."
 E2E_CHAT_EXPECTED = "777777"
+# One separator character models actually use for thousands: comma, no-break
+# space, narrow no-break space, plain space.
+_DIGIT_GROUP_SEP = "[,\u00a0\u202f ]"
+
+
+def _grouped_number_pattern(digits: str) -> str:
+    """``777777`` → ``(?:777777|777<sep>777)`` — bare or thousands-grouped.
+
+    Only these two shapes. An earlier version stripped every separator that
+    sat between two digits before matching, which also turned malformed or
+    entirely different numbers ("7777 77") into the expected one — a fresh
+    way to pass without answering, which is the bug this module exists to
+    prevent (codex review round 2).
+    """
+    head = len(digits) % 3 or 3
+    groups = [digits[:head]] + [digits[i : i + 3] for i in range(head, len(digits), 3)]
+    return f"(?:{digits}|{_DIGIT_GROUP_SEP.join(groups)})"
+
+
 # Boundaries are numeric, not merely non-digit: a leading sign or a decimal
 # point makes the number a DIFFERENT number, so "-777777", "12.777777" and
 # "777777.5" are all wrong answers rather than sloppy right ones. A trailing
 # period is still fine — that is a sentence ending, not a decimal, which is
 # why only ``.<digit>`` is rejected on the right.
 _E2E_CHAT_EXPECTED_RE = re.compile(
-    "(?<![\\d.\\-−–])" + E2E_CHAT_EXPECTED + "(?!\\d)(?!\\.\\d)"
+    "(?<![\\d.\\-−–])"
+    + _grouped_number_pattern(E2E_CHAT_EXPECTED)
+    + "(?!\\d)(?!\\.\\d)"
 )
-# Models group long numbers ("777,777", "777 777").  Join digit groups before
-# matching — a single separator BETWEEN two digits only, never a newline, so
-# unrelated numbers on adjacent lines cannot be welded into the expected one.
-_DIGIT_GROUP_SEP_RE = re.compile("(?<=\\d)[,\u00a0\u202f ](?=\\d)")
 
 
 def _e2e_chat_answered(out: str | None) -> bool:
     """True only when the agent came back with the expected sum itself."""
     if not out:
         return False
-    return bool(_E2E_CHAT_EXPECTED_RE.search(_DIGIT_GROUP_SEP_RE.sub("", out)))
+    return bool(_E2E_CHAT_EXPECTED_RE.search(out))
 
 
 @contextlib.contextmanager
@@ -1061,9 +1078,9 @@ def _agent_query(
         # to stderr; the failure text is not discarded, it is summarized into
         # the err below, which is what gets reported.
         #
-        # The TIMEOUT path deliberately keeps its combined stdout+stderr
-        # capture: that behavior is #1598's and predates this change, and
-        # narrowing it is not needed to close #1981.
+        # The TIMEOUT branch below applies the same rule, for the same reason:
+        # both are runs that misbehaved, and it would be incoherent for a hung
+        # CLI to get credit for stderr text a failed one does not.
         if proc.returncode != 0:
             tail = " ".join(output.split())[-160:]
             detail = f" — {tail}" if tail else ""
@@ -1082,7 +1099,12 @@ def _agent_query(
                 return ""
             return value.decode(errors="replace") if isinstance(value, bytes) else value
 
-        partial = _timeout_text(exc.stdout) + _timeout_text(exc.stderr)
+        # STDOUT only, exactly as on the non-zero-exit path: a hung CLI's
+        # diagnostics ("ERROR: expected 777777", "could not run echo <marker>")
+        # are not evidence that it did the work, and this err is one of the two
+        # that lose to evidence. Nothing is lost from the report — the timeout
+        # err carries no child text in either form.
+        partial = _timeout_text(exc.stdout)
         return partial or None, "TIMEOUT"
     except Exception as e:
         return None, str(e)
