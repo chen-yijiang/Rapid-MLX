@@ -18,7 +18,9 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import statistics
+import subprocess
 import sys
 import urllib.parse
 import urllib.request
@@ -38,11 +40,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mtp-sidecar", default=DEFAULT_HEAD)
     parser.add_argument(
         "--task",
-        choices=("mmlu-pro", "gsm8k"),
+        choices=("mmlu-pro", "gsm8k", "humaneval"),
         default="mmlu-pro",
     )
     parser.add_argument("--samples", type=int, default=None)
     parser.add_argument("--draft-block-size", type=int, default=3)
+    parser.add_argument("--code-timeout", type=float, default=4.0)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -51,7 +54,9 @@ def _parse_args() -> argparse.Namespace:
 def _task_defaults(task: str) -> tuple[int, int]:
     if task == "mmlu-pro":
         return 500, 24
-    return 150, 512
+    if task == "gsm8k":
+        return 150, 512
+    return 40, 640
 
 
 def _fetch_rows(dataset: str, config: str, split: str, count: int) -> list[dict]:
@@ -80,7 +85,14 @@ def _fetch_rows(dataset: str, config: str, split: str, count: int) -> list[dict]
 def _dataset(task: str, count: int) -> list[dict]:
     if task == "mmlu-pro":
         return _fetch_rows("TIGER-Lab/MMLU-Pro", "default", "test", count)
-    return _fetch_rows("openai/gsm8k", "main", "test", count)
+    if task == "gsm8k":
+        return _fetch_rows("openai/gsm8k", "main", "test", count)
+    return _fetch_rows(
+        "openai/openai_humaneval",
+        "openai_humaneval",
+        "test",
+        count,
+    )
 
 
 def _render_item(task: str, row: dict) -> tuple[str, str]:
@@ -94,13 +106,20 @@ def _render_item(task: str, row: dict) -> tuple[str, str]:
             f"{row['question']}\n{options}\nAnswer:",
             row["answer"],
         )
-    match = re.search(r"####\s*([-0-9,.]+)", row["answer"])
-    if match is None:
-        raise ValueError("GSM8K answer has no #### final-answer marker")
+    if task == "gsm8k":
+        match = re.search(r"####\s*([-0-9,.]+)", row["answer"])
+        if match is None:
+            raise ValueError("GSM8K answer has no #### final-answer marker")
+        return (
+            "Solve this problem. Give a brief calculation and end with FINAL: "
+            f"followed by only the numeric answer.\n\n{row['question']}",
+            match.group(1).replace(",", ""),
+        )
     return (
-        "Solve this problem. Give a brief calculation and end with FINAL: "
-        f"followed by only the numeric answer.\n\n{row['question']}",
-        match.group(1).replace(",", ""),
+        "Complete this Python function correctly. Return only one Python code "
+        "block containing a complete executable solution, including imports and "
+        f"the function definition.\n\n{row['prompt']}",
+        row["task_id"],
     )
 
 
@@ -108,6 +127,8 @@ def _extract_answer(task: str, text: str) -> str | None:
     if task == "mmlu-pro":
         match = re.search(r"(?:^|\b)([A-J])(?:\b|$)", text.strip().upper())
         return match.group(1) if match else None
+    if task == "humaneval":
+        return None
     matches = re.findall(
         r"FINAL\s*:\s*\$?\s*(-?[\d,]+(?:\.\d+)?)",
         text,
@@ -116,17 +137,56 @@ def _extract_answer(task: str, text: str) -> str | None:
     return matches[-1].replace(",", "") if matches else None
 
 
-def _chat_prompt(processor: Any, prompt: str) -> str:
+def _chat_prompt(processor: Any, prompt: str, *, thinking: bool) -> str:
     kwargs = {"tokenize": False, "add_generation_prompt": True}
     messages = [{"role": "user", "content": prompt}]
     try:
         return processor.apply_chat_template(
             messages,
-            enable_thinking=False,
+            enable_thinking=thinking,
             **kwargs,
         )
     except TypeError:
         return processor.apply_chat_template(messages, **kwargs)
+
+
+def _extract_python(text: str) -> str:
+    blocks = re.findall(r"```(?:python)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if blocks:
+        return blocks[-1].strip()
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+def _run_humaneval_sandbox(
+    code: str,
+    row: dict[str, Any],
+    *,
+    timeout: float,
+) -> tuple[bool, str]:
+    """Run one generated solution in a deny-by-default macOS sandbox."""
+
+    sandbox_exec = shutil.which("sandbox-exec")
+    if sandbox_exec is None:
+        raise RuntimeError(
+            "HumanEval requires macOS sandbox-exec; refusing to execute generated "
+            "code directly on the host"
+        )
+    profile = (
+        "(version 1) (deny default) (allow process*) "
+        "(allow file-read*) (allow sysctl-read)"
+    )
+    program = f"{code}\n{row['test']}\ncheck({row['entry_point']})\n"
+    try:
+        result = subprocess.run(
+            [sandbox_exec, "-p", profile, "/usr/bin/python3", "-c", program],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
+    return result.returncode == 0, result.stderr[-500:]
 
 
 def _condition_result(
@@ -141,6 +201,8 @@ def _condition_result(
     gold: str,
     max_tokens: int,
     draft_block_size: int,
+    row: dict[str, Any],
+    code_timeout: float,
 ) -> dict[str, Any]:
     from mlx_vlm import generate
 
@@ -157,15 +219,28 @@ def _condition_result(
         )
     result = generate(model, processor, prompt, **kwargs)
     prediction = _extract_answer(task, result.text)
-    return {
+    correct = prediction == gold
+    sandbox_error = None
+    completion = result.text
+    if task == "humaneval":
+        completion = _extract_python(result.text)
+        correct, sandbox_error = _run_humaneval_sandbox(
+            completion,
+            row,
+            timeout=code_timeout,
+        )
+    record = {
         "prediction": prediction,
-        "correct": prediction == gold,
+        "correct": correct,
         "generation_tokens": result.generation_tokens,
         "generation_tps": round(result.generation_tps, 3),
         "peak_memory_gb": round(result.peak_memory, 3),
         "finish_reason": result.finish_reason,
-        "sha256": hashlib.sha256(result.text.encode()).hexdigest(),
+        "sha256": hashlib.sha256(completion.encode()).hexdigest(),
     }
+    if sandbox_error and not correct:
+        record["sandbox_error"] = sandbox_error
+    return record
 
 
 def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -210,7 +285,7 @@ def main() -> int:
         "samples": samples,
         "max_tokens": max_tokens,
         "temperature": 0,
-        "thinking": False,
+        "thinking": args.task == "humaneval",
         "draft_block_size": args.draft_block_size,
     }
     if args.dry_run:
@@ -229,7 +304,11 @@ def main() -> int:
     try:
         for index, row in enumerate(rows):
             raw_prompt, gold = _render_item(args.task, row)
-            prompt = _chat_prompt(processor, raw_prompt)
+            prompt = _chat_prompt(
+                processor,
+                raw_prompt,
+                thinking=args.task == "humaneval",
+            )
             record: dict[str, Any] = {"index": index, "gold": gold}
             if args.task == "mmlu-pro":
                 record["category"] = row["category"]
@@ -245,6 +324,8 @@ def main() -> int:
                     gold=gold,
                     max_tokens=max_tokens,
                     draft_block_size=args.draft_block_size,
+                    row=row,
+                    code_timeout=args.code_timeout,
                 )
             records.append(record)
             print(json.dumps(record, sort_keys=True), file=stream, flush=True)

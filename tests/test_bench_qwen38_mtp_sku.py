@@ -26,6 +26,15 @@ def test_render_gsm_normalizes_gold_commas() -> None:
     assert gold == "1234"
 
 
+def test_extract_python_prefers_fenced_completion() -> None:
+    text = "analysis first\n```python\ndef answer():\n    return 42\n```"
+    assert bench._extract_python(text) == "def answer():\n    return 42"
+
+
+def test_humaneval_defaults_match_model_card_gate() -> None:
+    assert bench._task_defaults("humaneval") == (40, 640)
+
+
 def test_summary_reports_paired_flips_and_hashes() -> None:
     records = [
         {
