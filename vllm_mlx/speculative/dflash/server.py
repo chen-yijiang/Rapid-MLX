@@ -2203,7 +2203,7 @@ def run_dflash_server(
     """
     if not have_runtime():
         raise RuntimeError(
-            "DFlash server requires mlx-vlm 0.5.0+ — install with "
+            f"{runtime_label} mode requires mlx-vlm 0.5.0+ — install with "
             "pip install 'rapid-mlx[dflash]'. Homebrew installs the "
             "text-only package; switch to an isolated uv tool install "
             "for optional extras."
@@ -2243,7 +2243,11 @@ def run_dflash_server(
     def _load_all():
         t0 = time.perf_counter()
         m, p = load(main_model_repo)
-        logger.info("DFlash: main model loaded in %.1fs", time.perf_counter() - t0)
+        logger.info(
+            "%s: main model loaded in %.1fs",
+            runtime_label,
+            time.perf_counter() - t0,
+        )
         # Preserve the historical one-argument call for DFlash so external
         # monkeypatches/wrappers around this programmatic entry point remain
         # compatible. Other drafter families must opt in explicitly.
@@ -2253,7 +2257,7 @@ def run_dflash_server(
             rt = load_runtime(drafter_repo, kind=draft_kind)
         return m, p, rt
 
-    logger.info("DFlash: loading main model via mlx-vlm: %s", main_model_repo)
+    logger.info("%s: loading main model via mlx-vlm: %s", runtime_label, main_model_repo)
     model, processor, runtime = _dflash_executor.submit(_load_all).result()
 
     app = _build_app(
