@@ -21,6 +21,7 @@ red, which is the only property that makes a guard worth having.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -54,13 +55,15 @@ def test_harness_profiles_mirror_in_release_check_is_in_lockstep() -> None:
     mirror_src = (REPO_ROOT / "scripts" / "release_check_m3_random.py").read_text(
         encoding="utf-8"
     )
-    namespace: dict[str, object] = {}
     match = re.search(
-        r"^HARNESS_PROFILES = \((?:[^)]*)\)", mirror_src, re.MULTILINE | re.DOTALL
+        r"^HARNESS_PROFILES = (\([^)]*\))", mirror_src, re.MULTILINE | re.DOTALL
     )
     assert match, "release_check_m3_random.py no longer defines HARNESS_PROFILES"
-    exec(match.group(0), namespace)  # noqa: S102 — literal tuple from our own repo
-    assert namespace["HARNESS_PROFILES"] == HARNESS_PROFILES
+    # literal_eval, not exec: this only ever needs to read a tuple of string
+    # literals, and it should stay unable to do anything else even if that
+    # file grows something executable next to the assignment.
+    mirrored = ast.literal_eval(match.group(1))
+    assert mirrored == HARNESS_PROFILES
 
 
 def test_bench_submission_schema_accepts_every_harness_profile() -> None:
