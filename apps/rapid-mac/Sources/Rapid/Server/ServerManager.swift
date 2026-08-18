@@ -158,6 +158,14 @@ final class ServerManager {
     /// consuming one another's confirmation (#1463).
     private var memoryConfirmations = MemoryLoadConfirmationQueue()
 
+    /// Live-memory source. Production uses the host probe; tests replace it so
+    /// launch auto-start semantics can be verified without depending on the
+    /// runner's current pressure.
+    @ObservationIgnored
+    internal var memorySnapshotProvider: () -> MemoryProbe.Snapshot? = {
+        MemoryProbe.snapshot()
+    }
+
     /// Confirmed launches still running, by sequence number. Polled by
     /// ``awaitConfirmedLaunch`` instead of awaiting the task's ``value``:
     /// awaiting a non-throwing Task is NOT cancellation-aware, so a caller
@@ -1394,7 +1402,7 @@ final class ServerManager {
         // Respawn is also recovering a model that ALREADY fit when it first
         // started; a genuine free-RAM drop is bounded by the respawn-attempt
         // budget, and the user's manual restart still routes through the guard.
-        if !bypassMemoryGuard, !isAutoRespawn, let snapshot = MemoryProbe.snapshot() {
+        if !bypassMemoryGuard, !isAutoRespawn, let snapshot = memorySnapshotProvider() {
             let footprint = ModelSizing.estimate(alias: trimmedAlias)
             let safety = ModelSizing.memorySafety(
                 footprint: footprint,
