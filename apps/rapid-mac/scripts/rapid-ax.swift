@@ -111,7 +111,7 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "trust" {
 
 guard CommandLine.arguments.count >= 3,
       let pid = pid_t(CommandLine.arguments[2]) else {
-    fail("usage: rapid-ax <dump|press|click-center|increment|decrement|set-value|paste-file|close-window|trust> <pid> [identifier-or-window-title] [value]")
+    fail("usage: rapid-ax <dump|press|increment|decrement|set-value|paste-file|close-window|trust> <pid> [identifier-or-window-title] [value]")
 }
 
 let command = CommandLine.arguments[1]
@@ -314,24 +314,6 @@ switch command {
 case "press":
     let result = AXUIElementPerformAction(target, kAXPressAction as CFString)
     guard result == .success else { fail("AXPress \(identifier) failed: \(result.rawValue)") }
-case "click-center":
-    guard let origin = point(target, kAXPositionAttribute as CFString),
-          let extent = size(target, kAXSizeAttribute as CFString)
-    else { fail("click-center \(identifier) has no readable bounds") }
-    guard let running = NSRunningApplication(processIdentifier: pid) else {
-        fail("target application is no longer running")
-    }
-    running.activate(options: [.activateAllWindows])
-    usleep(100_000)
-    let center = CGPoint(x: origin.x + extent.width / 2, y: origin.y + extent.height / 2)
-    guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
-                             mouseCursorPosition: center, mouseButton: .left),
-          let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
-                           mouseCursorPosition: center, mouseButton: .left)
-    else { fail("could not create click-center events") }
-    down.post(tap: .cghidEventTap)
-    up.post(tap: .cghidEventTap)
-    usleep(100_000)
 case "increment":
     let result = AXUIElementPerformAction(target, kAXIncrementAction as CFString)
     guard result == .success else { fail("AXIncrement \(identifier) failed: \(result.rawValue)") }

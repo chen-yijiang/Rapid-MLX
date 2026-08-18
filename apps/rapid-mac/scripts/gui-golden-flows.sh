@@ -3688,7 +3688,15 @@ flow_audio_readiness() {
                      and .text == "golden speech controls"' \
         "Generate Speech did not send the selected voice and text"
     wait_identifier Audio.Speech.Play "$OUT/speech-result.json"
-    "$AX_DRIVER" click-center "$APP_PID" Audio.Speech.Save \
+    # AXPress, not a synthesized mouse click. `click-center` (added with this
+    # flow) read the button's AX bounds, posted a CGEvent down/up pair at the
+    # centre, and returned success as soon as the EVENTS were created — it never
+    # observed whether the button fired. Measured on an M3 Ultra: the click
+    # reported `{"success": true}` and no WAV was ever written; the identical
+    # flow with AXPress wrote all 64,044 bytes. That is why the gate could merge
+    # red and still look like a product bug ("Save speech did not write the
+    # generated WAV") rather than a harness that never pressed anything.
+    "$AX_DRIVER" press "$APP_PID" Audio.Speech.Save \
         > "$OUT/speech-save-click.json" \
         || die "Save speech is not clickable"
     local speech_saved=0
@@ -3701,7 +3709,7 @@ flow_audio_readiness() {
     [[ "$speech_saved" == 1 ]] \
         || die "Save speech did not write the generated WAV"
     see_main "$OUT/speech-before-play.json"
-    "$AX_DRIVER" click-center "$APP_PID" Audio.Speech.Play \
+    "$AX_DRIVER" press "$APP_PID" Audio.Speech.Play \
         > "$OUT/speech-play-click.json" \
         || die "Play speech is not clickable"
     local playback_started=0
