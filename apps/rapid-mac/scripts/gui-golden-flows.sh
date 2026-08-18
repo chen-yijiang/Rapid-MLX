@@ -1693,12 +1693,8 @@ flow_chat_restore() {
     wait_identifier Sidebar.Conversation.Action.MoveToNewFolder "$OUT/folder-menu.json"
     press "$OUT/folder-menu.json" Sidebar.Conversation.Action.MoveToNewFolder \
         "$OUT/folder-new-press.json"
-    # #2050: SwiftUI drops the identifier from a TextField inside `.alert`
-    # (button identifiers DO propagate), so the prompt's presence is proven
-    # by its Save button and the field is addressed by role within the
-    # sheet — `Sidebar.Folder.NameField` never appears in any AX dump.
-    wait_identifier Sidebar.Folder.Prompt.Confirm "$OUT/folder-prompt.json"
-    "$AX_DRIVER" set-value "$APP_PID" "sheet-role:AXTextField" "Golden Work" \
+    wait_identifier Sidebar.Folder.NameField "$OUT/folder-prompt.json"
+    "$AX_DRIVER" set-value "$APP_PID" Sidebar.Folder.NameField "Golden Work" \
         > "$OUT/folder-name.json"
     # AXValue changes reach the native field before SwiftUI has necessarily
     # propagated the binding and rebuilt the alert action as enabled. Pressing

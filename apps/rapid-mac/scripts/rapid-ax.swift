@@ -182,23 +182,7 @@ func size(_ element: AXUIElement, _ name: CFString) -> CGSize? {
     return result
 }
 
-// #2050: SwiftUI drops the accessibilityIdentifier from a TextField placed
-// inside `.alert` — button identifiers propagate into the AX tree, the
-// field's does not — so no identifier can ever address it. The
-// "sheet-role:<AXRole>" selector matches the first element of that role
-// that has an AXSheet ancestor; precise enough because an alert hosts at
-// most one field of a given role.
-func matchesWanted(identifier: String?, role: String?, insideSheet: Bool) -> Bool {
-    guard let wanted else { return false }
-    if identifier == wanted { return true }
-    if insideSheet, wanted.hasPrefix("sheet-role:"),
-       role == String(wanted.dropFirst("sheet-role:".count)) {
-        return true
-    }
-    return false
-}
-
-func walk(_ element: AXUIElement, depth: Int, insideSheet: Bool = false) {
+func walk(_ element: AXUIElement, depth: Int) {
     guard depth <= 40, records.count < 12_000 else {
         elementWalkComplete = false
         return
@@ -207,7 +191,6 @@ func walk(_ element: AXUIElement, depth: Int, insideSheet: Bool = false) {
 
     let identifier = string(element, kAXIdentifierAttribute as CFString)
     let role = string(element, kAXRoleAttribute as CFString)
-    let nowInsideSheet = insideSheet || role == kAXSheetRole as String
     // Action commands only need one element. Building a complete 12k-node
     // dump after finding it leaves SwiftUI several seconds to replace the
     // backing accessibility object; AXPress then receives a stale reference
@@ -218,8 +201,7 @@ func walk(_ element: AXUIElement, depth: Int, insideSheet: Bool = false) {
         match = element
         return
     }
-    if command != "dump", match == nil,
-       matchesWanted(identifier: identifier, role: role, insideSheet: nowInsideSheet) {
+    if command != "dump", match == nil, identifier == wanted {
         match = element
         return
     }
@@ -257,10 +239,7 @@ func walk(_ element: AXUIElement, depth: Int, insideSheet: Bool = false) {
     }
     records.append(record)
 
-    if match == nil,
-       matchesWanted(identifier: identifier, role: role, insideSheet: nowInsideSheet) {
-        match = element
-    }
+    if match == nil, identifier == wanted { match = element }
     // At depth 0 the children ARE the windows enumerated below, reused rather
     // than read again: a second AXChildren read can return a different set, and
     // then `ui_elements` and the `windows` list this dump vouches for would
@@ -287,7 +266,7 @@ func walk(_ element: AXUIElement, depth: Int, insideSheet: Bool = false) {
         }
     }
     for child in children {
-        walk(child, depth: depth + 1, insideSheet: nowInsideSheet)
+        walk(child, depth: depth + 1)
         if command != "dump", match != nil { break }
     }
 }
@@ -326,17 +305,10 @@ if command == "close-window" {
     }) else {
         fail("window not found: \(wanted)")
     }
-    // #2050: system panels (NSSavePanel and friends) have no
-    // AXCloseButton — their dismiss affordance is the cancel button,
-    // which the window publishes first-class as AXCancelButton.
-    // "Close this window" and "cancel this panel" are the same user
-    // intention, so fall back rather than fail.
-    let dismissButton = attribute(window, kAXCloseButtonAttribute as CFString)
-        ?? attribute(window, kAXCancelButtonAttribute as CFString)
-    guard let dismissButton else {
-        fail("window has neither AXCloseButton nor AXCancelButton: \(wanted)")
+    guard let closeButton = attribute(window, kAXCloseButtonAttribute as CFString) else {
+        fail("window has no AXCloseButton: \(wanted)")
     }
-    let result = AXUIElementPerformAction(dismissButton as! AXUIElement, kAXPressAction as CFString)
+    let result = AXUIElementPerformAction(closeButton as! AXUIElement, kAXPressAction as CFString)
     guard result == .success else { fail("AXPress close window \(wanted) failed: \(result.rawValue)") }
     print("{\"success\":true,\"window\":\"\(wanted)\",\"action\":\"close-window\"}")
     exit(0)
