@@ -1679,8 +1679,12 @@ flow_chat_restore() {
     wait_identifier Sidebar.Conversation.Action.MoveToNewFolder "$OUT/folder-menu.json"
     press "$OUT/folder-menu.json" Sidebar.Conversation.Action.MoveToNewFolder \
         "$OUT/folder-new-press.json"
-    wait_identifier Sidebar.Folder.NameField "$OUT/folder-prompt.json"
-    "$AX_DRIVER" set-value "$APP_PID" Sidebar.Folder.NameField "Golden Work" \
+    # #2050: SwiftUI drops the identifier from a TextField inside `.alert`
+    # (button identifiers DO propagate), so the prompt's presence is proven
+    # by its Save button and the field is addressed by role within the
+    # sheet — `Sidebar.Folder.NameField` never appears in any AX dump.
+    wait_identifier Sidebar.Folder.Prompt.Confirm "$OUT/folder-prompt.json"
+    "$AX_DRIVER" set-value "$APP_PID" "sheet-role:AXTextField" "Golden Work" \
         > "$OUT/folder-name.json"
     see_main "$OUT/folder-name-set.json"
     press "$OUT/folder-name-set.json" Sidebar.Folder.Prompt.Confirm \
@@ -1711,8 +1715,11 @@ flow_chat_restore() {
     done
     [[ "$export_panel_visible" == 1 ]] \
         || die "Markdown export did not present its save panel"
-    "$AX_DRIVER" close-window "$APP_PID" "Export Conversation" \
-        > "$OUT/export-panel-close.json" \
+    # #2050: the save panel's window object publishes neither AXCloseButton
+    # nor AXCancelButton, so `close-window` can never dismiss it. Its
+    # content IS bridged into the app's AX tree, and AppKit gives the
+    # cancel affordance a stable identifier — press that instead.
+    press "$OUT/export-panel.json" CancelButton "$OUT/export-panel-close.json" \
         || die "export save panel could not be cancelled"
 
     local conversation_suffix pin_id unpin_id
