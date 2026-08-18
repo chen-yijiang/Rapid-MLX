@@ -1339,7 +1339,8 @@ final class ServerManager {
         hfPath: String? = nil,
         isAutoRespawn: Bool = false,
         bypassMemoryGuard: Bool = false,
-        memoryRequestID: UUID? = nil
+        memoryRequestID: UUID? = nil,
+        isLaunchAutoStart: Bool = false
     ) async {
         // Issue #278: a manual restart is the user taking over the
         // lifecycle — reset the budget at entry so a previously
@@ -1409,6 +1410,18 @@ final class ServerManager {
             // only what is genuinely dangerous, and surface "tight"
             // passively — the picker's static sizing bands already do.
             if safety == .unsafe {
+                // A launch auto-start must never greet the user with a scary
+                // modal they did not ask for. Opening the app is not "I want to
+                // chat now" — they may be heading to Audio/Images, or just
+                // checking in. Defer silently: leave the server ``.idle`` with
+                // the alias selected (the readiness banner still shows a Start
+                // affordance), and let this exact warning surface only when the
+                // user explicitly loads it (Start button or first message),
+                // which routes back through here WITHOUT ``isLaunchAutoStart``.
+                if isLaunchAutoStart {
+                    cancelAutoRespawn()
+                    return
+                }
                 let warning = ModelSizing.MemoryWarning(
                     alias: trimmedAlias,
                     hfPath: hfPath,
