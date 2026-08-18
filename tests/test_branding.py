@@ -48,14 +48,20 @@ def _public_text_files() -> list[Path]:
 
 
 def test_public_surfaces_do_not_use_old_brand() -> None:
+    readme = (REPO_ROOT / "README.md").resolve()
     offenders = []
     for path in _public_text_files():
         try:
             content = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        for exemption in ATTRIBUTION_EXEMPTIONS:
-            content = content.replace(exemption, "")
+        # The licence-required attribution lives only in the README
+        # Acknowledgements, so the exemption applies there and nowhere else:
+        # a copy of that exact link in any other doc/example is still an
+        # offender, matching the "README — and nowhere else" rule above.
+        if path.resolve() == readme:
+            for exemption in ATTRIBUTION_EXEMPTIONS:
+                content = content.replace(exemption, "")
         if OLD_BRAND in content.lower():
             offenders.append(str(path.relative_to(REPO_ROOT)))
 
@@ -79,6 +85,15 @@ def test_upstream_attribution_survives_branding() -> None:
         "README lost the upstream attribution for the project this code "
         "derives from — see NOTICE."
     )
+    # The exemption is a single Acknowledgements link. Pin the count so the old
+    # brand it legitimately carries can't quietly proliferate across the README
+    # (each extra copy is old-brand text the exemption would otherwise wave
+    # through) — attribution belongs in exactly one place.
+    for exemption in ATTRIBUTION_EXEMPTIONS:
+        assert readme.count(exemption) == 1, (
+            f"expected exactly one {exemption!r} in README, "
+            f"found {readme.count(exemption)}"
+        )
 
     notice = (REPO_ROOT / "NOTICE").read_text(encoding="utf-8")
     missing = [
