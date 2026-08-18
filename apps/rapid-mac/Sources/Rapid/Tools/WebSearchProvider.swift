@@ -114,7 +114,7 @@ enum WebSearchProvider: String, CaseIterable, Codable, Identifiable, Sendable {
                 // card on file and overage is auto-billed. The
                 // subtitle must say so BEFORE the user follows the
                 // key link (issue #2043).
-                subtitle: "Requires a Brave API key and a card on file — usage past the monthly credit is auto-billed.",
+                subtitle: "Requires a Brave Search API key and a card on file — usage past the monthly credit is auto-billed.",
                 keyConsoleURL: URL(string: "https://brave.com/search/api/"),
                 // The dashboard host is separate from the API host;
                 // the API-serving host returns HTTP 403 for this UI
@@ -133,7 +133,7 @@ enum WebSearchProvider: String, CaseIterable, Codable, Identifiable, Sendable {
             // for the problem must not be told the backend is fine.
             return WebSearchProviderDescriptor(
                 displayName: "DuckDuckGo",
-                subtitle: "No key. Backstop only — throttled after a few searches, and result quality is poor.",
+                subtitle: "No key required. Backstop only — throttled after a few searches, and result quality is poor.",
                 keyConsoleURL: nil,
                 keyDashboardURL: nil,
                 requiresKey: false,
