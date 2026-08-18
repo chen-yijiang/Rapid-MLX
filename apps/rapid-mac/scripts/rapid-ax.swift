@@ -2,6 +2,9 @@
 // Minimal native Accessibility driver for deterministic Rapid GUI journeys.
 // It deliberately exposes only semantic operations: dump, press, set-value,
 // paste-file, and closing a named native window through its AXCloseButton.
+// Most targets are accessibility identifiers. A `sheet-role:<AXRole>` target
+// is also available for native alert controls whose SwiftUI identifier is
+// discarded by macOS before the control reaches the accessibility tree.
 import AppKit
 import ApplicationServices
 import Foundation
@@ -149,6 +152,13 @@ var windowTitles = [String]()
 var windowListComplete = true
 var windowElements = [AXUIElement]()
 let wanted = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : nil
+let sheetRolePrefix = "sheet-role:"
+let wantedSheetRole: String? = wanted.flatMap { target in
+    guard target.hasPrefix(sheetRolePrefix) else { return nil }
+    let role = String(target.dropFirst(sheetRolePrefix.count))
+    guard !role.isEmpty else { fail("sheet-role selector requires an AX role") }
+    return role
+}
 
 func attribute(_ element: AXUIElement, _ name: CFString) -> AnyObject? {
     var value: CFTypeRef?
@@ -182,7 +192,7 @@ func size(_ element: AXUIElement, _ name: CFString) -> CGSize? {
     return result
 }
 
-func walk(_ element: AXUIElement, depth: Int) {
+func walk(_ element: AXUIElement, depth: Int, insideSheet: Bool = false) {
     guard depth <= 40, records.count < 12_000 else {
         elementWalkComplete = false
         return
@@ -191,6 +201,10 @@ func walk(_ element: AXUIElement, depth: Int) {
 
     let identifier = string(element, kAXIdentifierAttribute as CFString)
     let role = string(element, kAXRoleAttribute as CFString)
+    let elementIsInsideSheet = insideSheet || role == kAXSheetRole as String
+    let matchesSheetRole = wantedSheetRole.map {
+        elementIsInsideSheet && role == $0
+    } ?? false
     // Action commands only need one element. Building a complete 12k-node
     // dump after finding it leaves SwiftUI several seconds to replace the
     // backing accessibility object; AXPress then receives a stale reference
@@ -201,7 +215,8 @@ func walk(_ element: AXUIElement, depth: Int) {
         match = element
         return
     }
-    if command != "dump", match == nil, identifier == wanted {
+    if command != "dump", match == nil,
+       identifier == wanted || matchesSheetRole {
         match = element
         return
     }
@@ -266,7 +281,7 @@ func walk(_ element: AXUIElement, depth: Int) {
         }
     }
     for child in children {
-        walk(child, depth: depth + 1)
+        walk(child, depth: depth + 1, insideSheet: elementIsInsideSheet)
         if command != "dump", match != nil { break }
     }
 }

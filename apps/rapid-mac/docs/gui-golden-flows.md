@@ -510,6 +510,11 @@ python3 scripts/ax-baseline.py normalize --scrub fake-alias /tmp/…/steady.json
 ## Why this is not coordinate automation
 
 The checked-in `rapid-ax.swift` helper talks directly to macOS Accessibility.
+Actions normally target an accessibility identifier. Native SwiftUI alerts
+are the exception: macOS can discard a `TextField` identifier while retaining
+the surrounding button identifiers. After waiting for an identified alert
+button, a flow may use `sheet-role:AXTextField` to address the first text field
+strictly inside the open `AXSheet`.
 It finds controls by stable `AXIdentifier`, performs `AXPress`, sets native text
 values, and serializes roles/descriptions/values for assertions. Peekaboo is
 kept for permission checks, window discovery, menu interaction, and screenshots.

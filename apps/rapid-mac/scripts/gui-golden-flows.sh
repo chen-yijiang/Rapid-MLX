@@ -1679,8 +1679,12 @@ flow_chat_restore() {
     wait_identifier Sidebar.Conversation.Action.MoveToNewFolder "$OUT/folder-menu.json"
     press "$OUT/folder-menu.json" Sidebar.Conversation.Action.MoveToNewFolder \
         "$OUT/folder-new-press.json"
-    wait_identifier Sidebar.Folder.NameField "$OUT/folder-prompt.json"
-    "$AX_DRIVER" set-value "$APP_PID" Sidebar.Folder.NameField "Golden Work" \
+    # SwiftUI `.alert` button identifiers survive the macOS AX bridge, but its
+    # TextField identifier does not. Wait for the identified confirm button so
+    # the sheet is definitely present, then address the anonymous field by its
+    # role inside that sheet (never an unrelated field in the main window).
+    wait_identifier Sidebar.Folder.Prompt.Confirm "$OUT/folder-prompt.json"
+    "$AX_DRIVER" set-value "$APP_PID" sheet-role:AXTextField "Golden Work" \
         > "$OUT/folder-name.json"
     see_main "$OUT/folder-name-set.json"
     press "$OUT/folder-name-set.json" Sidebar.Folder.Prompt.Confirm \
