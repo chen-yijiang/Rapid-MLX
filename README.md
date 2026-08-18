@@ -253,7 +253,9 @@ complete `rapid-mlx serve` process tree on an M2 Pro 32 GB Mac mini (the 32 GB+ 
 Every Mac from 32 GB up gets the same pick, and that is the point: Qwen3.8-27B
 scores 52 on the Artificial Analysis Intelligence Index (2026-08-18) —
 GPT-5.6-class, the highest of any open-weights model we serve, ahead of the
-much larger 122B (33) and 35B (32) it replaces. Multi-token prediction is on by
+much larger 122B (33) and 35B (32) it replaces (the index scores the
+full-precision release; our 4-bit build's deltas are unmeasured — the
+standing caveat for every quantized pick here). Multi-token prediction is on by
 default (~40 tok/s decode, 8K prefill at ~324 tok/s, zero swap at every tier
 budget).
 

@@ -485,7 +485,7 @@
       "ifeval": null,
       "ifeval_null_reason": "Qwen3.8 model card publishes IFBench (79.5), not IFEval prompt-strict",
       "speed_tps": 40.7,
-      "speed_source": "docs/benchmarks/model-recommendation-measurements.json (8K prompt, M3 Ultra, MTP on)"
+      "speed_source": "docs/benchmarks/model-recommendation-measurements.json (short-prompt decode, M3 Ultra, MTP on; 8K decode: 37.6)"
     }
   },
   "ground_truth_source": "data/benchmark-ground-truth.json"
