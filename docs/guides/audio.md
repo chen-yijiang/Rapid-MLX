@@ -309,10 +309,13 @@ stem removed. Add `--play` to audition the result without writing files.
 
 > **Bring your own audio.** This repository ships no music. Stock "royalty-free"
 > libraries usually still restrict redistribution and commercial use, so we do
-> not bundle their files — use your own recordings, or a genuinely
-> public-domain source such as [Free Music Archive CC0](https://freemusicarchive.org/)
-> or [MUSDB18](https://sigsep.github.io/datasets/musdb.html) (research-licensed,
-> the standard source-separation benchmark).
+> not bundle their files — use your own recordings, or a source you have cleared
+> for your use. The [Free Music Archive](https://freemusicarchive.org/) hosts
+> tracks under several licenses, so filter to CC0 / Public Domain and check the
+> individual track's license before you rely on it; [MUSDB18](https://sigsep.github.io/datasets/musdb.html)
+> is the standard source-separation benchmark but is research-licensed (not for
+> commercial use). Whatever you pick, confirm its license covers what you plan
+> to do.
 
 **Performance:** 30s audio processed in ~20 seconds on M4 Max.
 
