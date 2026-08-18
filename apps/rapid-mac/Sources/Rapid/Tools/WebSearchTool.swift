@@ -422,6 +422,17 @@ enum WebSearchTool {
                     content: "\(toolName) error: the Keenable key's monthly credit allowance is used up (HTTP 402). Searches continue on the keyless pool if you clear the key.",
                     isError: true
                 )
+            case 429 where apiKey != nil:
+                // Codex r1 MAJOR: a keyed 429 is an account problem
+                // (the org's rate cap), not "Keenable was unavailable"
+                // — degrading here would hide and mislabel the quota
+                // state the user's own key is in. Same loud-surface
+                // contract as 401/402.
+                return ToolCallResult(
+                    toolCallID: "",
+                    content: "\(toolName) error: Keenable rate limit hit for this API key (HTTP 429). Wait a moment or check the plan's limits.",
+                    isError: true
+                )
             default:
                 // Keyless 429 (shared pool exhausted), 5xx, or any
                 // other transport-level answer: degrade.

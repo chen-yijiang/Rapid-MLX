@@ -369,7 +369,12 @@ enum KeenableSearchClient {
                     }
                     // ``Published:`` / ``Acquired:`` fall through untouched.
                 } else if !trimmed.isEmpty {
-                    snippetLines.append(trimmed)
+                    // Codex r1: a metadata line emitted AFTER the
+                    // snippet body must not leak into the model-visible
+                    // snippet text.
+                    let isMetadata = ["Title: ", "URL: ", "Published: ", "Acquired: "]
+                        .contains { trimmed.hasPrefix($0) }
+                    if !isMetadata { snippetLines.append(trimmed) }
                 }
             }
             // Same boundary gate as every backend: only http(s)

@@ -185,6 +185,7 @@ struct KeenableClientTests {
         Snippets:
         Chip Apple M3 Ultra CPU cores 28 or 32
         Memory bandwidth 819 GB/s
+        Published: 2026-07-24
 
         ---
 
@@ -249,10 +250,13 @@ struct KeenableClientTests {
         #expect(results[0].title.hasPrefix("Apple M3 Ultra"))
         #expect(results[0].url == "https://canitrun.dev/gpus/m3-ultra")
         #expect(results[0].snippet.contains("819 GB/s"))
-        // Multi-line snippet bodies join into one line.
+        // Multi-line snippet bodies join into one line, and metadata
+        // lines never leak into the snippet — whether they appear
+        // BEFORE the Snippets: header or trail AFTER the body (the
+        // fixture carries a trailing "Published:" line).
         #expect(results[1].snippet == "Chip Apple M3 Ultra CPU cores 28 or 32 Memory bandwidth 819 GB/s")
-        // Metadata lines never leak into the snippet.
         #expect(!results[0].snippet.contains("Acquired"))
+        #expect(!results[1].snippet.contains("Published"))
     }
 
     @Test("The result cap truncates the block list")

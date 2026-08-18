@@ -246,8 +246,9 @@ distributions are out of scope but we will help triage.
   web-search tool, the search query (never your whole conversation)
   is sent to the configured provider per their own privacy policy.
   The default backend is Keenable's keyless endpoint
-  (`api.keenable.ai`) — no account, no API key, nothing identifying
-  beyond the request itself. You can switch to Parallel, Tavily,
+  (`api.keenable.ai`) — no account, no API key; the request carries
+  the query plus standard connection metadata (such as your IP
+  address), nothing more. You can switch to Parallel, Tavily,
   Brave, or the DuckDuckGo scrape — or add your own key — in
   Settings → Tools. When Keenable is unreachable the tool retries the
   query against DuckDuckGo. Rapid-MLX Desktop is a passthrough.
