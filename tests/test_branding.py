@@ -47,6 +47,19 @@ def _public_text_files() -> list[Path]:
     return files
 
 
+def _markdown_section(text: str, header: str) -> str:
+    """Return the body of the ``## <header>`` section (up to the next ``## ``)."""
+    body: list[str] = []
+    capturing = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            capturing = line.strip() == header
+            continue
+        if capturing:
+            body.append(line)
+    return "\n".join(body)
+
+
 def test_public_surfaces_do_not_use_old_brand() -> None:
     readme = (REPO_ROOT / "README.md").resolve()
     offenders = []
@@ -85,14 +98,18 @@ def test_upstream_attribution_survives_branding() -> None:
         "README lost the upstream attribution for the project this code "
         "derives from — see NOTICE."
     )
-    # The exemption is a single Acknowledgements link. Pin the count so the old
-    # brand it legitimately carries can't quietly proliferate across the README
-    # (each extra copy is old-brand text the exemption would otherwise wave
-    # through) — attribution belongs in exactly one place.
+    # The exemption is a single Acknowledgements link. Pin it to *exactly once*
+    # and *inside the Acknowledgements section* — the old brand it legitimately
+    # carries can't then proliferate elsewhere in the README (each stray copy is
+    # old-brand text the file-level exemption would otherwise wave through).
+    ack = _markdown_section(readme, "## Acknowledgements")
     for exemption in ATTRIBUTION_EXEMPTIONS:
         assert readme.count(exemption) == 1, (
             f"expected exactly one {exemption!r} in README, "
             f"found {readme.count(exemption)}"
+        )
+        assert exemption in ack, (
+            f"{exemption!r} must live in the README Acknowledgements section"
         )
 
     notice = (REPO_ROOT / "NOTICE").read_text(encoding="utf-8")

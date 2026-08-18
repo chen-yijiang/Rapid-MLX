@@ -1,5 +1,5 @@
 Rapid-MLX
-Copyright 2025-2026 MachineFi Inc. and the Rapid-MLX contributors
+Copyright 2025-2026 the Rapid-MLX contributors
 
 This product includes software developed by third parties. The notices below
 are provided under section 4 of the Apache License, Version 2.0, and under the
@@ -20,7 +20,7 @@ history until 2026-02-15. The project was renamed to Rapid-MLX on 2026-03-13.
 
 **The files in this repository have been changed.** Since the rename the
 codebase has been extensively modified, extended, and in large part rewritten
-by MachineFi Inc. and the Rapid-MLX contributors; the Python package retains
+by the Rapid-MLX contributors; the Python package retains
 the `vllm_mlx` import name from its origin. Neither the original authors nor
 any upstream project endorses this distribution. The complete record of what
 changed, when, and by whom is preserved in the git history of this repository.
