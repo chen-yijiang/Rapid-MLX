@@ -536,9 +536,11 @@ else
     # Dictation is dead without the audio-input entitlement in the SEALED
     # signature (not just the source plist) — 0.12.16 shipped that way
     # (#2134). Fail the build rather than notarize another silent brick.
-    if ! codesign -d --entitlements :- "$APP" 2>/dev/null \
-        | grep -q "com.apple.security.device.audio-input"; then
-        echo "ERROR: sealed entitlements are missing com.apple.security.device.audio-input (#2134)" >&2
+    # Parse the value, don't grep the name: a sealed <false/> must fail too.
+    audio_input=$(codesign -d --entitlements :- "$APP" 2>/dev/null \
+        | plutil -extract 'com\.apple\.security\.device\.audio-input' raw -o - - 2>/dev/null || true)
+    if [[ "$audio_input" != "true" ]]; then
+        echo "ERROR: sealed entitlements lack com.apple.security.device.audio-input=true (got: '${audio_input:-absent}') — dictation would ship broken (#2134)" >&2
         exit 1
     fi
     codesign -dv --verbose=4 "$APP" 2>&1 | grep -E 'Authority|TeamIdentifier|flags=' || true
