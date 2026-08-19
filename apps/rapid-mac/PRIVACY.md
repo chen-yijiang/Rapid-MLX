@@ -118,19 +118,25 @@ its own log files. A malicious build of `rapid-mlx` could:
 
 ### How Rapid-MLX Desktop resolves the `rapid-mlx` binary
 
-`ServerLocator` picks a binary in this fixed order (see
+`ServerLocator` resolves the binary in two tiers (see
 `Sources/Rapid/Server/ServerLocator.swift`):
 
 1. **`RAPID_BIN`** environment variable — explicit dev/test override;
-   honoured so power users can point the app at a checkout.
-2. **Runtime-override slot** —
-   `~/Library/Application Support/Rapid/runtime-override/rapid-mlx/bin/rapid-mlx`.
-   This is the canonical install path: the slim-DMG bootstrapper and
-   the sidecar updater publish the engine here atomically. Wins over
-   the bundled copy when both exist and it is newer.
-3. **Bundled sidecar** —
-   `Rapid-MLX Desktop.app/Contents/Resources/rapid-mlx/bin/rapid-mlx`,
-   shipped inside the notarised app bundle on full-bundle builds.
+   when present in the app's launch environment it wins
+   unconditionally, so power users can point the app at a checkout.
+2. **Managed sidecars — newest version wins.** The two app-managed
+   slots are compared by their `VERSION` files when both exist:
+   * **Runtime-override** —
+     `~/Library/Application Support/Rapid/runtime-override/rapid-mlx/bin/rapid-mlx`,
+     the canonical install path: the slim-DMG bootstrapper and the
+     sidecar updater publish the engine here atomically.
+   * **Bundled sidecar** —
+     `Rapid-MLX Desktop.app/Contents/Resources/rapid-mlx/bin/rapid-mlx`,
+     shipped inside the notarised app bundle on full-bundle builds.
+
+   The runtime override wins when it is the same version or newer; a
+   stale or unversioned runtime override cannot shadow a newer,
+   versioned sidecar shipped by an app update.
 
 **A `rapid-mlx` on your `$PATH` (Homebrew, pipx, uv, anything else) is
 intentionally never consulted.** The PATH fallback was removed in the
@@ -144,10 +150,14 @@ same trust level as replacing any app data on your account.
 
 ### Verifying what's actually running
 
-* The only mutable slot is
+* The only mutable **app-managed** slot is
   `~/Library/Application Support/Rapid/runtime-override/` — inspect it
   (or delete it; the app re-provisions from the official channel).
-  `RAPID_BIN` only applies if you exported it yourself.
+* **`RAPID_BIN` outranks both managed slots**, so also confirm it is
+  not set in the environment the app launches from: it only applies if
+  something you control exported it (a shell that runs the app binary
+  directly, a launch agent, `launchctl setenv`). If you never set it,
+  it is not in play; if in doubt, unset it there and relaunch.
 * **Source is open** at
   [github.com/raullenchai/Rapid-MLX](https://github.com/raullenchai/Rapid-MLX);
   releases publish wheels + PyPI artifacts. Inspect the workflow
