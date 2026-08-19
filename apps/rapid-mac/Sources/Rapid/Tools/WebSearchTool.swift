@@ -361,9 +361,10 @@ enum WebSearchTool {
     /// as an error: Keenable is the zero-setup default, so its
     /// outages degrade to the DuckDuckGo backstop with a
     /// model-visible note — the "no broken state" promise again.
-    /// Key problems (401/403 on the keyed path) still surface
-    /// loudly: the user pasted that key and must hear it's being
-    /// rejected rather than silently burning the keyless pool.
+    /// Key problems (401/402/403/429 on the keyed path) still
+    /// surface loudly: the user pasted that key and must hear about
+    /// its rejection or quota state rather than silently burning
+    /// the keyless pool.
     static func runKeenable(
         query q: String,
         apiKey: String?,
