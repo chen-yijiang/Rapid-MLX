@@ -383,6 +383,10 @@ final class TelemetryTests {
 
     @Test("currentPlatform chip matches the raw sysctl brand string the engine also reads")
     func platformChipMatchesSysctl() {
+        #if arch(x86_64)
+        // Do not transmit Intel's detailed SKU/frequency-bearing brand string.
+        #expect(TelemetryClient.chipBrand() == "Intel")
+        #else
         // Read the same key the engine shells out to
         // (`sysctl -n machdep.cpu.brand_string`) and confirm the Swift
         // reader returns the byte-identical, whitespace-trimmed value —
@@ -391,9 +395,11 @@ final class TelemetryTests {
         _ = sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0)
         var buffer = [CChar](repeating: 0, count: size)
         _ = sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0)
-        let raw = String(cString: buffer)
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        let raw = String(bytes: bytes, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         #expect(TelemetryClient.chipBrand() == raw)
+        #endif
     }
 
     @Test("currentPlatform reports bucketed memory matching this host's rounded physical RAM")

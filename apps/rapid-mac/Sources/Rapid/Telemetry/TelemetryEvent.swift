@@ -43,19 +43,15 @@ struct TelemetryEvent: Codable, Sendable {
         /// engine's ``redact._read_chip_brand()`` so a desktop machine
         /// buckets into the SAME per-chip label the CLI reports, instead
         /// of being invisible behind the generic ``arch`` ("arm64").
+        /// Legacy Intel Macs use the coarse fixed label ``"Intel"``.
         ///
         /// Optional on the wire (``encodeIfPresent`` omits it when nil)
         /// so this is a backward-compatible schema addition: an older
         /// telemetry-worker that doesn't read ``chip`` ignores the extra
         /// key, and a build that can't read the brand simply omits it.
         ///
-        /// ⚠️ Adding a real chip brand here means desktop clients now
-        /// LOOK like CLI clients under the analytics "chip-absence"
-        /// CLI-vs-App heuristic. The authoritative discriminator is
-        /// ``app == "rapid-desktop"`` (always set below); the worker
-        /// rollup + DAU split MUST switch to keying off ``app`` before
-        /// this reaches production. See the PR body's coordinated
-        /// follow-up note.
+        /// Analytics uses ``app == "rapid-desktop"`` as the authoritative
+        /// surface discriminator; chip is hardware metadata, not identity.
         ///
         /// The ``= nil`` default keeps the synthesized memberwise
         /// initializer callable with the original four labels, so every

@@ -165,12 +165,20 @@ struct TelemetryClient: @unchecked Sendable {
     /// exact same sysctl key the engine's
     /// ``redact._read_chip_brand()`` shells out to
     /// (``sysctl -n machdep.cpu.brand_string``), so the two clients
-    /// produce byte-identical brand strings and bucket into the same
-    /// per-chip analytics label. Whitespace-trimmed to match the
-    /// engine's ``.strip()``; returns ``nil`` (field omitted on the
+    /// produce byte-identical Apple Silicon brand strings and bucket into the
+    /// same per-chip analytics label. Intel is deliberately reduced to the
+    /// coarse label ``"Intel"`` because its raw brand includes detailed SKU
+    /// and clock information. Whitespace-trimmed to match the engine's
+    /// ``.strip()``; returns ``nil`` (field omitted on the
     /// wire) if the value is unreadable or empty rather than shipping
     /// a placeholder that would pollute the chip breakdown.
     static func chipBrand() -> String? {
+        #if arch(x86_64)
+        // Intel's brand string includes the exact CPU SKU and clock speed,
+        // which is substantially more identifying than an Apple chip family.
+        // Desktop analytics only needs a coarse legacy-Mac bucket.
+        return "Intel"
+        #else
         var size = 0
         // First call sizes the buffer; a failure or zero length means
         // the key is unavailable (should not happen on macOS, but we
@@ -183,9 +191,16 @@ struct TelemetryClient: @unchecked Sendable {
         guard sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0) == 0 else {
             return nil
         }
-        let brand = String(cString: buffer)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Do not rely on `String(cString:)`: although this sysctl normally
+        // includes a trailing NUL, its contract is the returned byte count.
+        // Decode only the bytes written and reject malformed UTF-8.
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        guard let decoded = String(bytes: bytes, encoding: .utf8) else {
+            return nil
+        }
+        let brand = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
         return brand.isEmpty ? nil : brand
+        #endif
     }
 
     /// Total physical RAM in bytes. ``physicalMemory`` is the same
@@ -194,8 +209,8 @@ struct TelemetryClient: @unchecked Sendable {
         ProcessInfo.processInfo.physicalMemory
     }
 
-    /// Round a byte count to the nearest GB (GiB, 1024³), clamping a
-    /// non-positive input to 0. A faithful port of the engine's
+    /// Round a byte count to the nearest GB (GiB, 1024³), returning 0 for an
+    /// empty reading. A faithful port of the engine's
     /// ``redact.bucket_memory_gb`` — coarse tiers so exact byte counts
     /// can't fingerprint a machine, and the two telemetry sources land
     /// on identical integers for the same hardware. Uses
