@@ -1,9 +1,27 @@
 name: Sync install.sh to GitHub Pages
 
+# rapidmlx.com/install.sh is a Cloudflare Worker proxy over this repo's
+# GitHub Pages. The README and SECURITY.md promise the served script is a
+# byte-identical mirror of install.sh AT THE RELEASE COMMIT — and the
+# cosign/SHA256SUMS verification recipe only checks out if that holds. So
+# the sync fires on release tags, not on every push to main: publishing
+# main here leaked unreleased installer content to every user and made the
+# documented hash verification fail against the release assets.
+#
+# The ``v*`` tag is created with RELEASE_PAT (a real user) by
+# auto-release.yml precisely so tag-push events fire downstream workflows
+# — this one included. A ref written with the default GITHUB_TOKEN would
+# not trigger it.
+
 on:
   push:
-    branches: [main]
-    paths: [install.sh]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag (or ref) whose install.sh to publish, e.g. v0.12.15"
+        required: true
+        type: string
 
 jobs:
   sync:
@@ -12,6 +30,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # Tag pushes check out the tag by default; a manual dispatch must
+          # name the release ref explicitly so a hand-run can never publish
+          # whatever main happens to hold.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}
 
       - name: Prepare pages directory
         run: |
