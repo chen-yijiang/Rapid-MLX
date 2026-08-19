@@ -143,10 +143,14 @@ intentionally never consulted.** The PATH fallback was removed in the
 v0.8.10 cutover: the desktop and CLI versions would drift silently, and
 the app's "up to date" claim would lie about whichever copy actually
 answered. A hostile shim on `$PATH` therefore never serves your prompts.
-The honest residual risk is the runtime-override slot itself: it lives
-in your user-writable Application Support directory, so malware that
-already has user-level write access could plant a binary there — the
-same trust level as replacing any app data on your account.
+The honest residual risk is the runtime-override slot itself. It is an
+**executable-code trust boundary**, not ordinary app data: it lives in
+your user-writable Application Support directory, and whatever binary
+sits there is what the app launches and hands every prompt to. Malware
+that already has user-level write access could plant a binary there
+and gain code execution with your privileges the next time the app
+starts — reading every prompt and response, your files, and anything
+else your account can reach.
 
 ### Verifying what's actually running
 
@@ -154,10 +158,13 @@ same trust level as replacing any app data on your account.
   `~/Library/Application Support/Rapid/runtime-override/` — inspect it
   (or delete it; the app re-provisions from the official channel).
 * **`RAPID_BIN` outranks both managed slots**, so also confirm it is
-  not set in the environment the app launches from: it only applies if
-  something you control exported it (a shell that runs the app binary
-  directly, a launch agent, `launchctl setenv`). If you never set it,
-  it is not in play; if in doubt, unset it there and relaunch.
+  not set in the environment the app launches from. Anything already
+  running as your user — you, a shell profile, a launch agent, or
+  user-level malware via `launchctl setenv` — can set it, so treat an
+  unexpected `RAPID_BIN` as a red flag, not a curiosity: check with
+  `launchctl getenv RAPID_BIN`, unset it (`launchctl unsetenv
+  RAPID_BIN`, and remove it from any shell/launch-agent config), and
+  relaunch.
 * **Source is open** at
   [github.com/raullenchai/Rapid-MLX](https://github.com/raullenchai/Rapid-MLX);
   releases publish wheels + PyPI artifacts. Inspect the workflow
