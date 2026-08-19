@@ -1,7 +1,7 @@
 #!/bin/bash
 # Rapid-MLX installer — AI inference for Apple Silicon
 # Usage: curl -fsSL https://rapidmlx.com/install.sh | bash
-#        curl ... | bash -s -- 0.12.15     # specific version
+#        curl ... | bash -s 0.4.3          # specific version
 #        curl ... | bash -s latest         # latest from GitHub (pre-release)
 set -euo pipefail
 
@@ -171,7 +171,7 @@ fi
 echo ""
 echo "  ╭─────────────────────────────────────╮"
 echo "  │  Rapid-MLX — AI on Apple Silicon    │"
-echo "  │  Up to 3x Ollama throughput         │"
+echo "  │  2-4x faster than Ollama            │"
 echo "  ╰─────────────────────────────────────╯"
 echo ""
 
@@ -213,19 +213,16 @@ fi
 # The app also surfaces a "fast alternative" per tier; this banner shows a
 # single command, so it takes the app's PRIMARY (smart) pick only.
 #
-# RECOMMENDED_FLAGS carries the tier's launch flags. Every current pick
-# ships with empty flags, but the plumbing stays: a future pick that needs
-# launch flags to fit its tier must have them printed with its serve line.
+# RECOMMENDED_FLAGS carries the tier's launch flags. It is not cosmetic:
+# ``gemma-4-26b-4bit`` at 32–63 GB needs its vision tower dropped and its KV
+# budget capped, and printing the bare ``serve`` line would hand that Mac
+# Mac a command that does not fit in it.
 RAM_GB=$(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%d", $1/1073741824}')
 RECOMMENDED_FLAGS=""
-# 32 GB and up all get the same pick (AA-Index policy, 2026-08-18):
-# qwen3.8-27b-4bit is the highest-scoring open-weights model we serve
-# (AA Intelligence Index 52 — GPT-5.6-class), and its measured 8K-prefill
-# peak of 20 GB clears every one of these tiers' 75 % budgets. The
-# branches stay split so the banner names the user's actual tier.
-if   [ "$RAM_GB" -ge 96 ]; then RECOMMENDED_MODEL="qwen3.8-27b-4bit";    RAM_TIER="96+ GB"
-elif [ "$RAM_GB" -ge 64 ]; then RECOMMENDED_MODEL="qwen3.8-27b-4bit";    RAM_TIER="64-95 GB"
-elif [ "$RAM_GB" -ge 32 ]; then RECOMMENDED_MODEL="qwen3.8-27b-4bit";    RAM_TIER="32-63 GB"
+if   [ "$RAM_GB" -ge 96 ]; then RECOMMENDED_MODEL="qwen3.5-122b-mxfp4";  RAM_TIER="96+ GB"
+elif [ "$RAM_GB" -ge 64 ]; then RECOMMENDED_MODEL="qwen3.6-35b-8bit";    RAM_TIER="64-95 GB"
+elif [ "$RAM_GB" -ge 32 ]; then RECOMMENDED_MODEL="gemma-4-26b-4bit";    RAM_TIER="32-63 GB"
+                                RECOMMENDED_FLAGS=" --no-mllm --kv-cache-dtype bf16 --cache-memory-mb 512"
 elif [ "$RAM_GB" -ge 24 ]; then RECOMMENDED_MODEL="bonsai-27b-2bit";     RAM_TIER="24-31 GB"
 elif [ "$RAM_GB" -ge 18 ]; then RECOMMENDED_MODEL="qwen3.5-9b-4bit";     RAM_TIER="18-23 GB"
 elif [ "$RAM_GB" -ge 16 ]; then RECOMMENDED_MODEL="qwen3.5-4b-4bit";     RAM_TIER="16-17 GB"
@@ -415,10 +412,9 @@ echo "    rapid-mlx serve ${RECOMMENDED_MODEL}${RECOMMENDED_FLAGS}"
 echo ""
 dim "Then open a second terminal:"
 echo ""
-echo "    rapid-mlx chat ${RECOMMENDED_MODEL} --port 8000    # built-in chat (terminal)"
-echo "    rapid-mlx-chat                                    # web chat UI (first: ${INSTALL_DIR}/bin/pip install 'rapid-mlx[chat]')"
-echo "    ANTHROPIC_BASE_URL=http://localhost:8000 claude    # Claude Code (or: rapid-mlx launch claude-code)"
-echo "    OPENAI_API_BASE=http://localhost:8000/v1 aider     # Aider"
+echo "    rapid-mlx-chat                                    # built-in chat"
+echo "    OPENAI_BASE_URL=http://localhost:8000/v1 claude    # Claude Code"
+echo "    OPENAI_BASE_URL=http://localhost:8000/v1 aider     # Aider"
 echo ""
 dim "Upgrade:    curl -fsSL https://rapidmlx.com/install.sh | bash"
 dim "Uninstall:  rm -rf ~/.rapid-mlx ~/.rapid-mlx-python ~/.local/bin/rapid-mlx* ~/.local/bin/vllm-mlx*"
