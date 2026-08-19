@@ -1,7 +1,7 @@
 #!/bin/bash
 # Rapid-MLX installer — AI inference for Apple Silicon
 # Usage: curl -fsSL https://rapidmlx.com/install.sh | bash
-#        curl ... | bash -s 0.12.15        # specific version
+#        curl ... | bash -s -- 0.12.15     # specific version
 #        curl ... | bash -s latest         # latest from GitHub (pre-release)
 set -euo pipefail
 
@@ -416,7 +416,7 @@ echo ""
 dim "Then open a second terminal:"
 echo ""
 echo "    rapid-mlx chat ${RECOMMENDED_MODEL} --port 8000    # built-in chat (terminal)"
-echo "    rapid-mlx-chat                                    # web chat UI (first: ~/.rapid-mlx/bin/pip install 'rapid-mlx[chat]')"
+echo "    rapid-mlx-chat                                    # web chat UI (first: ${INSTALL_DIR}/bin/pip install 'rapid-mlx[chat]')"
 echo "    ANTHROPIC_BASE_URL=http://localhost:8000 claude    # Claude Code (or: rapid-mlx launch claude-code)"
 echo "    OPENAI_API_BASE=http://localhost:8000/v1 aider     # Aider"
 echo ""
