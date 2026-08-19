@@ -1,6 +1,6 @@
 # Rapid-MLX Desktop — Privacy Policy
 
-Last updated: 2026-07-28.
+Last updated: 2026-08-18.
 
 Rapid-MLX Desktop ("the App") is a local-first SwiftUI Mac client for the
 `rapid-mlx` inference server. We designed it so that your prompts,
@@ -12,13 +12,21 @@ own key in Settings → Tools).
 
 ## What stays on your Mac
 
-* Chat history (sessions, messages, attachments) — stored under
-  `~/Library/Application Support/Rapid/sessions.json` and never
-  transmitted off-device.
+* Chat history (conversations, messages, attachments, folders) — stored
+  under `~/Library/Application Support/Rapid/conversations.json` and
+  never transmitted off-device.
 * API keys for tools (Keenable / Parallel / Tavily / Brave) — stored
   in macOS Keychain.
 * Server settings, picker state, window layout — stored in
   UserDefaults under `com.rapidmlx.rapid`.
+* The engine's **prompt prefix cache** — the embedded `rapid-mlx` server
+  keeps reusable KV state derived from your prompts on disk (under
+  `~/.cache/rapid-mlx/prefix_cache/`) so repeated context prefills
+  faster. It stays on-device and is derived data, not transcript text,
+  but it is computed from your prompts: you can turn it off per model in
+  Settings → Performance, or for any server with
+  `rapid-mlx serve --disable-prefix-cache`, and delete the directory at
+  any time.
 
 ## What we collect (telemetry)
 
@@ -78,36 +86,14 @@ storage window means they age out. Running `rapid-mlx telemetry reset` removes
 the shared consent and random client ID; the desktop app will ask again rather
 than restoring the old ID.
 
-## Feedback you choose to submit
+## Feedback
 
-The Help menu and menu-bar tray include bug-report and feature-request forms.
-Nothing is sent merely by opening a form. When you press **Send Feedback**, the
-App sends the following to Sentry:
-
-* The feedback text you entered and whether it is a bug report or feature
-  request.
-* Your email address, only if you choose to provide it.
-* Standard Sentry app and device context: Rapid-MLX version and runtime
-  details; macOS version; Mac model, architecture, and processor count;
-  available and app memory; thermal and low-power state; and locale, calendar,
-  24-hour-format preference, and time zone.
-
-The form never reads or attaches prompts, model responses, chat history,
-attachments, API keys, local file paths, screenshots, or server traffic. It
-does not ask for your name. User-submitted feedback is separate from automatic
-telemetry, so the anonymous-usage toggle does not block a submission you
-explicitly initiate.
-
-Sentry receives the same shared user label (`feedback`) for every submission.
-The App sets this non-unique value to prevent the SDK from creating a distinct
-per-install identifier.
-
-The Sentry SDK is configured exclusively for these submissions. Its automatic
-crash handling, app-hang tracking, performance tracing, sessions, metrics,
-failed-request capture, swizzling, and breadcrumbs are disabled. Sentry is a
-third-party processor and, like any network service, receives connection
-metadata such as the source IP while handling the request. Sentry's processing
-is governed by its privacy policy: https://sentry.io/privacy/.
+The App contains **no feedback form and no crash-reporting SDK** (earlier
+releases embedded Sentry for an explicit feedback form; it has been removed
+and the App links no Sentry code). To report a bug or request a feature,
+open an issue at
+[github.com/raullenchai/Rapid-MLX/issues](https://github.com/raullenchai/Rapid-MLX/issues)
+— what you share there is governed by GitHub, not by the App.
 
 ## Local inference server (`rapid-mlx`) — trust boundary
 
@@ -135,53 +121,40 @@ its own log files. A malicious build of `rapid-mlx` could:
 `ServerLocator` picks a binary in this fixed order (see
 `Sources/Rapid/Server/ServerLocator.swift`):
 
-1. **`RAPID_BIN`** environment variable — for tests / dev overrides.
-2. **In-app update override** — the in-app updater (Phase 4, not yet
-   wired in the current release) and the slim-DMG bootstrapper (live
-   since v0.8.12) both drop a newer `rapid-mlx` at
-   `~/Library/Application Support/Rapid/runtime-override/rapid-mlx/bin/rapid-mlx`
-   (the `rapid-mlx/` wrapper directory is the top-level entry of the
-   sidecar tarball, preserved through extract + atomic publish; fixed
-   in #430). Slot wins over the bundled sidecar when populated.
-3. **Bundled sidecar** — `Rapid-MLX Desktop.app/Contents/Resources/rapid-mlx/bin/rapid-mlx`,
-   shipped inside the notarised app bundle once Phase 5 (CI release
-   integration) lands. **Default winner when present.** The
-   `ServerLocator` code already prepends this candidate (see
-   `Sources/Rapid/Server/ServerLocator.swift` Phase 1 work); the
-   binary itself is not yet shipping in the current release stream,
-   so the chain falls through to slot 4 until then.
-4. **PATH / Homebrew / pipx** — checked after the bundled slot, **or**
-   when you opt out of the bundled binary via Settings → rapid-mlx →
-   "Use my own rapid-mlx install". **In the current release stream
-   this is the de-facto default**, since the bundled-sidecar slot
-   above is empty until Phase 5 ships.
+1. **`RAPID_BIN`** environment variable — explicit dev/test override;
+   honoured so power users can point the app at a checkout.
+2. **Runtime-override slot** —
+   `~/Library/Application Support/Rapid/runtime-override/rapid-mlx/bin/rapid-mlx`.
+   This is the canonical install path: the slim-DMG bootstrapper and
+   the sidecar updater publish the engine here atomically. Wins over
+   the bundled copy when both exist and it is newer.
+3. **Bundled sidecar** —
+   `Rapid-MLX Desktop.app/Contents/Resources/rapid-mlx/bin/rapid-mlx`,
+   shipped inside the notarised app bundle on full-bundle builds.
 
-This means: **once Phase 5 ships, a hostile shim on your `$PATH`
-will not serve your prompts by default.** The bundled binary,
-signed and notarised as part of the Rapid-MLX Desktop release, will
-take precedence over PATH / Homebrew. Until that release, the
-chain currently resolves to whichever `rapid-mlx` your `$PATH` /
-Homebrew Cellar exposes — so prefer the official Homebrew tap
-(see "Verifying what's actually running" below) and avoid putting
-arbitrary `rapid-mlx` shadows on your `$PATH`.
+**A `rapid-mlx` on your `$PATH` (Homebrew, pipx, uv, anything else) is
+intentionally never consulted.** The PATH fallback was removed in the
+v0.8.10 cutover: the desktop and CLI versions would drift silently, and
+the app's "up to date" claim would lie about whichever copy actually
+answered. A hostile shim on `$PATH` therefore never serves your prompts.
+The honest residual risk is the runtime-override slot itself: it lives
+in your user-writable Application Support directory, so malware that
+already has user-level write access could plant a binary there — the
+same trust level as replacing any app data on your account.
 
 ### Verifying what's actually running
 
-* **Settings → rapid-mlx** surfaces the resolved binary path and the
-  resolution source (bundled / user-installed). If the source isn't
-  "bundled" and you didn't intend to opt out, flip the toggle back.
-* **If you opted into a user-installed binary**, prefer the official
-  Homebrew tap:
-  `brew tap raullenchai/rapid-mlx && brew install raullenchai/rapid-mlx/rapid-mlx`.
-  Homebrew enforces the formula's checksum, so a tampered download
-  doesn't install silently.
+* The only mutable slot is
+  `~/Library/Application Support/Rapid/runtime-override/` — inspect it
+  (or delete it; the app re-provisions from the official channel).
+  `RAPID_BIN` only applies if you exported it yourself.
 * **Source is open** at
   [github.com/raullenchai/Rapid-MLX](https://github.com/raullenchai/Rapid-MLX);
   releases publish wheels + PyPI artifacts. Inspect the workflow
   that built a release if you need to audit the supply chain.
-* **Audit your `$PATH`** with `which -a rapid-mlx` — relevant only if
-  you've opted into the user-installed slot. The first hit wins from
-  that slot.
+* Want the CLI on your `$PATH` for terminal use? `brew install
+  rapid-mlx` (Homebrew core) — it is a separate install and does not
+  affect which binary the desktop app runs.
 
 For reports of malicious `rapid-mlx` distributions, follow the
 disclosure process in `SECURITY.md`. The bundled sidecar is in scope
@@ -190,9 +163,6 @@ distributions are out of scope but we will help triage.
 
 ## Third-party services
 
-* **Sentry Feedback** — receives only feedback you explicitly submit, the
-  optional email you enter, and the standard app/device context listed above.
-  Automatic Sentry diagnostics are disabled.
 * **Telemetry collector** — Cloudflare Workers + R2 storage. Subject
   to Cloudflare's data processing terms.
 * **Auto-update channel** — signed production builds use Sparkle to poll
