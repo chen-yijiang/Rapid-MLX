@@ -154,8 +154,59 @@ struct TelemetryClient: @unchecked Sendable {
             app: "rapid-desktop",
             os: "macos",
             os_version: osStr,
-            arch: arch
+            arch: arch,
+            chip: chipBrand(),
+            memory_gb: bucketMemoryGB(totalMemoryBytes())
         )
+    }
+
+    /// Apple Silicon chip brand — e.g. ``"Apple M4 Max"`` — read via
+    /// ``sysctlbyname("machdep.cpu.brand_string", …)``. This is the
+    /// exact same sysctl key the engine's
+    /// ``redact._read_chip_brand()`` shells out to
+    /// (``sysctl -n machdep.cpu.brand_string``), so the two clients
+    /// produce byte-identical brand strings and bucket into the same
+    /// per-chip analytics label. Whitespace-trimmed to match the
+    /// engine's ``.strip()``; returns ``nil`` (field omitted on the
+    /// wire) if the value is unreadable or empty rather than shipping
+    /// a placeholder that would pollute the chip breakdown.
+    static func chipBrand() -> String? {
+        var size = 0
+        // First call sizes the buffer; a failure or zero length means
+        // the key is unavailable (should not happen on macOS, but we
+        // degrade to "field absent" rather than trap).
+        guard sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0) == 0,
+              size > 0 else {
+            return nil
+        }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0) == 0 else {
+            return nil
+        }
+        let brand = String(cString: buffer)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return brand.isEmpty ? nil : brand
+    }
+
+    /// Total physical RAM in bytes. ``physicalMemory`` is the same
+    /// quantity the engine reads via ``psutil.virtual_memory().total``.
+    static func totalMemoryBytes() -> UInt64 {
+        ProcessInfo.processInfo.physicalMemory
+    }
+
+    /// Round a byte count to the nearest GB (GiB, 1024³), clamping a
+    /// non-positive input to 0. A faithful port of the engine's
+    /// ``redact.bucket_memory_gb`` — coarse tiers so exact byte counts
+    /// can't fingerprint a machine, and the two telemetry sources land
+    /// on identical integers for the same hardware. Uses
+    /// round-half-to-even (``.toNearestOrEven``) to mirror Python's
+    /// ``round()`` semantics exactly; in practice Mac RAM configs are
+    /// whole GiB multiples so the tie-break never fires, but matching
+    /// it keeps the two implementations provably equivalent.
+    static func bucketMemoryGB(_ bytes: UInt64) -> Int {
+        guard bytes > 0 else { return 0 }
+        let gib = 1024.0 * 1024.0 * 1024.0
+        return Int((Double(bytes) / gib).rounded(.toNearestOrEven))
     }
 
     /// Current bundle short-version. Falls back to ``"0.0.0"`` so a
