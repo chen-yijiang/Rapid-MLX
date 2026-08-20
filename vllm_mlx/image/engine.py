@@ -320,9 +320,19 @@ class ImageGenerationEngine:
         from .._download_gate import mflux_missing_weights
 
         missing = mflux_missing_weights(self.model_name)
+        if missing is None:
+            # No verdict — not a registered image-gen alias, or nothing
+            # cached yet. An environment problem must not read as a broken
+            # model, and the structural text-encoder check below has no
+            # completeness guarantee to build on here either: `not missing`
+            # is True for BOTH `[]` and `None`, which used to let the
+            # text-encoder check run on a `None` verdict too — an
+            # indeterminate result treated as "go ahead and inspect it"
+            # instead of "no opinion".
+            return
         if not missing:
-            # ``[]`` verified complete, ``None`` no verdict — see that
-            # function: an environment problem must not read as a broken model.
+            # ``[]`` — verified complete. Only NOW does the structural
+            # text-encoder check have something to build on.
             self._verify_text_encoder_not_quantized()
             return
         raise ImageRuntimeError(
@@ -380,7 +390,22 @@ class ImageGenerationEngine:
         # ``scales``/``biases`` siblings can land in a DIFFERENT shard, which
         # would let a quantized checkpoint with a superficially plausible
         # primary-shard shape slip past a single-shard check.
-        if f"{weight_key}.scales" in weight_map or f"{weight_key}.biases" in weight_map:
+        #
+        # MLX's quantized-module convention names ``scales``/``biases`` as
+        # SIBLINGS of the base parameter's prefix — ``<module>.scales`` next
+        # to ``<module>.weight`` — not children of the weight key itself.
+        # Verified against the real filipstrand/Qwen-Image-mflux-6bit shard
+        # this check exists to catch: ``encoder.embed_tokens.weight``,
+        # ``encoder.embed_tokens.scales``, ``encoder.embed_tokens.biases`` —
+        # all three siblings under ``encoder.embed_tokens``, not nested under
+        # ``.weight``. An earlier version of this check looked for
+        # ``encoder.embed_tokens.weight.scales`` — a key that convention
+        # never produces — so it never actually matched real quantized
+        # metadata; it only worked by accident, via the shape check below,
+        # for the ONE packing width that happens to leave a mismatched last
+        # dimension.
+        prefix = weight_key.removesuffix(".weight")
+        if f"{prefix}.scales" in weight_map or f"{prefix}.biases" in weight_map:
             self._raise_quantized_text_encoder_error(weight_key, str(text_encoder_dir))
             return
         shard_path = self._resolve_shard_path(text_encoder_dir, weight_map[weight_key])

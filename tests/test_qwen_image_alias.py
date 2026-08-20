@@ -210,10 +210,29 @@ def test_scales_sibling_is_refused_even_with_a_plausible_shape(
     # Belt-and-suspenders: a quantization scheme that happens to keep the
     # embedding's own shape at [vocab, hidden] is still caught by the
     # scales/biases siblings every quantized linear/embedding carries.
+    #
+    # Key convention verified against the real filipstrand shard this check
+    # exists to catch: MLX names scales/biases as siblings of the MODULE
+    # prefix (``encoder.embed_tokens.scales``), not nested under
+    # ``.weight`` (NOT ``encoder.embed_tokens.weight.scales``, which
+    # convention never produces).
     snapshot = _make_snapshot(
         tmp_path,
         {"shape": [152064, 3584], "dtype": "F16"},
-        weight_map_extra={"encoder.embed_tokens.weight.scales": "0.safetensors"},
+        weight_map_extra={"encoder.embed_tokens.scales": "0.safetensors"},
+    )
+    engine = _engine_for_family_check(monkeypatch, snapshot)
+    with pytest.raises(ImageRuntimeError, match="quantized text encoder"):
+        engine._verify_text_encoder_not_quantized()
+
+
+def test_biases_sibling_alone_is_also_refused(tmp_path, monkeypatch) -> None:
+    # scales and biases are independent siblings in the real convention —
+    # pin biases separately so a fix that only checks one doesn't regress.
+    snapshot = _make_snapshot(
+        tmp_path,
+        {"shape": [152064, 3584], "dtype": "F16"},
+        weight_map_extra={"encoder.embed_tokens.biases": "0.safetensors"},
     )
     engine = _engine_for_family_check(monkeypatch, snapshot)
     with pytest.raises(ImageRuntimeError, match="quantized text encoder"):
@@ -229,7 +248,7 @@ def test_scales_sibling_in_a_different_shard_is_still_refused(
     snapshot = _make_snapshot(
         tmp_path,
         {"shape": [152064, 3584], "dtype": "F16"},
-        weight_map_extra={"encoder.embed_tokens.weight.scales": "1.safetensors"},
+        weight_map_extra={"encoder.embed_tokens.scales": "1.safetensors"},
     )
     engine = _engine_for_family_check(monkeypatch, snapshot)
     with pytest.raises(ImageRuntimeError, match="quantized text encoder"):
@@ -368,3 +387,25 @@ def test_missing_index_does_not_raise(tmp_path, monkeypatch) -> None:
     empty_snapshot.mkdir()
     engine = _engine_for_family_check(monkeypatch, empty_snapshot)
     engine._verify_text_encoder_not_quantized()  # no-op, must not raise
+
+
+def test_no_verdict_completeness_skips_the_text_encoder_check(
+    tmp_path, monkeypatch
+) -> None:
+    # ``mflux_missing_weights`` returning ``None`` means "no verdict" — not
+    # a registered alias, or nothing cached — and ``not missing`` is True
+    # for BOTH ``[]`` and ``None``, so an earlier version of
+    # ``_verify_weights_complete`` ran the structural text-encoder check on
+    # a `None` verdict too. That is wrong even when the check WOULD have
+    # found something to object to: no completeness verdict means no
+    # standing to inspect internals yet. A quantized-shaped text encoder
+    # sitting behind a ``None`` verdict must NOT raise.
+    snapshot = _make_snapshot(tmp_path, {"shape": [152064, 672], "dtype": "U32"})
+    engine = ImageGenerationEngine("mflux-community/qwen-image-mflux-q6")
+    monkeypatch.setattr(
+        "vllm_mlx._download_gate.mflux_missing_weights", lambda _repo: None
+    )
+    monkeypatch.setattr(
+        "vllm_mlx._download_gate.mflux_local_snapshot", lambda _repo: str(snapshot)
+    )
+    engine._verify_weights_complete()  # no-op, must not raise
