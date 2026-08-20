@@ -98,6 +98,10 @@ final class DictationController {
     private var capturingApp: String?
     private var level: Float = 0
     private var transcribeTask: Task<Void, Never>?
+    /// The in-flight prewarm, retained so ``disable()`` and a hotkey press
+    /// can cancel it and so concurrent triggers join it (single-flight)
+    /// instead of stacking probes in the engine's serial STT lane.
+    private var prewarmTask: Task<Void, Never>?
     /// alias → HuggingFace repo. `ensureServing` needs the repo to fetch a
     /// model that is not on disk yet; passing nil silently limits it to models
     /// already cached.
@@ -234,6 +238,8 @@ final class DictationController {
     func disable() {
         transcribeTask?.cancel()
         transcribeTask = nil
+        prewarmTask?.cancel()
+        prewarmTask = nil
         stopTicking()
         hotkey.stop()
         recorder.shutdown()
@@ -305,10 +311,34 @@ final class DictationController {
     ///    the sidecar pay that now instead of inside the user's first real
     ///    dictation.
     func prewarmModel() async {
+        // Single-flight. The checks below are MainActor-synchronous, so two
+        // triggers (enable + tab appear + model didSet can all fire close
+        // together) cannot both slip past: the second one joins the task the
+        // first created instead of racing it through the engine's serial STT
+        // lane.
+        if let running = prewarmTask {
+            await running.value
+            return
+        }
+        let task = Task { [weak self] in
+            await self?.performPrewarm()
+            self?.prewarmTask = nil
+        }
+        prewarmTask = task
+        await task.value
+    }
+
+    private func performPrewarm() async {
         guard isEnabled, !modelAlias.isEmpty else { return }
-        _ = await resolveRepo(for: modelAlias)
-        if server.servingAlias != modelAlias {
+        let alias = modelAlias
+        _ = await resolveRepo(for: alias)
+        // Actor reentrancy: every await above and below is a window for
+        // disable() or a model change to land. Re-check before each step
+        // that mutates the sidecar or touches the wire.
+        guard !Task.isCancelled, isEnabled, modelAlias == alias else { return }
+        if server.servingAlias != alias {
             guard await ensureModelServing() else { return }
+            guard !Task.isCancelled, isEnabled, modelAlias == alias else { return }
         }
         await warmUpEngine()
     }
@@ -317,15 +347,24 @@ final class DictationController {
     /// silence. Skipped whenever a real dictation is underway — the engine
     /// serialises transcriptions, so a probe would queue in front of it.
     private func warmUpEngine() async {
-        guard phase == .idle || phase == .off else { return }
+        guard phase == .idle else { return }
         guard server.servingAlias == modelAlias else { return }
-        _ = try? await client.transcribe(
-            audioData: Self.silentProbeWAV,
-            model: modelAlias,
-            context: nil,
-            port: server.activePort,
-            bearer: server.activeBearer
-        )
+        do {
+            _ = try await client.transcribe(
+                audioData: Self.silentProbeWAV,
+                model: modelAlias,
+                context: nil,
+                port: server.activePort,
+                bearer: server.activeBearer
+            )
+        } catch is CancellationError {
+            // Expected: a hotkey press or disable() superseded the probe.
+        } catch {
+            // Not user-facing — the cost of a failed probe is only that the
+            // first real dictation pays the weight load again — but leave a
+            // trace so a recurring failure is diagnosable.
+            NSLog("Dictation prewarm probe failed for %@: %@", modelAlias, String(describing: error))
+        }
     }
 
     /// 0.2 s of 16 kHz mono PCM silence — the smallest useful body for
@@ -368,6 +407,12 @@ final class DictationController {
             lastError = "Choose a transcription model first."
             return
         }
+        // A probe still in flight would sit in front of this dictation in the
+        // engine's serial STT lane. Abandon it — if it already reached the
+        // sidecar, the weight load it triggered continues server-side and
+        // benefits the transcription that follows either way.
+        prewarmTask?.cancel()
+        prewarmTask = nil
         do {
             try recorder.startCapture()
         } catch {
