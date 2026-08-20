@@ -406,8 +406,7 @@ struct ContentView: View {
             if let job = downloads.job(for: alias) {
                 switch job.status {
                 case .running: return .inProgress
-                case .completed: return .completed
-                case .failed, .cancelled: break
+                case .completed, .failed, .cancelled: break
                 }
             }
             if catalogEntries.first(where: { $0.alias == alias })?.cached == true {

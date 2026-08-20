@@ -2488,7 +2488,7 @@ flow_campaign_banner() {
     start_persona campaign-banner \
         RAPID_GUI_CAMPAIGN_PREVIEW=1 RAPIDMLX_NO_UPDATE_CHECK=1
     dismiss_first_run
-    wait_identifier Campaign.Banner "$OUT/campaign-visible.json"
+    wait_identifier_enabled Campaign.Action "$OUT/campaign-visible.json"
     assert_tree_text "$OUT/campaign-visible.json" "Qwen3.5 35B is ready"
     jq -e '.data.ui_elements[]? | select(.identifier == "Campaign.Action" and .enabled == true)' \
         "$OUT/campaign-visible.json" >/dev/null \
