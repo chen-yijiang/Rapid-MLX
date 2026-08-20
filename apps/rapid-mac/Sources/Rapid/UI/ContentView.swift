@@ -66,6 +66,7 @@ struct ContentView: View {
     @State private var catalogLoaded: Bool = false
     /// FU-1: persisted opt-out for the launch-time auto-start path.
     @AppStorage(AutoStartPreference.storageKey) private var autoStartOnLaunch: Bool = AutoStartPreference.defaultValue
+    @State private var campaign: Campaign? = Campaign.previewFromEnvironment(ProcessInfo.processInfo.environment)
 
     var body: some View {
         // Capture the identity owned by this alert render. A delayed dismiss
@@ -291,6 +292,15 @@ struct ContentView: View {
             // but was never mounted, so a failed Finder replacement was
             // detected and then silently discarded.
             FailedReplaceBanner()
+            if let campaign,
+               !telemetryConsentPending,
+               !UserDefaults.standard.bool(forKey: campaign.dismissalKey) {
+                CampaignBanner(
+                    campaign: campaign,
+                    onAction: performCampaignAction,
+                    onDismiss: { dismissCampaign(campaign) }
+                )
+            }
             NavigationSplitView {
                 SidebarView(
                 selection: $section,
@@ -381,6 +391,24 @@ struct ContentView: View {
     }
 
     // MARK: - Readiness (the one shared lifecycle value)
+
+    private func performCampaignAction(_ action: Campaign.Action) {
+        switch action {
+        case .pullModel(let alias, let hfRepo):
+            let started = downloads.startDownload(alias: alias, hfPath: hfRepo)
+            if Campaign.shouldAcknowledgePull(
+                started: started,
+                isDownloading: downloads.isDownloading(alias)
+            ), let campaign {
+                dismissCampaign(campaign)
+            }
+        }
+    }
+
+    private func dismissCampaign(_ dismissed: Campaign) {
+        UserDefaults.standard.set(true, forKey: dismissed.dismissalKey)
+        campaign = nil
+    }
 
     /// The window's single readiness value.
     ///
