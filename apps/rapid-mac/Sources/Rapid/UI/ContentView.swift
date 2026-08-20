@@ -405,18 +405,19 @@ struct ContentView: View {
     private func campaignActionState(for campaign: Campaign) -> Campaign.ActionState {
         switch campaign.action {
         case .pullModel(let alias, _):
-            if let job = downloads.job(for: alias) {
-                switch job.status {
-                case .running: return .inProgress
-                case .completed where catalogGeneration < downloads.cacheGeneration:
-                    return .completed
-                case .completed, .failed, .cancelled: break
-                }
+            let downloadState: Campaign.DownloadState? = switch downloads.job(for: alias)?.status {
+            case .running: .running
+            case .completed: .completed
+            case .failed, .cancelled: .retryable
+            case nil: nil
             }
-            if catalogEntries.first(where: { $0.alias == alias })?.cached == true {
-                return .completed
-            }
-            return catalogLoaded ? .idle : .checking
+            return Campaign.actionState(
+                download: downloadState,
+                isCached: catalogEntries.first(where: { $0.alias == alias })?.cached == true,
+                catalogLoaded: catalogLoaded,
+                catalogGeneration: catalogGeneration,
+                currentGeneration: downloads.cacheGeneration
+            )
         }
     }
 
@@ -539,7 +540,7 @@ struct ContentView: View {
             binary: binary,
             generation: generation
         )
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, generation == downloads.cacheGeneration else { return }
         catalogEntries = loaded
         catalogGeneration = generation
         catalogLoaded = true

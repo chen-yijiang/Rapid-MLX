@@ -24,6 +24,22 @@ struct Campaign: Equatable, Sendable {
             }
         }
     }
+    enum DownloadState: Equatable, Sendable { case running, completed, retryable }
+
+    static func actionState(
+        download: DownloadState?,
+        isCached: Bool,
+        catalogLoaded: Bool,
+        catalogGeneration: UInt,
+        currentGeneration: UInt
+    ) -> ActionState {
+        if download == .running { return .inProgress }
+        if download == .completed, catalogGeneration < currentGeneration {
+            return .completed
+        }
+        if isCached { return .completed }
+        return catalogLoaded ? .idle : .checking
+    }
 
     let id: String
     let kind: Kind
