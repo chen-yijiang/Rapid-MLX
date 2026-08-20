@@ -19,10 +19,13 @@ struct CampaignTests {
         #expect(Campaign.preview.dismissalKey == "Rapid.campaign.dismissed.model-qwen35-35b-202608")
     }
 
-    @Test("campaign action stays retryable unless the pull starts")
-    func actionAcknowledgement() {
-        #expect(!Campaign.shouldAcknowledgePull(started: false, isDownloading: false))
-        #expect(Campaign.shouldAcknowledgePull(started: true, isDownloading: false))
-        #expect(Campaign.shouldAcknowledgePull(started: false, isDownloading: true))
+    @Test("campaign action copy reflects transient download state")
+    func actionPresentation() {
+        #expect(Campaign.ActionState.idle.isEnabled)
+        #expect(Campaign.ActionState.idle.label(fallback: "Download model") == "Download model")
+        #expect(!Campaign.ActionState.inProgress.isEnabled)
+        #expect(Campaign.ActionState.inProgress.label(fallback: "Download model") == "Downloading…")
+        #expect(!Campaign.ActionState.completed.isEnabled)
+        #expect(Campaign.ActionState.completed.label(fallback: "Download model") == "Downloaded")
     }
 }

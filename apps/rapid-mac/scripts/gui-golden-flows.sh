@@ -76,7 +76,7 @@ die() { printf '[gui-golden] FAIL: %s\n' "$*" >&2; exit 1; }
 pb() { peekaboo "$@" --bridge-socket "$BRIDGE"; }
 flow_requires_screen_recording() {
     case "$FLOW" in
-        all|campaign-banner) return 0 ;;
+        all) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -2494,10 +2494,6 @@ flow_campaign_banner() {
         "$OUT/campaign-visible.json" >/dev/null \
         || die "campaign CTA is absent or disabled"
     baseline campaign-banner.visible "$OUT/campaign-visible.json"
-    pb app switch --to "PID:$APP_PID" --verify --json > "$OUT/campaign-focus.json"
-    pb image --window-id "$MAIN_WINDOW_ID" --path "$OUT/campaign-visible.png" --json \
-        > "$OUT/campaign-image.json"
-
     press "$OUT/campaign-visible.json" Campaign.Dismiss "$OUT/campaign-dismiss.json"
     for _ in {1..40}; do
         see_main "$OUT/campaign-dismissed.json"

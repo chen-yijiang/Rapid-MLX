@@ -8,6 +8,20 @@ struct Campaign: Equatable, Sendable {
     enum Action: Equatable, Sendable {
         case pullModel(alias: String, hfRepo: String?)
     }
+    enum ActionState: Equatable, Sendable {
+        case idle
+        case inProgress
+        case completed
+
+        var isEnabled: Bool { self == .idle }
+        func label(fallback: String) -> String {
+            switch self {
+            case .idle: fallback
+            case .inProgress: "Downloading…"
+            case .completed: "Downloaded"
+            }
+        }
+    }
 
     let id: String
     let kind: Kind
@@ -32,15 +46,12 @@ struct Campaign: Equatable, Sendable {
         environment["RAPID_GUI_CAMPAIGN_PREVIEW"] == "1" ? .preview : nil
     }
 
-    static func shouldAcknowledgePull(started: Bool, isDownloading: Bool) -> Bool {
-        started || isDownloading
-    }
-
     var dismissalKey: String { "Rapid.campaign.dismissed.\(id)" }
 }
 
 struct CampaignBanner: View {
     let campaign: Campaign
+    let actionState: Campaign.ActionState
     let onAction: (Campaign.Action) -> Void
     let onDismiss: () -> Void
 
@@ -64,8 +75,9 @@ struct CampaignBanner: View {
 
             Spacer(minLength: RapidTheme.Space.md)
 
-            Button(campaign.actionLabel) { onAction(campaign.action) }
+            Button(actionState.label(fallback: campaign.actionLabel)) { onAction(campaign.action) }
                 .buttonStyle(.rapidPrimaryCompact)
+                .disabled(!actionState.isEnabled)
                 .accessibilityIdentifier("Campaign.Action")
 
             Button {

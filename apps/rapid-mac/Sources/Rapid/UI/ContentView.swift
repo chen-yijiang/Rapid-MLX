@@ -297,6 +297,7 @@ struct ContentView: View {
                !UserDefaults.standard.bool(forKey: campaign.dismissalKey) {
                 CampaignBanner(
                     campaign: campaign,
+                    actionState: campaignActionState(for: campaign),
                     onAction: performCampaignAction,
                     onDismiss: { dismissCampaign(campaign) }
                 )
@@ -395,12 +396,18 @@ struct ContentView: View {
     private func performCampaignAction(_ action: Campaign.Action) {
         switch action {
         case .pullModel(let alias, let hfRepo):
-            let started = downloads.startDownload(alias: alias, hfPath: hfRepo)
-            if Campaign.shouldAcknowledgePull(
-                started: started,
-                isDownloading: downloads.isDownloading(alias)
-            ), let campaign {
-                dismissCampaign(campaign)
+            _ = downloads.startDownload(alias: alias, hfPath: hfRepo)
+        }
+    }
+
+    private func campaignActionState(for campaign: Campaign) -> Campaign.ActionState {
+        switch campaign.action {
+        case .pullModel(let alias, _):
+            guard let job = downloads.job(for: alias) else { return .idle }
+            switch job.status {
+            case .running: return .inProgress
+            case .completed: return .completed
+            case .failed, .cancelled: return .idle
             }
         }
     }
