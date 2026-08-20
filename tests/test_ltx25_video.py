@@ -207,11 +207,13 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
         returncode = 0
 
         def __init__(self, command: list[str], **kwargs) -> None:
+            self.command = command
             calls.append((command, kwargs))
 
         def communicate(self, *, input: str, timeout: int) -> tuple[str, str]:
             communicates.append((input, timeout))
-            output.write_bytes(b"mp4-with-audio")
+            generated = Path(self.command[self.command.index("--output") + 1])
+            generated.write_bytes(b"mp4-with-audio")
             return "", ""
 
     monkeypatch.setattr(ltx25.subprocess, "Popen", Process)
@@ -238,6 +240,10 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
     assert Path(command[5]).name.startswith("rapidmlx-ltx25-runtime-")
     assert command[6:8] == ["python", "-c"]
     assert command[9:11] == ["generate", "--model"]
+    generated = Path(command[command.index("--output") + 1])
+    assert generated != output
+    assert generated.parent == output.parent
+    assert output.read_bytes() == b"mp4-with-audio"
     assert "--distilled" in command
     assert "--low-ram" in command
     assert "a fox" not in command
@@ -300,6 +306,53 @@ def test_ltx25_engine_reports_subprocess_failure_without_leaking_details(
     )
     assert "private-output-sentinel" not in str(exc.value)
     assert "private-error-sentinel" not in str(exc.value)
+    assert len(terminated) == 1
+
+
+def test_ltx25_zero_exit_cannot_reuse_stale_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "result.mp4"
+    output.write_bytes(b"stale-video")
+    runtime = tmp_path / ".venv" / "bin" / "ltx-2-mlx"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("#!/bin/sh\n")
+    runtime.chmod(0o755)
+    monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
+    monkeypatch.setattr(ltx25.shutil, "which", lambda _: "/trusted/uv")
+    monkeypatch.setattr(ltx25, "_materialize_runtime", lambda *args: None)
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, command: list[str], **kwargs) -> None:
+            pass
+
+        def communicate(self, *, input: str, timeout: int) -> tuple[str, str]:
+            return "", ""
+
+    monkeypatch.setattr(ltx25.subprocess, "Popen", Process)
+    terminated = []
+    monkeypatch.setattr(
+        ltx25.LTX25VideoEngine,
+        "_terminate_process",
+        staticmethod(lambda candidate: terminated.append(candidate)),
+    )
+
+    with pytest.raises(ltx25.LTX25BackendError, match="without an MP4 output"):
+        ltx25.LTX25VideoEngine("MrMofer/ltx-2.5-mlx-q8").generate(
+            prompt="a fox",
+            output_path=output,
+            width=704,
+            height=480,
+            num_frames=97,
+            fps=24,
+            seed=7,
+            image=None,
+        )
+
+    assert output.read_bytes() == b"stale-video"
+    assert list(tmp_path.glob(".result.mp4.*.tmp.mp4")) == []
     assert len(terminated) == 1
 
 

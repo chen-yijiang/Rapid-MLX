@@ -214,6 +214,14 @@ class LTX25VideoEngine:
         try:
             snapshot_path = Path(snapshot.name)
             _materialize_runtime(repository, snapshot_path)
+            descriptor, staged_name = tempfile.mkstemp(
+                prefix=f".{output_path.name}.",
+                suffix=".tmp.mp4",
+                dir=output_path.parent,
+            )
+            os.close(descriptor)
+            staged_output = Path(staged_name)
+            staged_output.unlink()
         except Exception:
             snapshot.cleanup()
             raise
@@ -245,7 +253,7 @@ class LTX25VideoEngine:
             "--seed",
             str(seed),
             "--output",
-            str(output_path),
+            str(staged_output),
         ]
         if image is not None:
             command.extend(
@@ -278,11 +286,15 @@ class LTX25VideoEngine:
                 self._process = process
             process.communicate(input=prompt, timeout=timeout)
             if process.returncode:
-                self._terminate_process(process)
                 raise LTX25BackendError(
                     f"LTX-2.5 runtime exited with code {process.returncode}; "
                     "runtime output is not retained because it may contain request data."
                 )
+            if not staged_output.is_file() or staged_output.stat().st_size == 0:
+                raise LTX25BackendError(
+                    "LTX-2.5 generation completed without an MP4 output."
+                )
+            os.replace(staged_output, output_path)
         except subprocess.TimeoutExpired as exc:
             if process is not None:
                 self._terminate_process(process)
@@ -290,6 +302,8 @@ class LTX25VideoEngine:
                 "LTX-2.5 generation exceeded its configured time limit."
             ) from exc
         except LTX25BackendError:
+            if process is not None:
+                self._terminate_process(process)
             raise
         except BaseException as exc:
             if process is not None:
@@ -303,8 +317,5 @@ class LTX25VideoEngine:
             with self._process_lock:
                 if self._process is process:
                     self._process = None
+            staged_output.unlink(missing_ok=True)
             snapshot.cleanup()
-        if not output_path.is_file() or output_path.stat().st_size == 0:
-            raise LTX25BackendError(
-                "LTX-2.5 generation completed without an MP4 output."
-            )
