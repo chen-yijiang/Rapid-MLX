@@ -32,6 +32,10 @@ final class DictationController {
     private(set) var phase: Phase = .off
     private(set) var lastError: String?
     private(set) var lastLatency: TimeInterval?
+    /// Phase split of ``lastLatency`` ("model 1.2 s · asr 0.3 s"), present
+    /// only when model bring-up took noticeable time. Answers "why was that
+    /// one slow" without a log dive.
+    private(set) var lastLatencyDetail: String?
     private(set) var elapsed: TimeInterval = 0
     /// Set when the TCC row says Accessibility is granted but this process
     /// still cannot install an event tap — i.e. the grant landed after launch.
@@ -221,6 +225,10 @@ final class DictationController {
         accessibilityNeedsRelaunch = false
         lastError = nil
         phase = .idle
+        // Warm the whole lane now — catalog cache, sidecar, STT weights — so
+        // the first hotkey press of the session starts from a hot path. Fire
+        // and forget: enabling must not block on a model coming up.
+        Task { [weak self] in await self?.prewarmModel() }
     }
 
     func disable() {
@@ -283,11 +291,64 @@ final class DictationController {
     /// Loads the model ahead of the first hotkey press. Without this the first
     /// dictation of a session pays for a process swap *and* a possible download
     /// while the user is already talking.
+    ///
+    /// Three costs move off the hotkey path here, in order:
+    /// 1. The alias→repo catalog lookup. On a cache miss ``resolveRepo``
+    ///    spawns `rapid-mlx` CLI subprocesses — one to three SECONDS of cold
+    ///    interpreter — and the old early-return below skipped it exactly when
+    ///    the sidecar was already serving this model, so the most common warm
+    ///    session still paid it inside the first transcription.
+    /// 2. The process swap, when another model is being served.
+    /// 3. The STT weights: the engine loads them lazily on the first
+    ///    transcription of each process lifetime (measured ~1.2 s for
+    ///    parakeet), so ``warmUpEngine()`` sends a beat of silence to make
+    ///    the sidecar pay that now instead of inside the user's first real
+    ///    dictation.
     func prewarmModel() async {
         guard isEnabled, !modelAlias.isEmpty else { return }
-        guard server.servingAlias != modelAlias else { return }
-        _ = await ensureModelServing()
+        _ = await resolveRepo(for: modelAlias)
+        if server.servingAlias != modelAlias {
+            guard await ensureModelServing() else { return }
+        }
+        await warmUpEngine()
     }
+
+    /// Forces the sidecar to load the STT weights by transcribing a beat of
+    /// silence. Skipped whenever a real dictation is underway — the engine
+    /// serialises transcriptions, so a probe would queue in front of it.
+    private func warmUpEngine() async {
+        guard phase == .idle || phase == .off else { return }
+        guard server.servingAlias == modelAlias else { return }
+        _ = try? await client.transcribe(
+            audioData: Self.silentProbeWAV,
+            model: modelAlias,
+            context: nil,
+            port: server.activePort,
+            bearer: server.activeBearer
+        )
+    }
+
+    /// 0.2 s of 16 kHz mono PCM silence — the smallest useful body for
+    /// ``warmUpEngine()``. Same WAV layout ``DictationRecorder`` produces.
+    static let silentProbeWAV: Data = {
+        let sampleCount = 3_200
+        let dataBytes = sampleCount * 2
+        var wav = Data()
+        wav.append(contentsOf: Array("RIFF".utf8))
+        wav.append(UInt32(36 + dataBytes).littleEndianBytes)
+        wav.append(contentsOf: Array("WAVEfmt ".utf8))
+        wav.append(UInt32(16).littleEndianBytes)
+        wav.append(UInt16(1).littleEndianBytes)
+        wav.append(UInt16(1).littleEndianBytes)
+        wav.append(UInt32(16_000).littleEndianBytes)
+        wav.append(UInt32(16_000 * 2).littleEndianBytes)
+        wav.append(UInt16(2).littleEndianBytes)
+        wav.append(UInt16(16).littleEndianBytes)
+        wav.append(contentsOf: Array("data".utf8))
+        wav.append(UInt32(dataBytes).littleEndianBytes)
+        wav.append(Data(count: dataBytes))
+        return wav
+    }()
 
     // MARK: - Hotkey
 
@@ -365,6 +426,10 @@ final class DictationController {
         }
 
         let started = Date()
+        // Phase timing: "how long was that" is unanswerable from one opaque
+        // number when the cost can hide in catalog resolution, a model swap,
+        // or inference. The split is surfaced in the Dictation tab.
+        let ensureStarted = Date()
         guard await ensureModelServing() else {
             lastError = repoByAlias[modelAlias] == nil
                 ? "\(modelAlias) isn't in the audio model catalog. Pick another model."
@@ -372,9 +437,11 @@ final class DictationController {
             return
         }
         guard !Task.isCancelled else { return }
+        let ensureSeconds = Date().timeIntervalSince(ensureStarted)
 
         do {
             let context = vocabulary.contextPrompt
+            let requestStarted = Date()
             let result = try await client.transcribe(
                 audioData: audio,
                 model: modelAlias,
@@ -382,6 +449,7 @@ final class DictationController {
                 port: server.activePort,
                 bearer: server.activeBearer
             )
+            let requestSeconds = Date().timeIntervalSince(requestStarted)
             guard !Task.isCancelled else { return }
 
             let text = Self.tidy(result.text)
@@ -392,6 +460,11 @@ final class DictationController {
 
             let latency = Date().timeIntervalSince(started)
             lastLatency = latency
+            // Only worth spelling out when something besides inference took
+            // real time — a warm run reads better as one number.
+            lastLatencyDetail = ensureSeconds >= 0.1
+                ? String(format: "model %.1f s · asr %.1f s", ensureSeconds, requestSeconds)
+                : nil
             lastError = nil
 
             // Suspend the tap across injection: synthesising ⌘V puts a Command
@@ -480,5 +553,13 @@ final class DictationController {
         if text.hasSuffix("。") { text.removeLast() }
         else if text.hasSuffix(".") && !text.hasSuffix("...") { text.removeLast() }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private extension FixedWidthInteger {
+    /// The value's little-endian bytes, for hand-assembling the WAV header of
+    /// ``DictationController/silentProbeWAV``.
+    var littleEndianBytes: Data {
+        withUnsafeBytes(of: littleEndian) { Data($0) }
     }
 }
