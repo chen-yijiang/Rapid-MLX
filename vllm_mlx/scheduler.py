@@ -122,6 +122,7 @@ def _read_kv_dims(model):
 
 from .gdn_prefill import install as install_gdn_prefill_kernel
 from .memory_cache import MemoryAwarePrefixCache, MemoryCacheConfig  # noqa: E402
+from .moe_router_fusion import install as install_moe_router_fusion
 from .paged_cache import PagedCacheManager
 from .pflash import PFlashConfig, compress_request_tokens
 from .prefix_cache import BlockAwarePrefixCache, PrefixCacheManager
@@ -175,6 +176,13 @@ ensure_mamba_support()
 # Shape-gated inside: non-GDN models and decode steps are untouched, and
 # RAPID_MLX_GDN_PREFILL=0 opts out entirely.
 install_gdn_prefill_kernel()
+
+# Fuse the Qwen3-Next-family MoE router top-k (softmax -> argpartition ->
+# take -> renorm, five launches) into one Metal dispatch for decode rows.
+# Selection-set parity with argpartition is pinned by test; prefill rows
+# and non-eligible calls keep the composed chain.
+# RAPID_MLX_MOE_ROUTER_FUSION=0 opts out entirely.
+install_moe_router_fusion()
 
 # Error patterns that indicate cache corruption.
 # Each pattern must be specific enough to avoid false positives.

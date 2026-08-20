@@ -145,6 +145,15 @@ ALLOWED_RAPID_MLX_ENV_VARS: frozenset[str] = frozenset(
         # fires, which tier engages — none of that changes. Read by
         # ``moe_fusion.fuse_gate_up()`` only.
         "RAPID_MLX_MOE_GATE_UP_FUSION",
+        # Opt-out of the fused MoE router top-k Metal kernel
+        # (vllm_mlx/moe_router_fusion.py). Same shape as the fusion and
+        # sampler toggles above — a launch-count optimization on an
+        # already-selected model whose routed expert SET is
+        # parity-locked to the composed chain, not a routing decision
+        # in the request sense: which model loads, which parser fires,
+        # which tier engages — none of that changes. Read by
+        # ``moe_router_fusion.install()`` only.
+        "RAPID_MLX_MOE_ROUTER_FUSION",
         # Opt-out of the blocked-seq GDN prefill Metal kernel
         # (vllm_mlx/gdn_prefill.py). Same shape as DISABLE_FUSED_SAMPLER —
         # a kernel-selection perf toggle computing the exact same
