@@ -453,7 +453,7 @@ def test_ltx25_timeout_terminates_process(
     assert engine._process is None
 
 
-def test_ltx25_termination_kills_group_after_leader_exits(
+def test_ltx25_termination_does_not_reuse_exited_leader_pgid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     signals = []
@@ -471,7 +471,34 @@ def test_ltx25_termination_kills_group_after_leader_exits(
 
     ltx25.LTX25VideoEngine._terminate_process(Process())  # type: ignore[arg-type]
 
+    assert signals == [(123, signal.SIGTERM)]
+
+
+def test_ltx25_termination_escalates_while_leader_is_unreaped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals = []
+
+    class Process:
+        pid = 123
+        waits = 0
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, *, timeout: int) -> int:
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("ltx", timeout)
+            return -signal.SIGKILL
+
+    process = Process()
+    monkeypatch.setattr(ltx25.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    ltx25.LTX25VideoEngine._terminate_process(process)  # type: ignore[arg-type]
+
     assert signals == [(123, signal.SIGTERM), (123, signal.SIGKILL)]
+    assert process.waits == 2
 
 
 def test_ltx25_unexpected_communication_error_terminates_process(

@@ -211,30 +211,34 @@ class LTX25VideoEngine:
 
     @staticmethod
     def _terminate_process(process: subprocess.Popen[str]) -> None:
+        leader_running = process.poll() is None
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
-            if process.poll() is None:
+            if leader_running:
                 process.wait(timeout=_TERMINATE_GRACE_SECONDS)
             return
-        if process.poll() is None:
-            try:
-                process.wait(timeout=_TERMINATE_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                pass
-        # The group leader can exit before ffmpeg or worker descendants. Kill
-        # the process group even after the leader has been reaped.
+        # Once a reaped leader's PID is reusable, signaling its old PGID again
+        # could target an unrelated group. TERM is therefore the final signal
+        # for an already-exited leader and any surviving descendants.
+        if not leader_running:
+            return
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        if process.poll() is None:
+            process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            # The unreaped leader still owns this PID/PGID, so reuse is
+            # impossible and escalation is safe.
             try:
-                process.wait(timeout=_TERMINATE_GRACE_SECONDS)
-            except subprocess.TimeoutExpired as exc:
-                raise LTX25BackendError(
-                    "The LTX-2.5 runtime process group could not be reaped."
-                ) from exc
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise LTX25BackendError(
+                "The LTX-2.5 runtime process group could not be reaped."
+            ) from exc
 
     def stop(self) -> None:
         """Stop an active external generation during bounded shutdown."""
