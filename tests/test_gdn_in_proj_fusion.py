@@ -270,8 +270,8 @@ class TestPartialCommit:
         assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 0
         # Module-scan order is not guaranteed; exactly one layer was
         # committed before the crash, the other is untouched stock.
-        fused_flags = [hasattr(l, "in_proj_fused") for l in model.layers]
-        stock_flags = [hasattr(l, "in_proj_qkv") for l in model.layers]
+        fused_flags = [hasattr(layer, "in_proj_fused") for layer in model.layers]
+        stock_flags = [hasattr(layer, "in_proj_qkv") for layer in model.layers]
         assert sum(fused_flags) == 1
         assert sum(stock_flags) == 1
         assert all(f != st for f, st in zip(fused_flags, stock_flags))
@@ -322,24 +322,23 @@ class TestWidthDispatch:
         model = TinyGDNModel()
         assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 2
         gdn = model.layers[0]
-        calls = []
+        captured = []
         orig = mx.quantized_matmul
 
         def counting(*args, **kwargs):
-            calls.append(args[1].shape)
+            captured.append(args[1])
             return orig(*args, **kwargs)
 
         monkeypatch.setattr(mx, "quantized_matmul", counting)
         x = _inputs(64, model.hidden_size)
         gdn(x, None, None)
-        # Four sliced projection matmuls (plus whatever out_proj issues
-        # through its own module call, which does not go through the
-        # patched mx.quantized_matmul binding inside nn).
-        proj_rows = {tuple(s)[0] for s in calls[:4]}
-        assert len(calls) >= 4
-        assert proj_rows == {
-            gdn._rapid_gdn_bounds[0],
-            gdn._rapid_gdn_bounds[1] - gdn._rapid_gdn_bounds[0],
-            gdn._rapid_gdn_bounds[2] - gdn._rapid_gdn_bounds[1],
-            gdn._rapid_gdn_bounds[3] - gdn._rapid_gdn_bounds[2],
-        }
+        # Four sliced projection matmuls, in quartet order, each carrying
+        # EXACTLY the corresponding row block of the fused weight array
+        # (content-exact, so reusing one slice twice cannot pass).
+        assert len(captured) >= 4
+        fused_w = gdn.in_proj_fused.weight
+        bounds = [0] + list(gdn._rapid_gdn_bounds)
+        for i in range(4):
+            expected = fused_w[bounds[i] : bounds[i + 1]]
+            assert captured[i].shape == expected.shape
+            assert bool(mx.array_equal(captured[i], expected))

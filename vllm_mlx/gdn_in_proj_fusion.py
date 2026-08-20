@@ -56,8 +56,6 @@ logger = logging.getLogger(__name__)
 # row count in range on the running configuration.
 _FUSED_MAX_ROWS = 8
 
-_CALL_PATCHED = False
-
 
 def _gdn_imports():
     """Import lazily so a changed mlx-lm degrades to no-fusion, never a crash."""
@@ -230,15 +228,17 @@ def _make_fused_call(orig_call, nn, gated_delta_update):
 
 
 def _ensure_call_patch(gdn_cls, nn, gated_delta_update) -> None:
-    global _CALL_PATCHED
-    if _CALL_PATCHED or getattr(gdn_cls, "_rapid_gdn_in_proj_fused_call", False):
-        _CALL_PATCHED = True
+    # The per-class marker is the sole authority: a reloaded/replaced
+    # GatedDeltaNet class must be re-patched even though this module
+    # already patched an earlier incarnation (a module-global flag here
+    # would skip it and leave fused instances dispatching to a stock
+    # __call__ whose projections were deleted).
+    if getattr(gdn_cls, "_rapid_gdn_in_proj_fused_call", False):
         return
     orig = gdn_cls.__call__
     gdn_cls.__call__ = _make_fused_call(orig, nn, gated_delta_update)
     gdn_cls._rapid_gdn_in_proj_fused_call = True
     gdn_cls._rapid_gdn_in_proj_original_call = orig
-    _CALL_PATCHED = True
 
 
 _UINT_OF_SIZE = {1: "uint8", 2: "uint16", 4: "uint32", 8: "uint64"}

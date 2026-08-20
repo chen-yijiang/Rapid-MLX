@@ -1336,9 +1336,7 @@ class BatchedEngine(BaseEngine):
             if _sc is None or getattr(_sc, "spec_decode", "none") != "mtp":
                 from ..gdn_in_proj_fusion import fuse_gdn_in_proj
 
-                self._model_load_executor.submit(
-                    fuse_gdn_in_proj, self._model
-                ).result()
+                self._model_load_executor.submit(fuse_gdn_in_proj, self._model).result()
 
         # 0.9.13 PR-A: new-arch MTP inject dispatcher (Gemma 4 external
         # assistant / Qwen3.5 baked-in MTP). Runs BEFORE the scheduler is
