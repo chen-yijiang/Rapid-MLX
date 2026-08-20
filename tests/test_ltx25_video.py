@@ -50,6 +50,7 @@ def test_ltx25_runtime_preflight_fails_before_download(
     monkeypatch.setattr(
         video_lane, "_resolve_ffmpeg", lambda: "/opt/homebrew/bin/ffmpeg"
     )
+    monkeypatch.setattr(video_lane.shutil, "which", lambda name: "/usr/bin/uv")
 
     with pytest.raises(SystemExit, match="2"):
         video_lane.require_video_runtime_or_exit("MrMofer/ltx-2.5-mlx-q8")
@@ -57,6 +58,19 @@ def test_ltx25_runtime_preflight_fails_before_download(
     error = capsys.readouterr().err
     assert ltx25.LTX25_RUNTIME_COMMIT in error
     assert "video generation guide" in error
+
+
+def test_ltx25_runtime_preflight_requires_uv(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: "/runtime/ltx-2-mlx")
+    monkeypatch.setattr(video_lane, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(video_lane.shutil, "which", lambda name: None)
+
+    with pytest.raises(SystemExit, match="2"):
+        video_lane.require_video_runtime_or_exit("MrMofer/ltx-2.5-mlx-q8")
+
+    assert "uv (`brew install uv`)" in capsys.readouterr().err
 
 
 def test_ltx25_runtime_override_must_be_executable(
@@ -164,6 +178,16 @@ def test_ltx25_materialization_ignores_checkout_and_replace_refs(
 
     assert (destination / "tracked.py").read_text() == "safe = True\n"
     assert not (destination / "untracked.py").exists()
+
+
+def test_ltx25_materialization_wraps_malformed_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    malformed = subprocess.CompletedProcess([], 0, stdout=b"not a tar", stderr=b"")
+    monkeypatch.setattr(ltx25.subprocess, "run", lambda *args, **kwargs: malformed)
+
+    with pytest.raises(ltx25.LTX25BackendError, match="could not be materialized"):
+        ltx25._materialize_runtime(tmp_path, tmp_path / "snapshot")
 
 
 def test_serve_routes_ltx25_model_to_specific_preflight(

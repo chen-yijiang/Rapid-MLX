@@ -113,7 +113,12 @@ def _materialize_runtime(repository: Path, destination: Path) -> None:
                         "The pinned LTX-2.5 source archive contains an unsafe entry."
                     )
             source.extractall(destination, members=members)
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        tarfile.TarError,
+    ) as exc:
         raise LTX25BackendError(
             "The pinned LTX-2.5 source snapshot could not be materialized."
         ) from exc
