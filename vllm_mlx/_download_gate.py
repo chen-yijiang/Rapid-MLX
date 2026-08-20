@@ -916,6 +916,19 @@ def _mflux_snapshot_dir(repo_id: str) -> tuple[str, str] | None:
         HF_HUB_CACHE,
         f"models--{repo_id.replace('/', '--')}",
     )
+    pinned_revision = IMAGE_MODEL_REVISIONS.get(repo_id)
+    if pinned_revision is not None:
+        # A pinned repo's contract is "this exact commit, however it got
+        # cached" — go straight to snapshots/<pinned_revision> rather than
+        # through refs/main. snapshot_download(..., revision=<commit SHA>)
+        # (used for a cold pull of a pinned repo) caches the commit under
+        # its own snapshot directory WITHOUT necessarily moving refs/main
+        # — that ref only advances when a branch name is resolved — so
+        # resolving through it would never recognize a freshly pinned
+        # download and would re-download on every subsequent warm start.
+        snap_dir = os.path.join(repo_root, "snapshots", pinned_revision)
+        return (repo_root, snap_dir) if os.path.isdir(snap_dir) else None
+
     resolved_sha = _resolved_snapshot_sha(repo_root)
     if resolved_sha is None:
         # An interrupted first download can leave component indexes and
@@ -944,13 +957,6 @@ def _mflux_snapshot_dir(repo_id: str) -> tuple[str, str] | None:
         ):
             return None
         resolved_sha = candidates[0]
-    pinned_revision = IMAGE_MODEL_REVISIONS.get(repo_id)
-    if pinned_revision is not None and resolved_sha != pinned_revision:
-        # Whatever is cached does not match the verified-good commit — do
-        # not vouch for it. This includes a cache populated before this
-        # repo was pinned, so pinning a repo re-validates every existing
-        # install rather than only new downloads.
-        return None
     snap_dir = os.path.join(repo_root, "snapshots", resolved_sha)
     if not os.path.isdir(snap_dir):
         return None

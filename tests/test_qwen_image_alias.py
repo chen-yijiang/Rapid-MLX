@@ -169,6 +169,89 @@ def test_model_path_for_mflux_forces_pinned_revision_on_cold_pull(
     assert calls == [(repo, pinned_sha)]
 
 
+def _seed_pinned_download(cache_root, repo_id: str, sha: str, *, omit_shard=False):
+    """A cache layout shaped like what ``snapshot_download(repo,
+    revision=<commit sha>)`` actually leaves behind for a pinned repo:
+    ``snapshots/<sha>`` populated, deliberately with NO ``refs/main`` (an
+    explicit-commit download doesn't move it — see
+    ``test_mflux_local_snapshot_accepts_pinned_revision_without_refs_main``
+    in test_download_gate.py) — so ``_verify_weights_complete()``, called
+    right after the fake download, gets a real verdict from the same code
+    path a genuine cold pull would.
+    """
+    repo_root = cache_root / f"models--{repo_id.replace('/', '--')}"
+    snap = repo_root / "snapshots" / sha
+    (snap / "tokenizer").mkdir(parents=True)
+    (snap / "tokenizer" / "tokenizer.json").write_text("{}")
+    for component in ("transformer", "vae"):
+        component_dir = snap / component
+        component_dir.mkdir()
+        (component_dir / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"a": "0.safetensors"}})
+        )
+        (component_dir / "0.safetensors").write_bytes(b"weights")
+    text_encoder_dir = snap / "text_encoder"
+    text_encoder_dir.mkdir()
+    (text_encoder_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"encoder.embed_tokens.weight": "0.safetensors"}})
+    )
+    if not omit_shard:
+        _write_safetensors_header(
+            text_encoder_dir / "0.safetensors",
+            {"encoder.embed_tokens.weight": {"shape": [152064, 3584], "dtype": "F16"}},
+        )
+    return str(snap)
+
+
+def test_model_path_for_mflux_verifies_a_freshly_pinned_download(
+    tmp_path, monkeypatch
+) -> None:
+    # Codex review (PR #2157): a cold pinned pull bypassed
+    # `_verify_weights_complete()` entirely — it ran (as a no-op, nothing
+    # was cached yet) *before* `_model_path_for_mflux()` did the actual
+    # download, so the freshly downloaded snapshot was handed straight to
+    # mflux unverified. This is the passing half: a complete, unquantized
+    # download must resolve normally, verification included.
+    from vllm_mlx._download_gate import IMAGE_MODEL_REVISIONS
+
+    repo = "mflux-community/qwen-image-mflux-q6"
+    pinned_sha = IMAGE_MODEL_REVISIONS[repo]
+    cache_root = tmp_path / "hf-cache"
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda repo_id, revision=None: _seed_pinned_download(
+            cache_root, repo_id, revision
+        ),
+    )
+
+    engine = ImageGenerationEngine(repo)
+    path = engine._model_path_for_mflux()
+    assert path is not None
+    assert path.endswith(pinned_sha)
+
+
+def test_model_path_for_mflux_rejects_a_freshly_pinned_incomplete_download(
+    tmp_path, monkeypatch
+) -> None:
+    # The failing half: a download that lands incomplete (interrupted,
+    # disk full, whatever) must be refused before it reaches mflux, exactly
+    # like an incomplete WARM cache already is via `_verify_weights_complete`.
+    repo = "mflux-community/qwen-image-mflux-q6"
+    cache_root = tmp_path / "hf-cache"
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda repo_id, revision=None: _seed_pinned_download(
+            cache_root, repo_id, revision, omit_shard=True
+        ),
+    )
+
+    engine = ImageGenerationEngine(repo)
+    with pytest.raises(ImageRuntimeError, match="partially downloaded"):
+        engine._model_path_for_mflux()
+
+
 def test_model_path_for_mflux_falls_back_to_bare_repo_when_unpinned(
     monkeypatch,
 ) -> None:

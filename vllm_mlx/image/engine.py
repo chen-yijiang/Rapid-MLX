@@ -248,7 +248,16 @@ class ImageGenerationEngine:
             return self.model_name
         from huggingface_hub import snapshot_download
 
-        return snapshot_download(self.model_name, revision=pinned_revision)
+        downloaded = snapshot_download(self.model_name, revision=pinned_revision)
+        # A pinned cold pull bypasses ``_verify_weights_complete()``'s
+        # normal preflight — at the time it ran (in ``_ensure_loaded``,
+        # right before this method), there was nothing cached yet to
+        # inspect, so it no-opped. Run it again now that the pinned commit
+        # is actually on disk: an interrupted download or a checkpoint
+        # whose text encoder turns out to be quantized must not reach
+        # mflux either way, cold pull or not.
+        self._verify_weights_complete()
+        return downloaded
 
     def _build_model(self):
         """Instantiate the backing mflux model (import-lazy)."""
