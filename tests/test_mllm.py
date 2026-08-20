@@ -382,6 +382,45 @@ class TestMediaSecurity:
                 stream=True,
             )
 
+    def test_guarded_request_connects_to_validated_address(self, monkeypatch):
+        from vllm_mlx.models.mllm import _close_guarded_response, _guarded_request
+
+        requested = {}
+
+        class _Response:
+            is_redirect = False
+            is_permanent_redirect = False
+
+            def close(self):
+                requested["response_closed"] = True
+
+        class _FakeSession:
+            def request(self, method, url, **kwargs):
+                requested.update(method=method, url=url, kwargs=kwargs)
+                return _Response()
+
+            def close(self):
+                requested["session_closed"] = True
+
+        monkeypatch.setattr("vllm_mlx.models.mllm.requests.Session", _FakeSession)
+        monkeypatch.setattr(
+            "vllm_mlx.models.mllm.socket.getaddrinfo",
+            self._fake_getaddrinfo({"cdn.example": ["93.184.216.34"]}),
+        )
+
+        response = _guarded_request(
+            "GET",
+            "http://cdn.example/image.jpg",
+            timeout=5,
+            headers={},
+            stream=True,
+        )
+        assert requested["url"] == "http://93.184.216.34/image.jpg"
+        assert requested["kwargs"]["headers"]["Host"] == "cdn.example"
+        _close_guarded_response(response)
+        assert requested["response_closed"] is True
+        assert requested["session_closed"] is True
+
     # ---- arbitrary-file-read guard --------------------------------------
 
     def test_local_media_blocks_non_media_extension(self, tmp_path):
@@ -417,6 +456,24 @@ class TestMediaSecurity:
             process_image_input(str(outside))  # inside tmp but outside root
         with pytest.raises(ValueError):
             process_image_input(str(root / ".." / "outside.jpg"))  # .. escape
+
+    def test_local_media_invalid_root_fails_closed(self, monkeypatch, tmp_path):
+        from vllm_mlx.models.mllm import process_image_input
+
+        image = tmp_path / "image.jpg"
+        image.write_bytes(b"\xff\xd8\xff\xe0")
+        monkeypatch.setenv("RAPID_MLX_MEDIA_ROOT", str(tmp_path / "missing"))
+        with pytest.raises(ValueError, match="MEDIA_ROOT is invalid"):
+            process_image_input(str(image))
+
+    def test_local_media_returns_resolved_path(self, tmp_path):
+        from vllm_mlx.models.mllm import process_image_input
+
+        image = tmp_path / "image.jpg"
+        image.write_bytes(b"\xff\xd8\xff\xe0")
+        link = tmp_path / "link.jpg"
+        link.symlink_to(image)
+        assert process_image_input(str(link)) == str(image.resolve())
 
     def test_disable_local_media_paths_env(self, monkeypatch, tmp_path):
         from vllm_mlx.models.mllm import process_image_input
