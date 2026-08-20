@@ -35,7 +35,8 @@ struct CampaignTests {
         "campaign action resolves download and catalog races",
         arguments: [
             (Optional(Campaign.DownloadState.running), false, true, UInt(1), UInt(1), Campaign.ActionState.inProgress),
-            (Optional(.completed), false, true, UInt(1), UInt(2), .completed),
+            (Optional(.completed), false, true, UInt(1), UInt(2), .checking),
+            (Optional(.completed), true, true, UInt(1), UInt(2), .checking),
             (Optional(.completed), false, true, UInt(2), UInt(2), .idle),
             (Optional(.retryable), false, true, UInt(2), UInt(2), .idle),
             (Optional<Campaign.DownloadState>.none, true, true, UInt(2), UInt(2), .completed),

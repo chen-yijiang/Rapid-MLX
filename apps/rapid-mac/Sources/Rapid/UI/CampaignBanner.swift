@@ -34,9 +34,7 @@ struct Campaign: Equatable, Sendable {
         currentGeneration: UInt
     ) -> ActionState {
         if download == .running { return .inProgress }
-        if download == .completed, catalogGeneration < currentGeneration {
-            return .completed
-        }
+        if catalogGeneration != currentGeneration { return .checking }
         if isCached { return .completed }
         return catalogLoaded ? .idle : .checking
     }
