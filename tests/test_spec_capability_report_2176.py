@@ -47,12 +47,28 @@ def test_verified_entries_do_not_require_experimental_opt_in():
         suffix_decoding_tier="verified",
         supports_dflash=True,
         supports_ddtree=True,
+        dflash_draft_model="user/dflash-drafter",
+        ddtree_draft_model="user/ddtree-drafter",
+        ddtree_speculative_tokens=16,
+        ddtree_tree_budget=24,
         mtp_draft_model="user/mtp-head",
     )
     for method in ("suffix", "dflash", "ddtree", "mtp"):
         assessment = assess_method(profile, method)
         assert assessment.recommendation == "verified"
         assert assessment.explicit_opt_in is False
+
+
+def test_incomplete_registry_flags_are_not_reported_verified():
+    profile = AliasProfile(
+        hf_path="user/incomplete-8bit",
+        supports_dflash=True,
+        supports_ddtree=True,
+    )
+    for method in ("dflash", "ddtree"):
+        assessment = assess_method(profile, method)
+        assert assessment.recommendation == "experimental"
+        assert assessment.explicit_opt_in is True
 
 
 def test_quantization_recognizes_hyphenated_spellings():
