@@ -143,19 +143,34 @@ def _write_safetensors_header(path, header: dict) -> None:
 
 
 def _make_snapshot(
-    tmp_path, embed_header_entry: dict, *, extra_keys: dict | None = None
+    tmp_path,
+    embed_header_entry: dict | None,
+    *,
+    weight_map_extra: dict | None = None,
+    write_shard: bool = True,
 ):
+    """A synthetic ``text_encoder/`` layout: an index naming
+    ``encoder.embed_tokens.weight``'s shard, plus (usually) that shard's
+    header. ``weight_map_extra`` adds sibling entries to the INDEX (real
+    quantization scale/bias keys land there, possibly in a different shard
+    than the weight itself — see the check's docstring); ``write_shard=False``
+    exercises the index naming a shard that never materializes.
+    """
     snapshot = tmp_path / "snapshot"
     text_encoder = snapshot / "text_encoder"
     text_encoder.mkdir(parents=True)
     shard_name = "0.safetensors"
+    weight_map = {"encoder.embed_tokens.weight": shard_name}
+    if weight_map_extra:
+        weight_map.update(weight_map_extra)
     (text_encoder / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {"encoder.embed_tokens.weight": shard_name}})
+        json.dumps({"weight_map": weight_map})
     )
-    header = {"encoder.embed_tokens.weight": embed_header_entry}
-    if extra_keys:
-        header.update(extra_keys)
-    _write_safetensors_header(text_encoder / shard_name, header)
+    if write_shard:
+        header = {}
+        if embed_header_entry is not None:
+            header["encoder.embed_tokens.weight"] = embed_header_entry
+        _write_safetensors_header(text_encoder / shard_name, header)
     return snapshot
 
 
@@ -198,12 +213,102 @@ def test_scales_sibling_is_refused_even_with_a_plausible_shape(
     snapshot = _make_snapshot(
         tmp_path,
         {"shape": [152064, 3584], "dtype": "F16"},
-        extra_keys={
-            "encoder.embed_tokens.weight.scales": {
-                "shape": [152064, 56],
-                "dtype": "F16",
-            }
-        },
+        weight_map_extra={"encoder.embed_tokens.weight.scales": "0.safetensors"},
+    )
+    engine = _engine_for_family_check(monkeypatch, snapshot)
+    with pytest.raises(ImageRuntimeError, match="quantized text encoder"):
+        engine._verify_text_encoder_not_quantized()
+
+
+def test_scales_sibling_in_a_different_shard_is_still_refused(
+    tmp_path, monkeypatch
+) -> None:
+    # The sibling check reads the INDEX's full weight_map, not one shard's
+    # header — a quantized embedding whose scales/biases were split into a
+    # separate shard from the weight itself must not slip past.
+    snapshot = _make_snapshot(
+        tmp_path,
+        {"shape": [152064, 3584], "dtype": "F16"},
+        weight_map_extra={"encoder.embed_tokens.weight.scales": "1.safetensors"},
+    )
+    engine = _engine_for_family_check(monkeypatch, snapshot)
+    with pytest.raises(ImageRuntimeError, match="quantized text encoder"):
+        engine._verify_text_encoder_not_quantized()
+
+
+def test_shard_named_by_index_but_missing_on_disk_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    # The index makes an explicit claim about where this tensor lives; if
+    # that claim doesn't resolve to a real file, that is itself suspicious
+    # and must refuse rather than silently skip the check.
+    snapshot = _make_snapshot(tmp_path, None, write_shard=False)
+    engine = _engine_for_family_check(monkeypatch, snapshot)
+    with pytest.raises(ImageRuntimeError, match="quantized text encoder"):
+        engine._verify_text_encoder_not_quantized()
+
+
+def test_shard_present_but_key_absent_fails_closed(tmp_path, monkeypatch) -> None:
+    # The index names a shard for embed_tokens.weight, but that shard's own
+    # header doesn't actually contain it — inconsistent with what the index
+    # promised, so this must not be read as "nothing to check".
+    snapshot = _make_snapshot(tmp_path, embed_header_entry=None)
+    engine = _engine_for_family_check(monkeypatch, snapshot)
+    with pytest.raises(ImageRuntimeError, match="quantized text encoder"):
+        engine._verify_text_encoder_not_quantized()
+
+
+def test_oversized_header_length_is_rejected_without_reading_it(tmp_path) -> None:
+    # A corrupt or hostile shard could claim a multi-gigabyte header to force
+    # a multi-gigabyte read before JSON parsing ever runs. The length prefix
+    # is checked against an absolute cap BEFORE the file is read further.
+    shard = tmp_path / "0.safetensors"
+    oversized = ImageGenerationEngine._SAFETENSORS_HEADER_MAX_BYTES + 1
+    shard.write_bytes(struct.pack("<Q", oversized))
+    assert ImageGenerationEngine._read_safetensors_header(str(shard)) is None
+
+
+def test_shard_reached_via_symlink_is_accepted(tmp_path, monkeypatch) -> None:
+    # A Hugging Face hub cache's snapshot files ARE symlinks into a sibling
+    # blobs/ directory — the real shape this check runs against in
+    # production. A resolve()-then-compare-parents guard walks straight out
+    # of text_encoder_dir through that symlink and false-positives on every
+    # real cached checkpoint (caught live against mflux-community's repo);
+    # the string-only guard must accept this shape.
+    snapshot = tmp_path / "snapshot"
+    text_encoder = snapshot / "text_encoder"
+    text_encoder.mkdir(parents=True)
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    real_file = blobs / "deadbeef"
+    _write_safetensors_header(
+        real_file,
+        {"encoder.embed_tokens.weight": {"shape": [152064, 3584], "dtype": "F16"}},
+    )
+    (text_encoder / "0.safetensors").symlink_to(real_file)
+    (text_encoder / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"encoder.embed_tokens.weight": "0.safetensors"}})
+    )
+    engine = _engine_for_family_check(monkeypatch, snapshot)
+    engine._verify_text_encoder_not_quantized()  # must not raise
+
+
+def test_shard_path_traversal_is_rejected(tmp_path, monkeypatch) -> None:
+    # A shard name escaping text_encoder/ (path traversal, or an absolute
+    # path elsewhere on disk) must not be trusted even though it would
+    # resolve to a real file.
+    outside = tmp_path / "outside.safetensors"
+    _write_safetensors_header(
+        outside,
+        {"encoder.embed_tokens.weight": {"shape": [152064, 3584], "dtype": "F16"}},
+    )
+    snapshot = _make_snapshot(
+        tmp_path, {"shape": [152064, 3584], "dtype": "F16"}
+    )  # baseline valid shard, then override the index to point outside
+    (snapshot / "text_encoder" / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": {"encoder.embed_tokens.weight": "../outside.safetensors"}}
+        )
     )
     engine = _engine_for_family_check(monkeypatch, snapshot)
     with pytest.raises(ImageRuntimeError, match="quantized text encoder"):

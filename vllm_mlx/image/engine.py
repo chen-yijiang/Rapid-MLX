@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import gc
 import io
+import os
 import re
 import threading
 import time
@@ -363,28 +364,44 @@ class ImageGenerationEngine:
         snapshot = mflux_local_snapshot(self.model_name)
         if snapshot is None:
             return
-        shard_path = self._locate_embed_tokens_shard(snapshot)
-        if shard_path is None:
-            # No index, or no entry for this key: outside what this check can
-            # vouch for. ``_verify_weights_complete`` already required the
-            # index to exist and name every shard; this is reached only if a
-            # future component definition renames the key, which a shape
-            # check for the OLD name cannot meaningfully block.
-            return
-        header = self._read_safetensors_header(shard_path)
-        if header is None:
-            return
         weight_key = "encoder.embed_tokens.weight"
-        if f"{weight_key}.scales" in header or f"{weight_key}.biases" in header:
-            self._raise_quantized_text_encoder_error(weight_key, shard_path)
-        entry = header.get(weight_key)
+        text_encoder_dir = Path(snapshot) / "text_encoder"
+        weight_map = self._read_text_encoder_weight_map(text_encoder_dir)
+        if weight_map is None or weight_key not in weight_map:
+            # No index, unreadable, or no entry for this key: outside what
+            # this check can vouch for. ``_verify_weights_complete`` already
+            # required the index to exist and name every shard; a missing
+            # KEY (as opposed to a missing shard, handled below) is reached
+            # only if a future component definition renames it, which a
+            # check anchored to the OLD name cannot meaningfully block.
+            return
+        # Checked against the WHOLE index, not just the header of the shard
+        # holding ``embed_tokens.weight``: a quantized embedding's
+        # ``scales``/``biases`` siblings can land in a DIFFERENT shard, which
+        # would let a quantized checkpoint with a superficially plausible
+        # primary-shard shape slip past a single-shard check.
+        if f"{weight_key}.scales" in weight_map or f"{weight_key}.biases" in weight_map:
+            self._raise_quantized_text_encoder_error(weight_key, str(text_encoder_dir))
+            return
+        shard_path = self._resolve_shard_path(text_encoder_dir, weight_map[weight_key])
+        header = self._read_safetensors_header(shard_path) if shard_path else None
+        entry = header.get(weight_key) if header else None
         shape = entry.get("shape") if isinstance(entry, dict) else None
+        # Fail CLOSED, not open, once the index has named a shard for this
+        # key: the index is an explicit claim that the tensor lives there
+        # with some shape, so an unresolvable shard, an unreadable header, or
+        # a missing/malformed shape entry is itself suspicious — not a
+        # reason to silently let generation proceed.
         if (
-            isinstance(shape, list)
-            and shape
-            and shape[-1] != self._QWEN_TEXT_ENCODER_HIDDEN_SIZE
+            shard_path is None
+            or header is None
+            or not isinstance(shape, list)
+            or not shape
+            or shape[-1] != self._QWEN_TEXT_ENCODER_HIDDEN_SIZE
         ):
-            self._raise_quantized_text_encoder_error(weight_key, shard_path)
+            self._raise_quantized_text_encoder_error(
+                weight_key, shard_path or str(text_encoder_dir)
+            )
 
     def _raise_quantized_text_encoder_error(
         self, weight_key: str, shard_path: str
@@ -397,36 +414,52 @@ class ImageGenerationEngine:
             "deep in generation). Pick a checkpoint with a full-precision "
             f"text encoder. (Found in {shard_path}: {weight_key!r} does not "
             f"have the expected {self._QWEN_TEXT_ENCODER_HIDDEN_SIZE}-wide "
-            "last dimension, or carries quantization scale/bias tensors.)"
+            "last dimension, is missing/unreadable where the index says it "
+            "lives, or carries quantization scale/bias tensors.)"
         )
 
     @staticmethod
-    def _locate_embed_tokens_shard(snapshot: str) -> str | None:
+    def _read_text_encoder_weight_map(text_encoder_dir: Path) -> dict | None:
         import json
 
-        index_path = Path(snapshot) / "text_encoder" / "model.safetensors.index.json"
+        index_path = text_encoder_dir / "model.safetensors.index.json"
         try:
             with open(index_path, encoding="utf-8") as fh:
                 index = json.load(fh)
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             return None
         weight_map = index.get("weight_map") if isinstance(index, dict) else None
-        if not isinstance(weight_map, dict):
-            return None
-        shard = weight_map.get("encoder.embed_tokens.weight")
-        if not isinstance(shard, str):
-            return None
-        shard_path = (Path(snapshot) / "text_encoder" / shard).resolve()
-        text_encoder_dir = (Path(snapshot) / "text_encoder").resolve()
-        if text_encoder_dir not in shard_path.parents:
-            # A shard name escaping its own directory (path traversal, an
-            # absolute path) cannot be trusted — same posture as the
-            # completeness check in ``_download_gate.py``.
-            return None
-        return str(shard_path) if shard_path.is_file() else None
+        return weight_map if isinstance(weight_map, dict) else None
 
     @staticmethod
-    def _read_safetensors_header(path: str) -> dict | None:
+    def _resolve_shard_path(text_encoder_dir: Path, shard: object) -> str | None:
+        # String-only traversal guard — matching ``_download_gate.py``'s
+        # ``mflux_missing_weights`` — NOT ``.resolve()``-then-compare-parents:
+        # a HF hub cache's snapshot files are themselves symlinks into a
+        # sibling ``blobs/`` directory, so resolving them walks straight out
+        # of ``text_encoder_dir`` and made every real cached checkpoint fail
+        # this check (caught live: a false positive against a known-good,
+        # actually-cached repo — every ``blobs``-backed shard would trip the
+        # old parent-directory check identically, so this HF cache layout is
+        # unconditionally incompatible with resolve-and-compare here).
+        if (
+            not isinstance(shard, str)
+            or os.path.basename(shard) != shard
+            or shard in (".", "..")
+        ):
+            return None
+        shard_path = text_encoder_dir / shard
+        return str(shard_path) if shard_path.is_file() else None
+
+    # Real safetensors headers run from a few hundred bytes (this text
+    # encoder's own shards) to low tens of megabytes for the largest known
+    # checkpoints' component indices. A claimed length beyond this is a
+    # corrupt or hostile file, not a legitimately large model — reading it
+    # into memory to find out would defeat the point of a header-only check.
+    _SAFETENSORS_HEADER_MAX_BYTES = 64 * 1024 * 1024
+
+    @classmethod
+    def _read_safetensors_header(cls, path: str) -> dict | None:
         """The JSON header of a ``.safetensors`` file, or ``None`` if unreadable.
 
         Format: an 8-byte little-endian header length, then that many bytes
@@ -441,12 +474,15 @@ class ImageGenerationEngine:
             with open(path, "rb") as fh:
                 (header_len,) = struct.unpack("<Q", fh.read(8))
                 # A corrupt/truncated file could claim an enormous header
-                # length; refuse to read past the file's own size rather than
-                # let a malformed length exhaust memory.
-                if header_len <= 0 or header_len > Path(path).stat().st_size:
+                # length; cap it independent of the file's own (possibly
+                # multi-gigabyte) size rather than let a malformed length
+                # read gigabytes into memory before ``json.loads`` even runs.
+                if header_len <= 0 or header_len > cls._SAFETENSORS_HEADER_MAX_BYTES:
                     return None
-                header = json.loads(fh.read(header_len))
-        except (OSError, json.JSONDecodeError, struct.error):
+                if header_len > Path(path).stat().st_size:
+                    return None
+                header = json.loads(fh.read(header_len).decode("utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, struct.error):
             return None
         return header if isinstance(header, dict) else None
 
