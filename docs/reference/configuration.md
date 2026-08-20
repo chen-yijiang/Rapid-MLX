@@ -149,7 +149,7 @@ mutually exclusive modes—still fail before generation.
 Generate the all-alias/all-method policy report with:
 
 ```bash
-python -m scripts.spec_capability_report
+python -m vllm_mlx.spec_decode.report
 ```
 
 #### MTP is not free — measure before you enable it

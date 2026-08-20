@@ -1,6 +1,6 @@
-from scripts.spec_capability_report import build_report
 from vllm_mlx.model_aliases import AliasProfile, list_profiles
 from vllm_mlx.spec_decode.capability import REGISTERED_METHODS, assess_method
+from vllm_mlx.spec_decode.report import _quantization, build_report
 
 
 def test_report_covers_every_alias_and_method():
@@ -30,3 +30,8 @@ def test_true_verifier_incompatibility_remains_hard_failure():
     suffix = assess_method(hybrid, "suffix")
     assert suffix.capable is False
     assert suffix.recommendation == "incompatible"
+
+
+def test_quantization_recognizes_hyphenated_spellings():
+    assert _quantization("user/model-4-bit") == "4bit"
+    assert _quantization("user/model-8-bit") == "8bit"
