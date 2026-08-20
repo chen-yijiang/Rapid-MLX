@@ -324,15 +324,23 @@ def test_shard_reached_via_symlink_is_accepted(tmp_path, monkeypatch) -> None:
 def test_shard_path_traversal_is_rejected(tmp_path, monkeypatch) -> None:
     # A shard name escaping text_encoder/ (path traversal, or an absolute
     # path elsewhere on disk) must not be trusted even though it would
-    # resolve to a real file.
-    outside = tmp_path / "outside.safetensors"
+    # resolve to a real, well-formed file. The escape target below is a
+    # REAL, VALID shard — if the traversal guard were ever removed, this
+    # would resolve and pass the shape check, so the test would go red
+    # instead of staying accidentally green (the bug caught in review: an
+    # earlier version put the escape target where "../outside.safetensors"
+    # does NOT actually resolve, so the test passed only because the file
+    # was missing, whether or not the guard did anything).
+    snapshot = _make_snapshot(
+        tmp_path, {"shape": [152064, 3584], "dtype": "F16"}
+    )  # baseline valid shard, then override the index to point outside
+    # "../outside.safetensors" from text_encoder/ resolves to snapshot/ —
+    # one level out, not two — so the escape target has to live there.
+    outside = snapshot / "outside.safetensors"
     _write_safetensors_header(
         outside,
         {"encoder.embed_tokens.weight": {"shape": [152064, 3584], "dtype": "F16"}},
     )
-    snapshot = _make_snapshot(
-        tmp_path, {"shape": [152064, 3584], "dtype": "F16"}
-    )  # baseline valid shard, then override the index to point outside
     (snapshot / "text_encoder" / "model.safetensors.index.json").write_text(
         json.dumps(
             {"weight_map": {"encoder.embed_tokens.weight": "../outside.safetensors"}}

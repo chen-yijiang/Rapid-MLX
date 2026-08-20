@@ -228,8 +228,17 @@ def estimate_model_bytes(model_name: str) -> int:
         "qwen-image": 55.7,
     }
     for token, gib in known_image_gib.items():
-        if token in folded:
-            return int(gib * _GIB)
+        if token not in folded:
+            continue
+        if token == "qwen-image" and "qwen-image-edit" in folded:
+            # "qwen-image" is a substring of "qwen-image-edit" — this charge
+            # was measured against the txt2img family only (see the comment
+            # above), and the edit variant's extra image-conditioning input
+            # makes its real footprint unverified, not merely "the same
+            # number". Falls through to the generic param-count estimate
+            # below rather than asserting an unmeasured number.
+            continue
+        return int(gib * _GIB)
 
     params = [float(value) for value in _PARAM_RE.findall(folded)]
     if not params:
