@@ -49,7 +49,8 @@ By default, remote image/video URLs are validated at request time so they
 cannot resolve to loopback, RFC1918 private space, link-local (including the
 cloud metadata address `169.254.169.254`), multicast, or reserved addresses —
 on both the initial request and every redirect hop. Local image/video paths
-are accepted only when they are regular files with a media extension.
+are accepted only when they are regular files with a supported media extension
+and a recognized raster-image or video-container signature.
 
 This is an intentional security tightening for local paths: extensionless
 files and formats outside the documented image/video allowlist are rejected.

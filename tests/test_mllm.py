@@ -8,8 +8,7 @@ from pathlib import Path
 import pytest
 import requests
 
-# Skip all tests if not on Apple Silicon
-pytestmark = pytest.mark.skipif(
+apple_silicon_only = pytest.mark.skipif(
     sys.platform != "darwin" or platform.machine() != "arm64",
     reason="Requires Apple Silicon",
 )
@@ -95,6 +94,7 @@ def test_video_path(tmp_path):
 # =============================================================================
 
 
+@apple_silicon_only
 class TestMLLMHelperFunctions:
     """Test helper functions that don't require model loading."""
 
@@ -126,6 +126,7 @@ class TestMLLMHelperFunctions:
         assert not is_url("data:image/png;base64,AAAA")
 
 
+@apple_silicon_only
 class TestVideoFrameExtraction:
     """Test video frame extraction functions."""
 
@@ -183,6 +184,7 @@ class TestVideoFrameExtraction:
             assert path.endswith(".jpg")
 
 
+@apple_silicon_only
 class TestImageProcessing:
     """Test image processing functions."""
 
@@ -257,6 +259,7 @@ class TestImageProcessing:
         assert call_count["n"] == 2
 
 
+@apple_silicon_only
 class TestVideoProcessing:
     """Test video processing functions."""
 
@@ -506,6 +509,16 @@ class TestMediaSecurity:
         with pytest.raises(ValueError):
             process_video_input(str(secret))
 
+    def test_local_media_blocks_secret_with_media_suffix(self, tmp_path):
+        from vllm_mlx.models.mllm import process_image_input, process_video_input
+
+        disguised = tmp_path / "credentials.jpg"
+        disguised.write_text("api_key=secret")
+        with pytest.raises(ValueError):
+            process_image_input(str(disguised))
+        with pytest.raises(ValueError):
+            process_video_input(str(disguised))
+
     def test_local_media_blocks_etc_passwd(self, monkeypatch, tmp_path):
         from vllm_mlx.models.mllm import process_image_input
 
@@ -572,6 +585,7 @@ class TestMediaSecurity:
 # =============================================================================
 
 
+@apple_silicon_only
 class TestMLLMModelInit:
     """Test MLLM model initialization (no model loading)."""
 
@@ -610,6 +624,7 @@ class TestMLLMModelInit:
 
 
 @pytest.mark.slow
+@apple_silicon_only
 class TestMLLMImageGeneration:
     """Integration tests for MLLM image generation."""
 
@@ -646,6 +661,7 @@ class TestMLLMImageGeneration:
 
 
 @pytest.mark.slow
+@apple_silicon_only
 class TestMLLMVideoGeneration:
     """Integration tests for MLLM video generation."""
 
@@ -688,6 +704,7 @@ class TestMLLMVideoGeneration:
 
 
 @pytest.mark.slow
+@apple_silicon_only
 class TestMLLMChat:
     """Integration tests for MLLM chat interface."""
 

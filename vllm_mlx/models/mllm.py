@@ -751,6 +751,29 @@ _ALLOWED_MEDIA_EXTENSIONS = frozenset(
 )
 
 
+def _has_media_signature(path: Path) -> bool:
+    """Recognize common raster-image/video container signatures."""
+    try:
+        with path.open("rb") as media_file:
+            header = media_file.read(32)
+    except OSError:
+        return False
+    if header.startswith(
+        (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"GIF87a", b"GIF89a", b"BM")
+    ):
+        return True
+    if header[:4] in (b"II*\x00", b"MM\x00*"):
+        return True
+    if header.startswith(b"RIFF") and header[8:12] in (b"WEBP", b"AVI "):
+        return True
+    if header.startswith(
+        (b"\x1aE\xdf\xa3", b"FLV", b"\x00\x00\x01\xba", b"\x00\x00\x01\xb3")
+    ):
+        return True
+    # ISO base-media containers: MP4/MOV/M4V/3GP and HEIF/HEIC/AVIF.
+    return len(header) >= 12 and header[4:8] == b"ftyp"
+
+
 def _local_media_root() -> Path | None:
     """Return the confinement root for local media reads, if configured."""
     root = os.environ.get("RAPID_MLX_MEDIA_ROOT")
@@ -785,6 +808,8 @@ def _resolve_local_media(path: str) -> str | None:
     if not candidate.is_file():
         return None
     if candidate.suffix.lower() not in _ALLOWED_MEDIA_EXTENSIONS:
+        return None
+    if not _has_media_signature(candidate):
         return None
     root = _local_media_root()
     if root is not None:
