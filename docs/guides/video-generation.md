@@ -132,9 +132,11 @@ RAPID_MLX_LTX25_RUNTIME="$PWD/ltx-2-mlx/.venv/bin/ltx-2-mlx" \
   rapid-mlx serve ltx-2.5-mlx-q8
 ```
 
-Rapid verifies that this executable is the expected workspace entry point, the
-checkout is clean, its lockfile is tracked, and HEAD is the exact commit above
-before starting. Generations have a two-hour safety deadline; set
+Rapid uses the executable only to locate and verify the source checkout: it
+must be the expected workspace entry point, with a clean tree, tracked lockfile,
+and the exact HEAD above. Generation runs through `uv --isolated --frozen`, so
+the mutable checkout `.venv` is never trusted or executed. Generations have a
+two-hour safety deadline; set
 `RAPID_MLX_LTX25_TIMEOUT_SEC` to a larger value (minimum 60) for unusually
 large jobs.
 

@@ -142,14 +142,15 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
     image.write_bytes(b"png")
     calls: list[tuple[list[str], dict]] = []
     communicates: list[tuple[str, int]] = []
-    runtime = tmp_path / "bin" / "ltx-2-mlx"
-    runtime.parent.mkdir()
+    runtime = tmp_path / ".venv" / "bin" / "ltx-2-mlx"
+    runtime.parent.mkdir(parents=True)
     runtime.write_text("#!/bin/sh\n")
     runtime.chmod(0o755)
     runtime_python = runtime.with_name("python")
     runtime_python.write_text("#!/bin/sh\n")
     runtime_python.chmod(0o755)
     monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
+    monkeypatch.setattr(ltx25.shutil, "which", lambda _: "/trusted/uv")
 
     class Process:
         returncode = 0
@@ -176,9 +177,17 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
     )
 
     command, run_kwargs = calls[0]
-    assert command[0] == str(runtime_python)
-    assert command[1] == "-c"
-    assert command[3:5] == ["generate", "--model"]
+    assert command[:7] == [
+        "/trusted/uv",
+        "run",
+        "--isolated",
+        "--frozen",
+        "--project",
+        str(tmp_path),
+        "python",
+    ]
+    assert command[7] == "-c"
+    assert command[9:11] == ["generate", "--model"]
     assert "--distilled" in command
     assert "--low-ram" in command
     assert "a fox" not in command
@@ -188,6 +197,7 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "text": True,
+        "start_new_session": True,
     }
     assert communicates == [("a fox", 7200)]
     assert output.read_bytes() == b"mp4-with-audio"
@@ -196,13 +206,14 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
 def test_ltx25_engine_reports_subprocess_failure_without_leaking_details(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime = tmp_path / "bin" / "ltx-2-mlx"
-    runtime.parent.mkdir()
+    runtime = tmp_path / ".venv" / "bin" / "ltx-2-mlx"
+    runtime.parent.mkdir(parents=True)
     runtime.write_text("#!/bin/sh\n")
     runtime.chmod(0o755)
     runtime.with_name("python").write_text("#!/bin/sh\n")
     runtime.with_name("python").chmod(0o755)
     monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
+    monkeypatch.setattr(ltx25.shutil, "which", lambda _: "/trusted/uv")
 
     class Process:
         returncode = 1
@@ -227,7 +238,8 @@ def test_ltx25_engine_reports_subprocess_failure_without_leaking_details(
             image=None,
         )
     assert str(exc.value) == (
-        "LTX-2.5 generation failed; check the server logs for runtime details."
+        "LTX-2.5 runtime exited with code 1; runtime output is not retained "
+        "because it may contain request data."
     )
     assert "private-output-sentinel" not in str(exc.value)
     assert "private-error-sentinel" not in str(exc.value)
@@ -236,13 +248,14 @@ def test_ltx25_engine_reports_subprocess_failure_without_leaking_details(
 def test_ltx25_timeout_terminates_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime = tmp_path / "bin" / "ltx-2-mlx"
-    runtime.parent.mkdir()
+    runtime = tmp_path / ".venv" / "bin" / "ltx-2-mlx"
+    runtime.parent.mkdir(parents=True)
     runtime.write_text("#!/bin/sh\n")
     runtime.chmod(0o755)
     runtime.with_name("python").write_text("#!/bin/sh\n")
     runtime.with_name("python").chmod(0o755)
     monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
+    monkeypatch.setattr(ltx25.shutil, "which", lambda _: "/trusted/uv")
     terminated = []
 
     class Process:
@@ -282,13 +295,14 @@ def test_ltx25_timeout_terminates_process(
 def test_ltx25_invalid_timeout_does_not_spawn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime = tmp_path / "bin" / "ltx-2-mlx"
-    runtime.parent.mkdir()
+    runtime = tmp_path / ".venv" / "bin" / "ltx-2-mlx"
+    runtime.parent.mkdir(parents=True)
     runtime.write_text("#!/bin/sh\n")
     runtime.chmod(0o755)
     runtime.with_name("python").write_text("#!/bin/sh\n")
     runtime.with_name("python").chmod(0o755)
     monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
+    monkeypatch.setattr(ltx25.shutil, "which", lambda _: "/trusted/uv")
     monkeypatch.setenv("RAPID_MLX_LTX25_TIMEOUT_SEC", "invalid")
     monkeypatch.setattr(
         ltx25.subprocess,

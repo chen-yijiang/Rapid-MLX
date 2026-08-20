@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import threading
 from pathlib import Path
@@ -112,21 +113,29 @@ class LTX25VideoEngine:
         self.model_name = model_name
         self._process_lock = threading.Lock()
         self._process: subprocess.Popen[str] | None = None
+        self._stopping = False
 
     @staticmethod
     def _terminate_process(process: subprocess.Popen[str]) -> None:
         if process.poll() is not None:
             return
-        process.terminate()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
         try:
             process.wait(timeout=_TERMINATE_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
-            process.kill()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
             process.wait(timeout=_TERMINATE_GRACE_SECONDS)
 
     def stop(self) -> None:
         """Stop an active external generation during bounded shutdown."""
         with self._process_lock:
+            self._stopping = True
             process = self._process
         if process is not None:
             self._terminate_process(process)
@@ -150,16 +159,22 @@ class LTX25VideoEngine:
                 "LTX-2.5 support requires the pinned ltx-2-mlx runtime. "
                 "See the LTX-2.5 setup in the video generation guide."
             )
-        runtime_python = Path(executable).with_name("python")
-        if not runtime_python.is_file() or not os.access(runtime_python, os.X_OK):
+        repository = Path(executable).parents[2]
+        uv = shutil.which("uv")
+        if uv is None:
             raise LTX25BackendError(
-                "The LTX-2.5 runtime does not have its isolated Python executable. "
-                "Reinstall it using the video generation guide."
+                "LTX-2.5 support requires uv to build its pinned isolated runtime."
             )
         timeout = _generation_timeout_seconds()
 
         command = [
-            str(runtime_python),
+            str(Path(uv).absolute()),
+            "run",
+            "--isolated",
+            "--frozen",
+            "--project",
+            str(repository),
+            "python",
             "-c",
             _STDIN_PROMPT_RUNNER,
             "generate",
@@ -196,29 +211,37 @@ class LTX25VideoEngine:
         try:
             # Prompts may contain private user data. Keep them out of argv and
             # local process listings by feeding the isolated runtime over stdin.
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
             with self._process_lock:
+                if self._stopping:
+                    raise LTX25BackendError(
+                        "LTX-2.5 generation cannot start while the server is stopping."
+                    )
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
                 self._process = process
             # Captured output is deliberately discarded: upstream diagnostics
             # are not a safe public/logging channel for request data.
             process.communicate(input=prompt, timeout=timeout)
             if process.returncode:
-                raise subprocess.CalledProcessError(process.returncode, command)
+                raise LTX25BackendError(
+                    f"LTX-2.5 runtime exited with code {process.returncode}; "
+                    "runtime output is not retained because it may contain request data."
+                )
         except subprocess.TimeoutExpired as exc:
             if process is not None:
                 self._terminate_process(process)
             raise LTX25BackendError(
                 "LTX-2.5 generation exceeded its configured time limit."
             ) from exc
-        except (OSError, subprocess.CalledProcessError) as exc:
+        except OSError as exc:
             raise LTX25BackendError(
-                "LTX-2.5 generation failed; check the server logs for runtime details."
+                "LTX-2.5 generation could not start its isolated runtime."
             ) from exc
         finally:
             with self._process_lock:
