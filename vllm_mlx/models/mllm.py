@@ -602,7 +602,9 @@ def _safe_remote_target(url: str) -> tuple[str, str]:
         if ip not in addresses:
             addresses.append(ip)
     if not addresses:
-        raise RemoteMediaFetchError(f"Remote media host resolved no addresses: {host!r}")
+        raise RemoteMediaFetchError(
+            f"Remote media host resolved no addresses: {host!r}"
+        )
     return host, addresses[0]
 
 
@@ -629,7 +631,9 @@ def _pinned_url(url: str, address: str) -> str:
     parsed = urlsplit(url)
     host = f"[{address}]" if ":" in address else address
     netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
-    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    return urlunsplit(
+        (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+    )
 
 
 def _guarded_request(
@@ -655,7 +659,9 @@ def _guarded_request(
             request_headers = dict(headers)
             default_port = 443 if parsed.scheme == "https" else 80
             request_headers["Host"] = (
-                hostname if parsed.port in (None, default_port) else f"{hostname}:{parsed.port}"
+                hostname
+                if parsed.port in (None, default_port)
+                else f"{hostname}:{parsed.port}"
             )
             if parsed.scheme == "https":
                 session.mount("https://", _PinnedHTTPSAdapter(hostname))
@@ -846,7 +852,7 @@ def download_image(url: str, timeout: int = 30, max_size: int = MAX_IMAGE_SIZE) 
             path = urlparse(url).path
             ext = Path(path).suffix or ".jpg"
 
-    # Save to temp file with size checking during download
+        # Save to temp file with size checking during download
         temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
         downloaded_size = 0
         for chunk in response.iter_content(chunk_size=8192):
@@ -918,7 +924,7 @@ def download_video(url: str, timeout: int = 120, max_size: int = MAX_VIDEO_SIZE)
     try:
         response.raise_for_status()
 
-    # Check Content-Length header from GET response
+        # Check Content-Length header from GET response
         content_length = response.headers.get("content-length")
         if content_length and int(content_length) > max_size:
             raise FileSizeExceededError(
@@ -926,7 +932,7 @@ def download_video(url: str, timeout: int = 120, max_size: int = MAX_VIDEO_SIZE)
                 f"{max_size / 1024 / 1024:.1f} MB limit"
             )
 
-    # Determine extension from content type or URL
+        # Determine extension from content type or URL
         content_type = response.headers.get("content-type", "")
         if "mp4" in content_type:
             ext = ".mp4"
@@ -942,7 +948,7 @@ def download_video(url: str, timeout: int = 120, max_size: int = MAX_VIDEO_SIZE)
             path = urlparse(url).path
             ext = Path(path).suffix or ".mp4"
 
-    # Save to temp file (stream for larger files) with size checking
+        # Save to temp file (stream for larger files) with size checking
         temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
         downloaded_size = 0
         for chunk in response.iter_content(chunk_size=8192):
