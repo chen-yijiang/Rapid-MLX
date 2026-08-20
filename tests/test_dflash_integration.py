@@ -337,7 +337,9 @@ def test_models_listing_renders_dflash_column(capsys) -> None:
         None,
     )
     assert eligible_row is not None, "qwen3.5-27b-8bit row missing"
-    assert "verified" in eligible_row, (
+    # DFlash is third-to-last: DDTree and Preset follow it. Parse the exact
+    # cell so a marker in either neighboring column cannot mask a regression.
+    assert eligible_row.split()[-3] == "verified", (
         f"DFlash column should be verified: {eligible_row!r}"
     )
 
@@ -347,7 +349,9 @@ def test_models_listing_renders_dflash_column(capsys) -> None:
         None,
     )
     assert ineligible_row is not None, "qwen3.5-4b-4bit row missing"
-    assert "exp" in ineligible_row, f"DFlash column should be exp: {ineligible_row!r}"
+    assert ineligible_row.split()[-3] == "exp", (
+        f"DFlash column should be exp: {ineligible_row!r}"
+    )
 
 
 # =============================================================================
