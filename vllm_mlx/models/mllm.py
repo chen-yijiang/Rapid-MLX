@@ -566,11 +566,9 @@ def _assert_safe_remote_url(url: str) -> None:
     space, link-local (e.g. cloud metadata ``169.254.169.254``), multicast,
     unspecified, or reserved addresses.
 
-    Note: hostname resolution is validated at request time, so a hostile DNS
-    rebind between the resolve below and the actual connect is not fully
-    closed here. Operators who expose the server past the loopback boundary
-    should terminate at a network perimeter (reverse proxy with egress
-    controls) and set an API key.
+    Hostname resolution is validated immediately before each request. Network
+    egress controls remain recommended for internet-exposed deployments as a
+    defense-in-depth measure against resolver/connection races.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -742,12 +740,15 @@ def download_image(url: str, timeout: int = 30, max_size: int = MAX_IMAGE_SIZE) 
         head_response = _guarded_request(
             "HEAD", url, timeout=timeout, headers=headers, stream=False
         )
-        content_length = head_response.headers.get("content-length")
-        if content_length and int(content_length) > max_size:
-            raise FileSizeExceededError(
-                f"Image at {url} exceeds maximum size: {int(content_length) / 1024 / 1024:.1f} MB > "
-                f"{max_size / 1024 / 1024:.1f} MB limit"
-            )
+        try:
+            content_length = head_response.headers.get("content-length")
+            if content_length and int(content_length) > max_size:
+                raise FileSizeExceededError(
+                    f"Image at {url} exceeds maximum size: {int(content_length) / 1024 / 1024:.1f} MB > "
+                    f"{max_size / 1024 / 1024:.1f} MB limit"
+                )
+        finally:
+            head_response.close()
     except requests.RequestException:
         # HEAD request failed, proceed with GET and check during download
         pass
@@ -802,6 +803,8 @@ def download_image(url: str, timeout: int = 30, max_size: int = MAX_IMAGE_SIZE) 
         if os.path.exists(temp_file.name):
             os.unlink(temp_file.name)
         raise
+    finally:
+        response.close()
 
     return _temp_manager.register(temp_file.name)
 
@@ -832,12 +835,15 @@ def download_video(url: str, timeout: int = 120, max_size: int = MAX_VIDEO_SIZE)
         head_response = _guarded_request(
             "HEAD", url, timeout=timeout, headers=headers, stream=False
         )
-        content_length = head_response.headers.get("content-length")
-        if content_length and int(content_length) > max_size:
-            raise FileSizeExceededError(
-                f"Video at {url} exceeds maximum size: {int(content_length) / 1024 / 1024:.1f} MB > "
-                f"{max_size / 1024 / 1024:.1f} MB limit"
-            )
+        try:
+            content_length = head_response.headers.get("content-length")
+            if content_length and int(content_length) > max_size:
+                raise FileSizeExceededError(
+                    f"Video at {url} exceeds maximum size: {int(content_length) / 1024 / 1024:.1f} MB > "
+                    f"{max_size / 1024 / 1024:.1f} MB limit"
+                )
+        finally:
+            head_response.close()
     except requests.RequestException:
         # HEAD request failed, proceed with GET and check during download
         pass
@@ -894,6 +900,8 @@ def download_video(url: str, timeout: int = 120, max_size: int = MAX_VIDEO_SIZE)
         if os.path.exists(temp_file.name):
             os.unlink(temp_file.name)
         raise
+    finally:
+        response.close()
 
     file_size = Path(temp_file.name).stat().st_size
     logger.info(
