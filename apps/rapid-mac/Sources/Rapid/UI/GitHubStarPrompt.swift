@@ -5,6 +5,15 @@ enum GitHubCommunity {
     static let didShowOnboardingPromptKey = "Rapid.didShowOnboardingGitHubStarPrompt"
 }
 
+struct GitHubStarPromptCompletion: Equatable {
+    let hasShown: Bool
+    let shouldPresent: Bool
+
+    static func completingOnboarding(hasShown: Bool) -> Self {
+        Self(hasShown: true, shouldPresent: !hasShown)
+    }
+}
+
 struct GitHubStarButton: View {
     var onOpen: () -> Void = {}
     var accessibilityIdentifier = "GitHub.Star.EmptyState"

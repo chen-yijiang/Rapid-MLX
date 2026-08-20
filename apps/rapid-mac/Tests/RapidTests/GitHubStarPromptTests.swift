@@ -27,6 +27,23 @@ struct GitHubStarPromptTests {
                 "Rapid.didShowOnboardingGitHubStarPrompt")
     }
 
+    @Test("Completion prompt presents once and records that presentation")
+    func oneShotCompletionTransition() {
+        let first = GitHubStarPromptCompletion.completingOnboarding(hasShown: false)
+        #expect(first == GitHubStarPromptCompletion(
+            hasShown: true,
+            shouldPresent: true
+        ))
+
+        let repeated = GitHubStarPromptCompletion.completingOnboarding(
+            hasShown: first.hasShown
+        )
+        #expect(repeated == GitHubStarPromptCompletion(
+            hasShown: true,
+            shouldPresent: false
+        ))
+    }
+
     @Test("Star entry is mounted in Chat and the completion overlay")
     func productionWiring() throws {
         let chat = try Self.source("ChatView.swift")
@@ -34,6 +51,6 @@ struct GitHubStarPromptTests {
 
         #expect(chat.contains("GitHubStarButton()"))
         #expect(content.contains("OnboardingCompletePrompt"))
-        #expect(content.contains("if !didShowOnboardingCompletePrompt"))
+        #expect(content.contains("GitHubStarPromptCompletion.completingOnboarding"))
     }
 }

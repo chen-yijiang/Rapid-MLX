@@ -770,14 +770,16 @@ struct ContentView: View {
         section = .chat
         VoiceOverAnnouncer.announce("Setup complete. Opening your first chat.")
         composerFocusRequest &+= 1
-        if !didShowOnboardingCompletePrompt {
-            didShowOnboardingCompletePrompt = true
-            withAnimation(RapidMotion.resolve(
-                RapidMotion.standard,
-                reduceMotion: reduceMotion
-            )) {
-                showOnboardingCompletePrompt = true
-            }
+        let prompt = GitHubStarPromptCompletion.completingOnboarding(
+            hasShown: didShowOnboardingCompletePrompt
+        )
+        didShowOnboardingCompletePrompt = prompt.hasShown
+        guard prompt.shouldPresent else { return }
+        withAnimation(RapidMotion.resolve(
+            RapidMotion.standard,
+            reduceMotion: reduceMotion
+        )) {
+            showOnboardingCompletePrompt = true
         }
     }
 
