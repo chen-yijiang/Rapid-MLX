@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from vllm_mlx import model_sizes
 from vllm_mlx.model_aliases import (
     POPULAR_ALIASES,
     VALID_PFLASH_TIERS,
@@ -853,6 +854,10 @@ def test_bonsai_ternary_alias_wiring() -> None:
     assert p8.is_hybrid is False
     assert raw[alias_8b].get("is_hybrid_explicit") is True
     assert p8.supports_spec_decode is False
+    assert model_sizes.size_bytes(p8.hf_path) == 2_315_084_354, (
+        f"{alias_8b}: download footprint drifted from the Hugging Face "
+        "repository metadata verified on 2026-08-20"
+    )
 
     # The three FP16 ``bonsai-*-unpacked`` aliases are gone, and no alias
     # may resurrect an ``-unpacked`` repo (they lose all compression).
