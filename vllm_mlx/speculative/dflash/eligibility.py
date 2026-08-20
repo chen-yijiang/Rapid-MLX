@@ -95,6 +95,8 @@ def report(
             f"main model hf_path={profile.hf_path!r} is 4-bit quantized; "
             "this pair has not been performance-validated and may be slower"
         )
+        if not explicit:
+            reasons.append("4-bit DFlash requires explicit experimental opt-in")
     curated_pair = not is_4bit and profile.supports_dflash and (
         drafter_model is None or drafter_model == profile.dflash_draft_model
     )

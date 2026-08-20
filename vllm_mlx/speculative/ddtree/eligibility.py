@@ -64,6 +64,8 @@ def report(
             f"main model hf_path={profile.hf_path!r} is 4-bit quantized; "
             "DDTree on this quantization is not performance-validated"
         )
+        if not explicit:
+            reasons.append("4-bit DDTree requires explicit experimental opt-in")
     experimental_explicit = explicit and not profile.supports_ddtree
     has_drafter = (
         bool(drafter_model)

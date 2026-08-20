@@ -15,11 +15,13 @@ def _quantization(hf_path: str) -> str:
     for label in (
         "nvfp4",
         "mxfp4",
+        "int4",
         "4bit",
         "6bit",
         "8bit",
         "2bit",
         "3bit",
+        "fp8",
         "bfloat16",
         "bf16",
         "float16",
