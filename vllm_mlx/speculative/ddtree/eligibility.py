@@ -97,7 +97,8 @@ def report(
     if not has_tree_budget:
         reasons.append("DDTree requires tree_budget")
     curated_pair = (
-        profile.supports_ddtree
+        not is_4bit
+        and profile.supports_ddtree
         and (drafter_model is None or drafter_model == profile.ddtree_draft_model)
         and effective_tokens == profile.ddtree_speculative_tokens
         and effective_budget == profile.ddtree_tree_budget

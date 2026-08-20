@@ -68,6 +68,7 @@ def test_explicit_4bit_main_model_is_experimental() -> None:
         tree_budget=24,
     )
     assert r.reasons == ()
+    assert r.recommendation == "experimental"
     assert "4-bit" in " ".join(r.warnings)
 
 

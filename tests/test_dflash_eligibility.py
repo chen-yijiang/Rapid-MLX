@@ -106,6 +106,7 @@ def test_explicit_4bit_main_model_is_experimental() -> None:
         drafter_model=p.dflash_draft_model,
     )
     assert r.reasons == ()
+    assert r.recommendation == "experimental"
     assert "4-bit" in " ".join(r.warnings)
 
 
