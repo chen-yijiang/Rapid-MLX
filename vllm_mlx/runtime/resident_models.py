@@ -216,10 +216,15 @@ def estimate_model_bytes(model_name: str) -> int:
     known_image_gib = {
         "flux2-klein-4b": 5.9,
         "z-image-turbo": 5.9,
-        # 6-bit Qwen-Image (20B) — ~23 GB on disk; the transformer +
-        # text-encoder + VAE stay resident. Without this the digit-free
-        # alias falls through to the 4 GB default and mis-admits.
-        "qwen-image": 18.0,
+        # 6-bit-transformer Qwen-Image (20B) — measured peak RSS during a
+        # real generation (mflux-community/qwen-image-mflux-q6, 512x512,
+        # `/usr/bin/time -l`): ~40.2 GiB. The text encoder in this repo is
+        # full precision (quantizing it "causes significant semantic
+        # degradation" per mflux's own weight definition), so it dominates
+        # the footprint over the quantized transformer. Without this entry
+        # the digit-free alias falls through to the 4 GB default and
+        # mis-admits.
+        "qwen-image": 40.2,
     }
     for token, gib in known_image_gib.items():
         if token in folded:

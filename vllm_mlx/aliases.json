@@ -1681,7 +1681,7 @@
     "min_memory_gb": 16
   },
   "qwen-image": {
-    "hf_path": "filipstrand/Qwen-Image-mflux-6bit",
+    "hf_path": "mflux-community/qwen-image-mflux-q6",
     "modality": "image-gen",
     "tool_call_parser": null,
     "reasoning_parser": null,
@@ -1690,7 +1690,7 @@
     "supports_spec_decode": false,
     "supports_dflash": false,
     "suffix_decoding_tier": "unknown",
-    "min_memory_gb": 24
+    "min_memory_gb": 48
   },
   "embeddinggemma-300m-6bit": {
     "hf_path": "mlx-community/embeddinggemma-300m-6bit",
