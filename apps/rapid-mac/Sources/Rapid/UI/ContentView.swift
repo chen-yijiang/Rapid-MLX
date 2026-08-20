@@ -64,6 +64,8 @@ struct ContentView: View {
     /// "this alias is not downloaded" from "we don't know yet", which
     /// are different sentences and different next steps.
     @State private var catalogLoaded: Bool = false
+    /// Cache generation represented by ``catalogEntries``.
+    @State private var catalogGeneration: UInt = 0
     /// FU-1: persisted opt-out for the launch-time auto-start path.
     @AppStorage(AutoStartPreference.storageKey) private var autoStartOnLaunch: Bool = AutoStartPreference.defaultValue
     @State private var campaign: Campaign? = Campaign.previewFromEnvironment(ProcessInfo.processInfo.environment)
@@ -406,6 +408,8 @@ struct ContentView: View {
             if let job = downloads.job(for: alias) {
                 switch job.status {
                 case .running: return .inProgress
+                case .completed where catalogGeneration < downloads.cacheGeneration:
+                    return .completed
                 case .completed, .failed, .cancelled: break
                 }
             }
@@ -530,12 +534,14 @@ struct ContentView: View {
 
     private func refreshCatalogSnapshot() async {
         guard let binary = server.binaryPath else { return }
+        let generation = downloads.cacheGeneration
         let loaded = await ModelCatalogCache.shared.entries(
             binary: binary,
-            generation: downloads.cacheGeneration
+            generation: generation
         )
         guard !Task.isCancelled else { return }
         catalogEntries = loaded
+        catalogGeneration = generation
         catalogLoaded = true
     }
 
