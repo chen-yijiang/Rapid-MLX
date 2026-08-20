@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -275,6 +276,12 @@ def test_ltx25_engine_reports_subprocess_failure_without_leaking_details(
             return "private-output-sentinel", "private-error-sentinel"
 
     monkeypatch.setattr(ltx25.subprocess, "Popen", Process)
+    terminated = []
+    monkeypatch.setattr(
+        ltx25.LTX25VideoEngine,
+        "_terminate_process",
+        staticmethod(lambda candidate: terminated.append(candidate)),
+    )
     engine = ltx25.LTX25VideoEngine("MrMofer/ltx-2.5-mlx-q8")
     with pytest.raises(ltx25.LTX25BackendError) as exc:
         engine.generate(
@@ -293,6 +300,7 @@ def test_ltx25_engine_reports_subprocess_failure_without_leaking_details(
     )
     assert "private-output-sentinel" not in str(exc.value)
     assert "private-error-sentinel" not in str(exc.value)
+    assert len(terminated) == 1
 
 
 def test_ltx25_timeout_terminates_process(
@@ -341,6 +349,27 @@ def test_ltx25_timeout_terminates_process(
 
     assert terminated == [process]
     assert engine._process is None
+
+
+def test_ltx25_termination_kills_group_after_leader_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals = []
+
+    class Process:
+        pid = 123
+
+        def poll(self) -> int:
+            return 1
+
+        def wait(self, *, timeout: int) -> None:
+            pytest.fail("an exited group leader must not be waited on again")
+
+    monkeypatch.setattr(ltx25.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    ltx25.LTX25VideoEngine._terminate_process(Process())  # type: ignore[arg-type]
+
+    assert signals == [(123, signal.SIGTERM), (123, signal.SIGKILL)]
 
 
 def test_ltx25_unexpected_communication_error_terminates_process(

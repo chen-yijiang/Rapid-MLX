@@ -151,19 +151,24 @@ class LTX25VideoEngine:
 
     @staticmethod
     def _terminate_process(process: subprocess.Popen[str]) -> None:
-        if process.poll() is not None:
-            return
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
+            if process.poll() is None:
+                process.wait(timeout=_TERMINATE_GRACE_SECONDS)
             return
-        try:
-            process.wait(timeout=_TERMINATE_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
+        if process.poll() is None:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                return
+                process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+        # The group leader can exit before ffmpeg or worker descendants. Kill
+        # the process group even after the leader has been reaped.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if process.poll() is None:
             try:
                 process.wait(timeout=_TERMINATE_GRACE_SECONDS)
             except subprocess.TimeoutExpired as exc:
@@ -273,6 +278,7 @@ class LTX25VideoEngine:
                 self._process = process
             process.communicate(input=prompt, timeout=timeout)
             if process.returncode:
+                self._terminate_process(process)
                 raise LTX25BackendError(
                     f"LTX-2.5 runtime exited with code {process.returncode}; "
                     "runtime output is not retained because it may contain request data."
@@ -286,7 +292,7 @@ class LTX25VideoEngine:
         except LTX25BackendError:
             raise
         except BaseException as exc:
-            if process is not None and process.poll() is None:
+            if process is not None:
                 self._terminate_process(process)
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
