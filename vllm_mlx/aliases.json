@@ -1246,8 +1246,6 @@
     "is_hybrid": false,
     "is_moe": true,
     "supports_spec_decode": true,
-    "mtp_draft_model": "mlx-community/Hy3-preview-MTP-4bit",
-    "mtp_speculative_tokens": 1,
     "min_memory_gb": 192
   },
   "muse-glimmer-30b-4bit": {

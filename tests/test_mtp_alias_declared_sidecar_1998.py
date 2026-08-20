@@ -43,10 +43,15 @@ EXPERIMENTAL_MTP_ALIASES = {
     "qwen3.6-27b-4bit": "mlx-community/Qwen3.6-27B-MTP-4bit",
     "qwen3.6-27b-6bit": "mlx-community/Qwen3.6-27B-MTP-4bit",
     "qwen3.6-27b-8bit": "mlx-community/Qwen3.6-27B-MTP-4bit",
+    "qwen3.6-27b-ud": "mlx-community/Qwen3.6-27B-MTP-4bit",
+    "qwen3.6-27b": "mlx-community/Qwen3.6-27B-MTP-4bit",
     "qwen3.6-35b-4bit": "mlx-community/Qwen3.6-35B-A3B-MTP-4bit",
     "qwen3.6-35b-6bit": "mlx-community/Qwen3.6-35B-A3B-MTP-4bit",
     "qwen3.6-35b-8bit": "mlx-community/Qwen3.6-35B-A3B-MTP-4bit",
-    "hy3-preview-4bit": "mlx-community/Hy3-preview-MTP-4bit",
+    "qwen3.6-35b-ud": "mlx-community/Qwen3.6-35B-A3B-MTP-4bit",
+    "qwen3.6-35b": "mlx-community/Qwen3.6-35B-A3B-MTP-4bit",
+    "qwen3.8-27b-4bit": "rapid-mlx/Qwen3.8-27B-4bit-MTP-MLX",
+    "qwen3.8-27b-mixed-3.5bpw": "rapid-mlx/Qwen3.8-27B-mixed-3.5bpw-MLX",
 }
 
 
