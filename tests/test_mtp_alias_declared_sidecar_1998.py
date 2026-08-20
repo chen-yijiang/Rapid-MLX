@@ -104,9 +104,7 @@ def test_registry_precondition_the_alias_still_declares_mtp():
     assert not other.mtp_draft_model
 
 
-@pytest.mark.parametrize(
-    ("alias", "sidecar"), sorted(EXPERIMENTAL_MTP_ALIASES.items())
-)
+@pytest.mark.parametrize(("alias", "sidecar"), sorted(EXPERIMENTAL_MTP_ALIASES.items()))
 def test_popular_experimental_mtp_aliases_declare_a_real_preset(alias, sidecar):
     from vllm_mlx.model_aliases import resolve_profile
 
