@@ -23,6 +23,14 @@ from mlx_lm.models.qwen3_5 import GatedDeltaNet, TextModelArgs
 from vllm_mlx import gdn_in_proj_fusion
 
 
+def _bits_equal(a, b):
+    return (
+        a.dtype == b.dtype
+        and a.shape == b.shape
+        and gdn_in_proj_fusion._bytes_of(a) == gdn_in_proj_fusion._bytes_of(b)
+    )
+
+
 def _tiny_args(**overrides):
     base = dict(
         model_type="qwen3_5_text",
@@ -82,7 +90,7 @@ class TestByteExactness:
         assert n == 2
         after = _run_all(model, x)
         for b, a in zip(before, after):
-            assert bool(mx.array_equal(b, a)), f"fusion changed bytes at rows={rows}"
+            assert _bits_equal(b, a), f"fusion changed bytes at rows={rows}"
 
     def test_cached_prefill_then_decode_byte_identical(self):
         model = TinyGDNModel()
@@ -104,10 +112,10 @@ class TestByteExactness:
         mx.eval(*[s for pair in states_after for s in pair])
 
         for b, a in zip(p_before + d_before, p_after + d_after):
-            assert bool(mx.array_equal(b, a))
+            assert _bits_equal(b, a)
         for (c0b, c1b), (c0a, c1a) in zip(states_before, states_after):
-            assert bool(mx.array_equal(c0b, c0a))
-            assert bool(mx.array_equal(c1b, c1a))
+            assert _bits_equal(c0b, c0a)
+            assert _bits_equal(c1b, c1a)
 
 
 class TestRewriteSemantics:
@@ -193,7 +201,7 @@ class TestGating:
     def test_projection_probe_failure_disables(self, monkeypatch):
         model = TinyGDNModel()
         monkeypatch.setattr(
-            gdn_in_proj_fusion, "_probe_projection_parity", lambda gdn: False
+            gdn_in_proj_fusion, "_probe_projection_parity", lambda gdn: frozenset()
         )
         assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 0
         assert hasattr(model.layers[0], "in_proj_qkv")
@@ -209,6 +217,54 @@ class TestGating:
         assert hasattr(model.layers[0], "in_proj_qkv")
 
 
+class TestFailureContainment:
+    def test_probe_exception_contained(self, monkeypatch):
+        def boom(gdn):
+            raise RuntimeError("probe blew up")
+
+        monkeypatch.setattr(gdn_in_proj_fusion, "_probe_projection_parity", boom)
+        model = TinyGDNModel()
+        assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 0
+        assert hasattr(model.layers[0], "in_proj_qkv")
+        # Model still runs stock.
+        x = _inputs(2, model.hidden_size)
+        _run_all(model, x)
+
+    def test_fuse_one_exception_contained(self, monkeypatch):
+        def boom(gdn, dtypes=None):
+            raise RuntimeError("commit blew up")
+
+        monkeypatch.setattr(gdn_in_proj_fusion, "_fuse_one", boom)
+        model = TinyGDNModel()
+        assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 0
+        x = _inputs(2, model.hidden_size)
+        _run_all(model, x)
+
+
+class TestDtypeGate:
+    def test_unprobed_dtype_takes_sliced_path(self, monkeypatch):
+        model = TinyGDNModel()
+        x32 = _inputs(2, model.hidden_size).astype(mx.float32)
+        before = _run_all(model, x32)
+        assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 2
+        # float32 was never probed: narrow float32 inputs must take the
+        # sliced (byte-exact-by-construction) path, so outputs match.
+        gdn = model.layers[0]
+        assert mx.float32 not in gdn._rapid_gdn_dtypes
+        after = _run_all(model, x32)
+        for b, a in zip(before, after):
+            assert _bits_equal(b, a)
+
+    def test_float16_narrow_byte_identical(self):
+        model = TinyGDNModel()
+        x16 = _inputs(2, model.hidden_size).astype(mx.float16)
+        before = _run_all(model, x16)
+        assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 2
+        after = _run_all(model, x16)
+        for b, a in zip(before, after):
+            assert _bits_equal(b, a)
+
+
 class TestWidthDispatch:
     def test_narrow_and_wide_paths_agree(self):
         # The fused (narrow) and sliced (wide) paths must agree with each
@@ -221,7 +277,7 @@ class TestWidthDispatch:
         assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 2
         after = _run_all(model, x)
         for b, a in zip(before, after):
-            assert bool(mx.array_equal(b, a))
+            assert _bits_equal(b, a)
 
     def test_wide_path_uses_slices(self, monkeypatch):
         model = TinyGDNModel()

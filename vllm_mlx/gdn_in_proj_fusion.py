@@ -122,7 +122,10 @@ def _fused_projections(gdn: Any, inputs: mx.array):
     """
     fused = gdn.in_proj_fused
     bounds = gdn._rapid_gdn_bounds
-    if inputs.shape[0] * inputs.shape[1] <= _FUSED_MAX_ROWS:
+    if (
+        inputs.shape[0] * inputs.shape[1] <= _FUSED_MAX_ROWS
+        and inputs.dtype in gdn._rapid_gdn_dtypes
+    ):
         out = fused(inputs)
         return mx.split(out, bounds[:-1], axis=-1)
     gs, bits = fused.group_size, fused.bits
@@ -232,16 +235,44 @@ def _ensure_call_patch(gdn_cls, nn, gated_delta_update) -> None:
     _CALL_PATCHED = True
 
 
+_UINT_OF_SIZE = {1: "uint8", 2: "uint16", 4: "uint32", 8: "uint64"}
+
+
 def _bytes_of(arr: mx.array) -> bytes:
+    """Raw bit pattern of ``arr`` — no dtype conversion, so signed zeros
+    and NaN payloads cannot be normalized away."""
     import numpy as np
 
-    return np.array(arr.astype(mx.float32), copy=True).tobytes()
+    u = getattr(mx, _UINT_OF_SIZE[arr.dtype.size])
+    return np.array(mx.view(arr, u), copy=True).tobytes()
 
 
-def _probe_projection_parity(gdn: Any) -> bool:
-    """Fused concat vs stock projections, byte-compared for M=1.._FUSED_MAX_ROWS
-    on this layer's real weights (pins the kernel-dispatch boundary on the
-    running hardware/mlx build)."""
+# Activation dtypes the fused path may serve. Fusion for a dtype is only
+# enabled after the projection probe passes for it; anything else takes
+# the (always byte-exact) sliced path at runtime.
+_PROBE_DTYPES = ("bfloat16", "float16")
+
+
+def _signature(gdn: Any) -> tuple:
+    """Kernel-dispatch-relevant identity of a projection quartet: parity
+    proven for one member holds for every member with the same signature."""
+    parts = _proj_modules(gdn)
+    base = parts[0]
+    return (
+        base.group_size,
+        base.bits,
+        getattr(base, "mode", "affine"),
+        base["weight"].dtype,
+        tuple(tuple(p["weight"].shape) for p in parts),
+    )
+
+
+def _probe_projection_parity(gdn: Any) -> frozenset:
+    """Fused concat vs stock projections on this quartet's real weights,
+    byte-compared per candidate dtype for every fused row count
+    (``(1, M)`` for M=1.._FUSED_MAX_ROWS plus a multi-batch ``(2, 4)``
+    factorization). Returns the set of dtypes that passed — pins the
+    kernel-dispatch boundary on the running hardware/mlx build."""
     parts = _proj_modules(gdn)
     weight, scales, biases = _concat_params(parts)
     gs, bits = parts[0].group_size, parts[0].bits
@@ -251,23 +282,38 @@ def _probe_projection_parity(gdn: Any) -> bool:
         total += p["weight"].shape[0]
         bounds.append(total)
     hidden = parts[0]["scales"].shape[1] * gs
-    try:
-        for rows in range(1, _FUSED_MAX_ROWS + 1):
-            x = (
-                mx.random.normal((1, rows, hidden), key=mx.random.key(rows)) * 0.3
-            ).astype(mx.bfloat16)
-            fused = mx.quantized_matmul(
-                x, weight, scales, biases, transpose=True, group_size=gs, bits=bits
-            )
-            fused_parts = mx.split(fused, bounds[:-1], axis=-1)
-            stock_parts = [p(x) for p in parts]
-            mx.eval(fused_parts, stock_parts)
-            for sp, fp in zip(stock_parts, fused_parts):
-                if _bytes_of(sp) != _bytes_of(fp):
-                    return False
-    except Exception:  # noqa: BLE001 — any kernel/runtime failure: stay stock
-        return False
-    return True
+    shapes = [(1, rows) for rows in range(1, _FUSED_MAX_ROWS + 1)]
+    if _FUSED_MAX_ROWS >= 8:
+        shapes.append((2, 4))
+    passed = set()
+    for dtype_name in _PROBE_DTYPES:
+        dtype = getattr(mx, dtype_name)
+        try:
+            ok = True
+            for b_dim, rows in shapes:
+                x = (
+                    mx.random.normal(
+                        (b_dim, rows, hidden), key=mx.random.key(b_dim * 100 + rows)
+                    )
+                    * 0.3
+                ).astype(dtype)
+                fused = mx.quantized_matmul(
+                    x, weight, scales, biases, transpose=True, group_size=gs, bits=bits
+                )
+                fused_parts = mx.split(fused, bounds[:-1], axis=-1)
+                stock_parts = [p(x) for p in parts]
+                mx.eval(fused_parts, stock_parts)
+                for sp, fp in zip(stock_parts, fused_parts):
+                    if _bytes_of(sp) != _bytes_of(fp):
+                        ok = False
+                        break
+                if not ok:
+                    break
+            if ok:
+                passed.add(dtype)
+        except Exception:  # noqa: BLE001 — kernel/runtime failure: dtype stays stock
+            continue
+    return frozenset(passed)
 
 
 def _probe_whole_layer_parity(gdn_cls, nn, gated_delta_update) -> bool:
@@ -298,12 +344,13 @@ def _probe_whole_layer_parity(gdn_cls, nn, gated_delta_update) -> bool:
         fusedm.update(stock.parameters())
         for m in (stock, fusedm):
             nn.quantize(m, group_size=32, bits=4)
+            m.eval()  # serving mode: gated_delta_update takes the kernel path
         fusedm.update(stock.parameters())
         mx.eval(stock.parameters(), fusedm.parameters())
 
         if not _can_fuse(fusedm):
             return False
-        _fuse_one(fusedm)
+        _fuse_one(fusedm, frozenset({mx.bfloat16}))
 
         for rows in (1, 2, 8, 16):
             x = (
@@ -319,17 +366,22 @@ def _probe_whole_layer_parity(gdn_cls, nn, gated_delta_update) -> bool:
                 return False
 
         # Prefill (wide, sliced path) then decode (narrow, fused path)
-        # through a cache; compare outputs and the carried state.
-        c_stock, c_fused = ArraysCache(size=2), ArraysCache(size=2)
+        # through a cache — masked and with ragged ``cache.lengths`` set,
+        # covering the branches the batched engine exercises. Outputs AND
+        # the carried conv/recurrent state must match bit-for-bit.
         xp = (
             mx.random.normal((1, 16, args.hidden_size), key=mx.random.key(7)) * 0.3
         ).astype(mx.bfloat16)
         xd = (
             mx.random.normal((1, 1, args.hidden_size), key=mx.random.key(8)) * 0.3
         ).astype(mx.bfloat16)
+        mask = mx.arange(16)[None, :] < 12
         outs = []
-        for layer, cache in ((stock, c_stock), (fusedm, c_fused)):
-            y1 = layer(xp, None, cache)
+        for layer in (stock, fusedm):
+            cache = ArraysCache(size=2)
+            cache.lengths = mx.array([12])
+            y1 = layer(xp, mask, cache)
+            cache.lengths = None
             y2 = layer(xd, None, cache)
             mx.eval(y1, y2, cache[0], cache[1])
             outs.append((y1, y2, cache[0], cache[1]))
@@ -341,7 +393,7 @@ def _probe_whole_layer_parity(gdn_cls, nn, gated_delta_update) -> bool:
         return False
 
 
-def _fuse_one(gdn: Any) -> None:
+def _fuse_one(gdn: Any, dtypes: frozenset = frozenset({mx.bfloat16})) -> None:
     parts = _proj_modules(gdn)
     weight, scales, biases = _concat_params(parts)
     mx.eval(weight, scales, biases)
@@ -359,6 +411,7 @@ def _fuse_one(gdn: Any) -> None:
     fused.biases = biases
     gdn.in_proj_fused = fused
     gdn._rapid_gdn_bounds = bounds
+    gdn._rapid_gdn_dtypes = dtypes
     del gdn.in_proj_qkv
     del gdn.in_proj_z
     del gdn.in_proj_b
@@ -370,13 +423,25 @@ def fuse_gdn_in_proj(model: Any) -> int:
 
     Returns the number of fused ``GatedDeltaNet`` instances (0 when
     disabled via ``RAPID_MLX_GDN_IN_PROJ_FUSION=0``, mlx-lm is
-    unavailable, nothing is eligible, or an install-time parity probe
-    fails). Non-GDN models are a cheap no-op. Idempotent: fused instances
+    unavailable, nothing is eligible, or the install-time parity probes
+    fail). Non-GDN models are a cheap no-op. Idempotent: fused instances
     carry ``in_proj_fused`` and are skipped by the structural gate.
+    Never raises — an optional optimization must not be able to fail a
+    model load, so any unexpected error degrades to "model left stock"
+    (or, past the commit point, to a partially-fused model whose fused
+    layers are individually parity-proven and fully functional).
     """
     if os.environ.get("RAPID_MLX_GDN_IN_PROJ_FUSION", "1") == "0":
         logger.info("[gdn_fusion] disabled via RAPID_MLX_GDN_IN_PROJ_FUSION=0")
         return 0
+    try:
+        return _install(model)
+    except Exception:  # noqa: BLE001 — never let the optimization fail a load
+        logger.warning("[gdn_fusion] install failed; model left as-is", exc_info=True)
+        return 0
+
+
+def _install(model: Any) -> int:
     imports = _gdn_imports()
     if imports is None:
         return 0
@@ -392,12 +457,27 @@ def fuse_gdn_in_proj(model: Any) -> int:
     if not targets:
         return 0
 
-    if not _probe_projection_parity(targets[0]):
+    # Phase 1 (no mutation): group targets by kernel-dispatch signature
+    # and byte-parity-probe one representative per signature. Parity is
+    # dispatch-dependent, so a mixed-precision checkpoint gets each
+    # distinct quartet geometry/quantization probed on its own weights.
+    plans = []
+    sig_cache: dict = {}
+    for gdn in targets:
+        sig = _signature(gdn)
+        if sig not in sig_cache:
+            sig_cache[sig] = _probe_projection_parity(gdn)
+        dtypes = sig_cache[sig]
+        if dtypes:
+            plans.append((gdn, dtypes))
+    if not plans:
         logger.warning(
-            "[gdn_fusion] projection byte-parity probe failed on this "
-            "mlx/hardware configuration; leaving model stock"
+            "[gdn_fusion] projection byte-parity probe failed for every "
+            "quartet signature on this mlx/hardware configuration; "
+            "leaving model stock"
         )
         return 0
+
     _ensure_call_patch(gdn_cls, nn, gated_delta_update)
     if not _probe_whole_layer_parity(gdn_cls, nn, gated_delta_update):
         logger.warning(
@@ -406,12 +486,11 @@ def fuse_gdn_in_proj(model: Any) -> int:
         )
         return 0
 
-    for gdn in targets:
-        _fuse_one(gdn)
+    # Phase 2 (commit): plain in-place attribute rewrites per layer.
+    for gdn, dtypes in plans:
+        _fuse_one(gdn, dtypes)
         # Freed projection buffers land in the MLX pool; drain per layer
         # so the load transient stays bounded to one layer's worth.
         mx.clear_cache()
-    logger.info(
-        "[gdn_fusion] in-projection fusion applied: %d GDN layers", len(targets)
-    )
-    return len(targets)
+    logger.info("[gdn_fusion] in-projection fusion applied: %d GDN layers", len(plans))
+    return len(plans)
