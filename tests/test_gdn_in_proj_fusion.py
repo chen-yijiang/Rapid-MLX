@@ -275,7 +275,8 @@ class TestPartialCommit:
             real(gdn, dtypes)
 
         monkeypatch.setattr(gdn_in_proj_fusion, "_fuse_one", fuse_then_boom)
-        assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 0
+        # The true committed count is reported, not 0.
+        assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 1
         # Module-scan order is not guaranteed; exactly one layer was
         # committed before the crash, the other is untouched stock.
         fused_flags = [hasattr(layer, "in_proj_fused") for layer in model.layers]

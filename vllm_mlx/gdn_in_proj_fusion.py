@@ -439,9 +439,11 @@ def fuse_gdn_in_proj(model: Any) -> int:
     fail). Non-GDN models are a cheap no-op. Idempotent: fused instances
     carry ``in_proj_fused`` and are skipped by the structural gate.
     Never raises — an optional optimization must not be able to fail a
-    model load, so any unexpected error degrades to "model left stock"
-    (or, past the commit point, to a partially-fused model whose fused
-    layers are individually parity-proven and fully functional).
+    model load, so any unexpected error before the commit phase degrades
+    to "model left stock" (return 0), and an error during the commit
+    phase degrades to a partially-fused model whose fused layers are
+    individually parity-proven and fully functional — the return value
+    is the number of layers actually committed in every case.
     """
     if os.environ.get("RAPID_MLX_GDN_IN_PROJ_FUSION", "1") == "0":
         logger.info("[gdn_fusion] disabled via RAPID_MLX_GDN_IN_PROJ_FUSION=0")
@@ -494,11 +496,26 @@ def _install(model: Any) -> int:
         )
         return 0
 
-    # Phase 2 (commit): plain in-place attribute rewrites per layer.
-    for gdn, dtypes in plans:
-        _fuse_one(gdn, dtypes)
-        # Freed projection buffers land in the MLX pool; drain per layer
-        # so the load transient stays bounded to one layer's worth.
-        mx.clear_cache()
-    logger.info("[gdn_fusion] in-projection fusion applied: %d GDN layers", len(plans))
-    return len(plans)
+    # Phase 2 (commit): plain in-place attribute rewrites per layer. A
+    # failure here leaves earlier layers fused (each is independently
+    # parity-proven and functional); report the true committed count.
+    committed = 0
+    try:
+        for gdn, dtypes in plans:
+            _fuse_one(gdn, dtypes)
+            committed += 1
+            # Freed projection buffers land in the MLX pool; drain per
+            # layer so the load transient stays bounded to one layer's
+            # worth.
+            mx.clear_cache()
+    except Exception:  # noqa: BLE001 — keep the partially-fused model serving
+        logger.warning(
+            "[gdn_fusion] commit failed after %d/%d layers; the fused "
+            "layers remain active and parity-proven",
+            committed,
+            len(plans),
+            exc_info=True,
+        )
+        return committed
+    logger.info("[gdn_fusion] in-projection fusion applied: %d GDN layers", committed)
+    return committed
