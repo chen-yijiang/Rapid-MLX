@@ -20,7 +20,9 @@ import logging
 import math
 import os
 import re
+import shutil
 import socket
+import stat
 import sys
 import tempfile
 import threading
@@ -751,13 +753,8 @@ _ALLOWED_MEDIA_EXTENSIONS = frozenset(
 )
 
 
-def _has_media_signature(path: Path) -> bool:
+def _has_media_signature(header: bytes) -> bool:
     """Recognize common raster-image/video container signatures."""
-    try:
-        with path.open("rb") as media_file:
-            header = media_file.read(32)
-    except OSError:
-        return False
     if header.startswith(
         (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"GIF87a", b"GIF89a", b"BM")
     ):
@@ -802,25 +799,57 @@ def _resolve_local_media(path: str) -> str | None:
     if not path or len(path) >= 4096:
         return None
     try:
-        candidate = Path(path).expanduser().resolve(strict=False)
+        supplied = Path(path).expanduser()
+        if supplied.is_symlink():
+            return None
+        candidate = supplied.resolve(strict=False)
     except (OSError, RuntimeError):
-        return None
-    if not candidate.is_file():
         return None
     if candidate.suffix.lower() not in _ALLOWED_MEDIA_EXTENSIONS:
         return None
-    if not _has_media_signature(candidate):
-        return None
     root = _local_media_root()
-    if root is not None:
+    if root is None:
+        return None
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        logger.warning("Refusing media path outside allowed root %s: %s", root, path)
+        return None
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(candidate, flags)
+    except OSError:
+        return None
+    temp_file = None
+    try:
+        opened = Path(f"/dev/fd/{fd}").resolve()
         try:
-            candidate.relative_to(root)
+            opened.relative_to(root)
         except ValueError:
-            logger.warning(
-                "Refusing media path outside allowed root %s: %s", root, path
-            )
             return None
-    return str(candidate)
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size > MAX_VIDEO_SIZE:
+            return None
+        header = os.read(fd, 32)
+        if not _has_media_signature(header):
+            return None
+        os.lseek(fd, 0, os.SEEK_SET)
+        temp_file = tempfile.NamedTemporaryFile(
+            suffix=candidate.suffix.lower(), delete=False
+        )
+        with os.fdopen(os.dup(fd), "rb") as source:
+            shutil.copyfileobj(source, temp_file, length=1024 * 1024)
+        temp_file.close()
+        return _temp_manager.register(temp_file.name)
+    except Exception:
+        if temp_file is not None:
+            temp_file.close()
+            if os.path.exists(temp_file.name):
+                os.unlink(temp_file.name)
+        raise
+    finally:
+        os.close(fd)
 
 
 def download_image(url: str, timeout: int = 30, max_size: int = MAX_IMAGE_SIZE) -> str:

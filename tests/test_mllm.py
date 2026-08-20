@@ -26,7 +26,7 @@ def small_mllm_model():
 
 
 @pytest.fixture
-def test_image_path(tmp_path):
+def test_image_path(tmp_path, monkeypatch):
     """Download a real image from Wikimedia Commons for tests."""
     pytest.importorskip("PIL")
     import io
@@ -43,17 +43,19 @@ def test_image_path(tmp_path):
         img = Image.open(io.BytesIO(response.content))
         path = tmp_path / "test_image.jpg"
         img.save(path)
+        monkeypatch.setenv("RAPID_MLX_MEDIA_ROOT", str(tmp_path))
         return str(path)
     except Exception:
         # Fallback to synthetic image if download fails
         img = Image.new("RGB", (320, 240), color="blue")
         path = tmp_path / "test_image.jpg"
         img.save(path)
+        monkeypatch.setenv("RAPID_MLX_MEDIA_ROOT", str(tmp_path))
         return str(path)
 
 
 @pytest.fixture
-def test_video_path(tmp_path):
+def test_video_path(tmp_path, monkeypatch):
     """Download a real video from Wikimedia Commons for tests."""
     import requests
 
@@ -69,6 +71,7 @@ def test_video_path(tmp_path):
         with open(path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+        monkeypatch.setenv("RAPID_MLX_MEDIA_ROOT", str(tmp_path))
         return str(path)
     except Exception:
         # Fallback to synthetic video if download fails
@@ -86,6 +89,7 @@ def test_video_path(tmp_path):
             out.write(frame)
 
         out.release()
+        monkeypatch.setenv("RAPID_MLX_MEDIA_ROOT", str(tmp_path))
         return str(path)
 
 
@@ -193,7 +197,7 @@ class TestImageProcessing:
         from vllm_mlx.models.mllm import process_image_input
 
         result = process_image_input(test_image_path)
-        assert result == test_image_path
+        assert Path(result).read_bytes() == Path(test_image_path).read_bytes()
 
     def test_process_image_input_dict_format(self, test_image_path):
         """Test processing image in dict format."""
@@ -268,7 +272,7 @@ class TestVideoProcessing:
         from vllm_mlx.models.mllm import process_video_input
 
         result = process_video_input(test_video_path)
-        assert result == test_video_path
+        assert Path(result).read_bytes() == Path(test_video_path).read_bytes()
 
     def test_process_video_input_dict_format(self, test_video_path):
         """Test processing video in dict format."""
@@ -539,7 +543,9 @@ class TestMediaSecurity:
         outside.write_bytes(b"\xff\xd8\xff\xe0")
 
         monkeypatch.setenv("RAPID_MLX_MEDIA_ROOT", str(root))
-        assert process_image_input(str(good)) == str(good)
+        copied = Path(process_image_input(str(good)))
+        assert copied != good
+        assert copied.read_bytes() == good.read_bytes()
         with pytest.raises(ValueError):
             process_image_input(str(outside))  # inside tmp but outside root
         with pytest.raises(ValueError):
@@ -558,15 +564,18 @@ class TestMediaSecurity:
         with pytest.raises(ValueError, match="MEDIA_ROOT is invalid"):
             process_video_input(str(image))
 
-    def test_local_media_returns_resolved_path(self, tmp_path):
+    def test_local_media_rejects_symlink(self, monkeypatch, tmp_path):
         from vllm_mlx.models.mllm import process_image_input, process_video_input
 
         image = tmp_path / "image.jpg"
         image.write_bytes(b"\xff\xd8\xff\xe0")
         link = tmp_path / "link.jpg"
         link.symlink_to(image)
-        assert process_image_input(str(link)) == str(image.resolve())
-        assert process_video_input(str(link)) == str(image.resolve())
+        monkeypatch.setenv("RAPID_MLX_MEDIA_ROOT", str(tmp_path))
+        with pytest.raises(ValueError):
+            process_image_input(str(link))
+        with pytest.raises(ValueError):
+            process_video_input(str(link))
 
     def test_disable_local_media_paths_env(self, monkeypatch, tmp_path):
         from vllm_mlx.models.mllm import process_image_input, process_video_input
