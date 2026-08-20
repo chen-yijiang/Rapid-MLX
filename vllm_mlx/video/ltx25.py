@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import signal
 import subprocess
+import tarfile
+import tempfile
 import threading
 from pathlib import Path
 
@@ -52,7 +55,7 @@ def resolve_ltx25_runtime() -> str | None:
 
 
 def _runtime_revision(executable: str) -> str | None:
-    """Verify the documented workspace install is pinned and unmodified."""
+    """Verify the documented workspace points at the pinned Git revision."""
     path = Path(executable)
     try:
         repository = path.parents[2]
@@ -74,15 +77,44 @@ def _runtime_revision(executable: str) -> str | None:
             )
 
         result = git("rev-parse", "HEAD")
-        # The runtime packages are editable workspace installs, so verifying
-        # every tracked source and lockfile is clean verifies the code Python
-        # imports. Reject a missing/untracked lockfile as an incomplete clone.
-        if git("status", "--porcelain=v1", "--untracked-files=no").stdout.strip():
-            return None
         git("ls-files", "--error-unmatch", "uv.lock")
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
     return result.stdout.strip()
+
+
+def _materialize_runtime(repository: Path, destination: Path) -> None:
+    """Extract only tracked files from the audited commit into a fresh tree."""
+    try:
+        archive = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "archive",
+                "--format=tar",
+                LTX25_RUNTIME_COMMIT,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        ).stdout
+        root = destination.resolve()
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as source:
+            members = source.getmembers()
+            for member in members:
+                target = (destination / member.name).resolve()
+                if not target.is_relative_to(root) or not (
+                    member.isfile() or member.isdir()
+                ):
+                    raise LTX25BackendError(
+                        "The pinned LTX-2.5 source archive contains an unsafe entry."
+                    )
+            source.extractall(destination, members=members)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise LTX25BackendError(
+            "The pinned LTX-2.5 source snapshot could not be materialized."
+        ) from exc
 
 
 def _generation_timeout_seconds() -> int:
@@ -130,7 +162,12 @@ class LTX25VideoEngine:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 return
-            process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+            try:
+                process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                raise LTX25BackendError(
+                    "The LTX-2.5 runtime process group could not be reaped."
+                ) from exc
 
     def stop(self) -> None:
         """Stop an active external generation during bounded shutdown."""
@@ -166,6 +203,13 @@ class LTX25VideoEngine:
                 "LTX-2.5 support requires uv to build its pinned isolated runtime."
             )
         timeout = _generation_timeout_seconds()
+        snapshot = tempfile.TemporaryDirectory(prefix="rapidmlx-ltx25-runtime-")
+        try:
+            snapshot_path = Path(snapshot.name)
+            _materialize_runtime(repository, snapshot_path)
+        except Exception:
+            snapshot.cleanup()
+            raise
 
         command = [
             str(Path(uv).absolute()),
@@ -173,7 +217,7 @@ class LTX25VideoEngine:
             "--isolated",
             "--frozen",
             "--project",
-            str(repository),
+            str(snapshot_path),
             "python",
             "-c",
             _STDIN_PROMPT_RUNNER,
@@ -219,14 +263,12 @@ class LTX25VideoEngine:
                 process = subprocess.Popen(
                     command,
                     stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     text=True,
                     start_new_session=True,
                 )
                 self._process = process
-            # Captured output is deliberately discarded: upstream diagnostics
-            # are not a safe public/logging channel for request data.
             process.communicate(input=prompt, timeout=timeout)
             if process.returncode:
                 raise LTX25BackendError(
@@ -247,6 +289,7 @@ class LTX25VideoEngine:
             with self._process_lock:
                 if self._process is process:
                     self._process = None
+            snapshot.cleanup()
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise LTX25BackendError(
                 "LTX-2.5 generation completed without an MP4 output."

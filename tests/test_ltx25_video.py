@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -93,27 +94,50 @@ def test_ltx25_runtime_rejects_unpinned_checkout(
     assert ltx25.resolve_ltx25_runtime() is None
 
 
-def test_ltx25_runtime_rejects_dirty_checkout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_ltx25_materialization_excludes_untracked_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = tmp_path / "runtime"
-    runtime = repository / ".venv" / "bin" / "ltx-2-mlx"
-    runtime.parent.mkdir(parents=True)
-    runtime.write_text("#!/bin/sh\n")
-    runtime.chmod(0o755)
-    (repository / ".git").mkdir()
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    tracked = repository / "tracked.py"
+    tracked.write_text("safe = True\n")
+    (repository / "uv.lock").write_text("version = 1\n")
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "tracked.py", "uv.lock"], check=True
+    )
+    tree = subprocess.run(
+        ["git", "-C", str(repository), "write-tree"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    commit = subprocess.run(
+        ["git", "-C", str(repository), "commit-tree", tree, "-m", "fixture"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(repository), "update-ref", "HEAD", commit], check=True
+    )
+    (repository / "untracked.py").write_text("raise RuntimeError('unsafe')\n")
+    destination = tmp_path / "snapshot"
+    destination.mkdir()
 
-    def git(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
-        if "rev-parse" in command:
-            stdout = ltx25.LTX25_RUNTIME_COMMIT + "\n"
-        elif "status" in command:
-            stdout = " M packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/cli.py\n"
-        else:
-            raise AssertionError(command)
-        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+    monkeypatch.setattr(ltx25, "LTX25_RUNTIME_COMMIT", commit)
+    ltx25._materialize_runtime(repository, destination)
 
-    monkeypatch.setattr(ltx25.subprocess, "run", git)
-    assert ltx25._runtime_revision(str(runtime)) is None
+    assert (destination / "tracked.py").read_text() == "safe = True\n"
+    assert not (destination / "untracked.py").exists()
 
 
 def test_serve_routes_ltx25_model_to_specific_preflight(
@@ -151,6 +175,7 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
     runtime_python.chmod(0o755)
     monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
     monkeypatch.setattr(ltx25.shutil, "which", lambda _: "/trusted/uv")
+    monkeypatch.setattr(ltx25, "_materialize_runtime", lambda *args: None)
 
     class Process:
         returncode = 0
@@ -177,16 +202,15 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
     )
 
     command, run_kwargs = calls[0]
-    assert command[:7] == [
+    assert command[:5] == [
         "/trusted/uv",
         "run",
         "--isolated",
         "--frozen",
         "--project",
-        str(tmp_path),
-        "python",
     ]
-    assert command[7] == "-c"
+    assert Path(command[5]).name.startswith("rapidmlx-ltx25-runtime-")
+    assert command[6:8] == ["python", "-c"]
     assert command[9:11] == ["generate", "--model"]
     assert "--distilled" in command
     assert "--low-ram" in command
@@ -194,8 +218,8 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
     assert command[command.index("--image") + 1 :] == [str(image), "0", "0.6"]
     assert run_kwargs == {
         "stdin": subprocess.PIPE,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
         "text": True,
         "start_new_session": True,
     }
@@ -214,6 +238,7 @@ def test_ltx25_engine_reports_subprocess_failure_without_leaking_details(
     runtime.with_name("python").chmod(0o755)
     monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
     monkeypatch.setattr(ltx25.shutil, "which", lambda _: "/trusted/uv")
+    monkeypatch.setattr(ltx25, "_materialize_runtime", lambda *args: None)
 
     class Process:
         returncode = 1
@@ -256,6 +281,7 @@ def test_ltx25_timeout_terminates_process(
     runtime.with_name("python").chmod(0o755)
     monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
     monkeypatch.setattr(ltx25.shutil, "which", lambda _: "/trusted/uv")
+    monkeypatch.setattr(ltx25, "_materialize_runtime", lambda *args: None)
     terminated = []
 
     class Process:
