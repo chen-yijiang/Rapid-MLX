@@ -268,6 +268,34 @@ def test_oversized_header_length_is_rejected_without_reading_it(tmp_path) -> Non
     assert ImageGenerationEngine._read_safetensors_header(str(shard)) is None
 
 
+def test_header_length_past_the_8_byte_prefix_is_rejected(tmp_path) -> None:
+    # header_len is measured from AFTER the 8-byte length prefix, so the
+    # budget is file_size - 8, not the raw file size. A file truncated by up
+    # to 8 bytes (only trailing JSON padding lost) must still be rejected
+    # rather than appear to "fit".
+    shard = tmp_path / "0.safetensors"
+    payload = json.dumps({"encoder.embed_tokens.weight": {"shape": [1, 1]}}).encode()
+    shard.write_bytes(struct.pack("<Q", len(payload)) + payload)
+    shard.write_bytes(shard.read_bytes()[:-1])  # drop the last byte
+    assert ImageGenerationEngine._read_safetensors_header(str(shard)) is None
+
+
+def test_malformed_shapes_are_rejected_despite_a_matching_last_dimension(
+    tmp_path, monkeypatch
+) -> None:
+    # A bare `shape[-1] == 3584` check would accept nonsense like a rank-1
+    # shape, a zero dimension, or a non-integer entry as long as the last
+    # element happened to equal 3584. A genuine embedding shape is rank-2
+    # with two positive integers.
+    for index, bad_shape in enumerate(([3584], [0, 3584], ["x", 3584], [True, 3584])):
+        snapshot = _make_snapshot(
+            tmp_path / str(index), {"shape": bad_shape, "dtype": "F16"}
+        )
+        engine = _engine_for_family_check(monkeypatch, snapshot)
+        with pytest.raises(ImageRuntimeError, match="quantized text encoder"):
+            engine._verify_text_encoder_not_quantized()
+
+
 def test_shard_reached_via_symlink_is_accepted(tmp_path, monkeypatch) -> None:
     # A Hugging Face hub cache's snapshot files ARE symlinks into a sibling
     # blobs/ directory — the real shape this check runs against in

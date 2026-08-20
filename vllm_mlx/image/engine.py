@@ -387,6 +387,19 @@ class ImageGenerationEngine:
         header = self._read_safetensors_header(shard_path) if shard_path else None
         entry = header.get(weight_key) if header else None
         shape = entry.get("shape") if isinstance(entry, dict) else None
+        # A genuine embedding shape is rank-2: [vocab, hidden]. Requiring
+        # that (not just "the last element happens to equal 3584") rejects
+        # malformed entries like ``[3584]`` (rank-1), ``[0, 3584]``, or
+        # ``["x", 3584]`` that would otherwise slip past a bare
+        # ``shape[-1] == ...`` check despite being obvious nonsense.
+        shape_is_valid_rank2 = (
+            isinstance(shape, list)
+            and len(shape) == 2
+            and all(
+                isinstance(dim, int) and not isinstance(dim, bool) and dim > 0
+                for dim in shape
+            )
+        )
         # Fail CLOSED, not open, once the index has named a shard for this
         # key: the index is an explicit claim that the tensor lives there
         # with some shape, so an unresolvable shard, an unreadable header, or
@@ -395,8 +408,7 @@ class ImageGenerationEngine:
         if (
             shard_path is None
             or header is None
-            or not isinstance(shape, list)
-            or not shape
+            or not shape_is_valid_rank2
             or shape[-1] != self._QWEN_TEXT_ENCODER_HIDDEN_SIZE
         ):
             self._raise_quantized_text_encoder_error(
@@ -479,7 +491,12 @@ class ImageGenerationEngine:
                 # read gigabytes into memory before ``json.loads`` even runs.
                 if header_len <= 0 or header_len > cls._SAFETENSORS_HEADER_MAX_BYTES:
                     return None
-                if header_len > Path(path).stat().st_size:
+                # The 8-byte length prefix itself isn't part of what
+                # ``header_len`` counts, so the budget for the header bytes
+                # is the file size MINUS those 8 bytes — comparing against
+                # the raw file size let a file truncated by up to 8 bytes
+                # (e.g. only trailing padding lost) still "fit".
+                if header_len > Path(path).stat().st_size - 8:
                     return None
                 header = json.loads(fh.read(header_len).decode("utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError, struct.error):
