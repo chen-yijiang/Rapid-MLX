@@ -9,6 +9,7 @@ struct Campaign: Equatable, Sendable {
         case pullModel(alias: String, hfRepo: String?)
     }
     enum ActionState: Equatable, Sendable {
+        case checking
         case idle
         case inProgress
         case completed
@@ -16,6 +17,7 @@ struct Campaign: Equatable, Sendable {
         var isEnabled: Bool { self == .idle }
         func label(fallback: String) -> String {
             switch self {
+            case .checking: "Checking…"
             case .idle: fallback
             case .inProgress: "Downloading…"
             case .completed: "Downloaded"

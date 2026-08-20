@@ -403,12 +403,17 @@ struct ContentView: View {
     private func campaignActionState(for campaign: Campaign) -> Campaign.ActionState {
         switch campaign.action {
         case .pullModel(let alias, _):
-            guard let job = downloads.job(for: alias) else { return .idle }
-            switch job.status {
-            case .running: return .inProgress
-            case .completed: return .completed
-            case .failed, .cancelled: return .idle
+            if let job = downloads.job(for: alias) {
+                switch job.status {
+                case .running: return .inProgress
+                case .completed: return .completed
+                case .failed, .cancelled: break
+                }
             }
+            if catalogEntries.first(where: { $0.alias == alias })?.cached == true {
+                return .completed
+            }
+            return catalogLoaded ? .idle : .checking
         }
     }
 

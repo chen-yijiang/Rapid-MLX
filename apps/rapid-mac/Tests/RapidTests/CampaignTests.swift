@@ -21,6 +21,8 @@ struct CampaignTests {
 
     @Test("campaign action copy reflects transient download state")
     func actionPresentation() {
+        #expect(!Campaign.ActionState.checking.isEnabled)
+        #expect(Campaign.ActionState.checking.label(fallback: "Download model") == "Checking…")
         #expect(Campaign.ActionState.idle.isEnabled)
         #expect(Campaign.ActionState.idle.label(fallback: "Download model") == "Download model")
         #expect(!Campaign.ActionState.inProgress.isEnabled)
