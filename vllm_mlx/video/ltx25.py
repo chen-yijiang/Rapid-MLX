@@ -281,9 +281,15 @@ class LTX25VideoEngine:
             raise LTX25BackendError(
                 "LTX-2.5 generation exceeded its configured time limit."
             ) from exc
-        except OSError as exc:
+        except LTX25BackendError:
+            raise
+        except BaseException as exc:
+            if process is not None and process.poll() is None:
+                self._terminate_process(process)
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             raise LTX25BackendError(
-                "LTX-2.5 generation could not start its isolated runtime."
+                "LTX-2.5 generation failed while running its isolated runtime."
             ) from exc
         finally:
             with self._process_lock:

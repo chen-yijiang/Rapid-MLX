@@ -318,6 +318,52 @@ def test_ltx25_timeout_terminates_process(
     assert engine._process is None
 
 
+def test_ltx25_unexpected_communication_error_terminates_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / ".venv" / "bin" / "ltx-2-mlx"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("#!/bin/sh\n")
+    runtime.chmod(0o755)
+    monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
+    monkeypatch.setattr(ltx25.shutil, "which", lambda _: "/trusted/uv")
+    monkeypatch.setattr(ltx25, "_materialize_runtime", lambda *args: None)
+    terminated = []
+
+    class Process:
+        returncode = None
+
+        def communicate(self, *, input: str, timeout: int) -> None:
+            raise UnicodeEncodeError("utf-8", "bad surrogate \ud800", 14, 15, "invalid")
+
+        def poll(self) -> None:
+            return None
+
+    process = Process()
+    monkeypatch.setattr(ltx25.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        ltx25.LTX25VideoEngine,
+        "_terminate_process",
+        staticmethod(lambda candidate: terminated.append(candidate)),
+    )
+    engine = ltx25.LTX25VideoEngine("MrMofer/ltx-2.5-mlx-q8")
+
+    with pytest.raises(ltx25.LTX25BackendError, match="isolated runtime"):
+        engine.generate(
+            prompt="bad surrogate \ud800",
+            output_path=tmp_path / "result.mp4",
+            width=704,
+            height=480,
+            num_frames=97,
+            fps=24,
+            seed=7,
+            image=None,
+        )
+
+    assert terminated == [process]
+    assert engine._process is None
+
+
 def test_ltx25_invalid_timeout_does_not_spawn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
