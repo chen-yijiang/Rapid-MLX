@@ -51,6 +51,13 @@ cloud metadata address `169.254.169.254`), multicast, or reserved addresses —
 on both the initial request and every redirect hop. Local image/video paths
 are accepted only when they are regular files with a media extension.
 
+This is an intentional security tightening for local paths: extensionless
+files and formats outside the documented image/video allowlist are rejected.
+Rename supported media to a conventional extension, or convert it first
+(`.jpg`, `.png`, `.webp`, `.avif`, `.mp4`, `.mov`, etc.). SVG is not accepted
+as raster image input. Deployments that need stricter confinement should set
+`RAPID_MLX_MEDIA_ROOT`; network-facing deployments should disable local paths.
+
 ### Admission and Batching Options
 
 | Option | Description | Default |

@@ -559,7 +559,7 @@ def _is_blocked_address(ip_str: str) -> bool:
     )
 
 
-def _safe_remote_target(url: str) -> tuple[str, str]:
+def _safe_remote_target(url: str) -> tuple[str, tuple[str, ...]]:
     """Reject remote media URLs whose effective target is a blocked host.
 
     This closes the SSRF primitive on user-supplied image/video URLs: the
@@ -605,7 +605,7 @@ def _safe_remote_target(url: str) -> tuple[str, str]:
         raise RemoteMediaFetchError(
             f"Remote media host resolved no addresses: {host!r}"
         )
-    return host, addresses[0]
+    return host, tuple(addresses)
 
 
 def _assert_safe_remote_url(url: str) -> None:
@@ -653,27 +653,37 @@ def _guarded_request(
     seen = {current}
     try:
         for _ in range(6):  # initial request + up to 5 validated redirects
-            hostname, address = _safe_remote_target(current)
+            hostname, addresses = _safe_remote_target(current)
             parsed = urlparse(current)
-            pinned = _pinned_url(current, address)
             request_headers = dict(headers)
             default_port = 443 if parsed.scheme == "https" else 80
+            host_header = f"[{hostname}]" if ":" in hostname else hostname
             request_headers["Host"] = (
-                hostname
+                host_header
                 if parsed.port in (None, default_port)
-                else f"{hostname}:{parsed.port}"
+                else f"{host_header}:{parsed.port}"
             )
             if parsed.scheme == "https":
                 session.mount("https://", _PinnedHTTPSAdapter(hostname))
-            response = session.request(
-                method,
-                pinned,
-                timeout=timeout,
-                headers=request_headers,
-                stream=stream,
-                allow_redirects=False,
-                verify=True,
-            )
+            response = None
+            last_error = None
+            for address in addresses:
+                try:
+                    response = session.request(
+                        method,
+                        _pinned_url(current, address),
+                        timeout=timeout,
+                        headers=request_headers,
+                        stream=stream,
+                        allow_redirects=False,
+                        verify=True,
+                    )
+                    break
+                except requests.RequestException as exc:
+                    last_error = exc
+            if response is None:
+                assert last_error is not None
+                raise last_error
             if response.is_redirect or response.is_permanent_redirect:
                 location = response.headers.get("Location")
                 response.close()
@@ -725,6 +735,7 @@ _ALLOWED_MEDIA_EXTENSIONS = frozenset(
         ".tiff",
         ".heic",
         ".heif",
+        ".avif",
         # video
         ".mp4",
         ".webm",

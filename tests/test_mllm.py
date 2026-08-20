@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import requests
 
 # Skip all tests if not on Apple Silicon
 pytestmark = pytest.mark.skipif(
@@ -424,15 +425,86 @@ class TestMediaSecurity:
         assert requested["response_closed"] is True
         assert requested["session_closed"] is True
 
+    def test_guarded_request_retries_all_validated_addresses(self, monkeypatch):
+        from vllm_mlx.models.mllm import _close_guarded_response, _guarded_request
+
+        attempted = []
+
+        class _Response:
+            is_redirect = False
+            is_permanent_redirect = False
+
+            def close(self):
+                pass
+
+        class _FakeSession:
+            def request(self, method, url, **kwargs):
+                attempted.append(url)
+                if "93.184.216.34" in url:
+                    raise requests.ConnectionError("first address unavailable")
+                return _Response()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("vllm_mlx.models.mllm.requests.Session", _FakeSession)
+        monkeypatch.setattr(
+            "vllm_mlx.models.mllm.socket.getaddrinfo",
+            self._fake_getaddrinfo({"cdn.example": ["93.184.216.34", "93.184.216.35"]}),
+        )
+        response = _guarded_request(
+            "GET", "http://cdn.example/a.jpg", timeout=5, headers={}, stream=True
+        )
+        assert attempted == [
+            "http://93.184.216.34/a.jpg",
+            "http://93.184.216.35/a.jpg",
+        ]
+        _close_guarded_response(response)
+
+    def test_guarded_request_brackets_ipv6_host_header(self, monkeypatch):
+        from vllm_mlx.models.mllm import _close_guarded_response, _guarded_request
+
+        captured = {}
+
+        class _Response:
+            is_redirect = False
+            is_permanent_redirect = False
+
+            def close(self):
+                pass
+
+        class _FakeSession:
+            def request(self, method, url, **kwargs):
+                captured.update(url=url, headers=kwargs["headers"])
+                return _Response()
+
+            def close(self):
+                pass
+
+        address = "2606:4700:4700::1111"
+        monkeypatch.setattr("vllm_mlx.models.mllm.requests.Session", _FakeSession)
+        monkeypatch.setattr(
+            "vllm_mlx.models.mllm.socket.getaddrinfo",
+            self._fake_getaddrinfo({"*": [address]}),
+        )
+        response = _guarded_request(
+            "GET", f"http://[{address}]/a.jpg", timeout=5, headers={}, stream=True
+        )
+        assert captured["headers"]["Host"] == f"[{address}]"
+        assert captured["url"] == f"http://[{address}]/a.jpg"
+        _close_guarded_response(response)
+
     # ---- arbitrary-file-read guard --------------------------------------
 
     def test_local_media_blocks_non_media_extension(self, tmp_path):
-        from vllm_mlx.models.mllm import process_image_input
+        from vllm_mlx.models.mllm import process_image_input, process_video_input
 
         secret = tmp_path / "config.json"
         secret.write_text('{"api_key": "sekrit"}')
         with pytest.raises(ValueError):
             process_image_input(str(secret))
+        with pytest.raises(ValueError):
+            process_video_input(str(secret))
 
     def test_local_media_blocks_etc_passwd(self, monkeypatch, tmp_path):
         from vllm_mlx.models.mllm import process_image_input
@@ -443,7 +515,7 @@ class TestMediaSecurity:
             process_image_input("/etc/passwd")
 
     def test_local_media_confined_to_media_root(self, monkeypatch, tmp_path):
-        from vllm_mlx.models.mllm import process_image_input
+        from vllm_mlx.models.mllm import process_image_input, process_video_input
 
         root = tmp_path / "media"
         root.mkdir()
@@ -459,33 +531,40 @@ class TestMediaSecurity:
             process_image_input(str(outside))  # inside tmp but outside root
         with pytest.raises(ValueError):
             process_image_input(str(root / ".." / "outside.jpg"))  # .. escape
+        with pytest.raises(ValueError):
+            process_video_input(str(outside))
 
     def test_local_media_invalid_root_fails_closed(self, monkeypatch, tmp_path):
-        from vllm_mlx.models.mllm import process_image_input
+        from vllm_mlx.models.mllm import process_image_input, process_video_input
 
         image = tmp_path / "image.jpg"
         image.write_bytes(b"\xff\xd8\xff\xe0")
         monkeypatch.setenv("RAPID_MLX_MEDIA_ROOT", str(tmp_path / "missing"))
         with pytest.raises(ValueError, match="MEDIA_ROOT is invalid"):
             process_image_input(str(image))
+        with pytest.raises(ValueError, match="MEDIA_ROOT is invalid"):
+            process_video_input(str(image))
 
     def test_local_media_returns_resolved_path(self, tmp_path):
-        from vllm_mlx.models.mllm import process_image_input
+        from vllm_mlx.models.mllm import process_image_input, process_video_input
 
         image = tmp_path / "image.jpg"
         image.write_bytes(b"\xff\xd8\xff\xe0")
         link = tmp_path / "link.jpg"
         link.symlink_to(image)
         assert process_image_input(str(link)) == str(image.resolve())
+        assert process_video_input(str(link)) == str(image.resolve())
 
     def test_disable_local_media_paths_env(self, monkeypatch, tmp_path):
-        from vllm_mlx.models.mllm import process_image_input
+        from vllm_mlx.models.mllm import process_image_input, process_video_input
 
         img = tmp_path / "ok.jpg"
         img.write_bytes(b"\xff\xd8\xff\xe0")
         monkeypatch.setenv("RAPID_MLX_DISABLE_LOCAL_MEDIA_PATHS", "1")
         with pytest.raises(ValueError):
             process_image_input(str(img))
+        with pytest.raises(ValueError):
+            process_video_input(str(img))
 
 
 # =============================================================================
