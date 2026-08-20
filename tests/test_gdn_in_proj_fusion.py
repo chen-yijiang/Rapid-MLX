@@ -124,7 +124,11 @@ class TestRewriteSemantics:
         gdn = model.layers[0]
         qkv_before = gdn.in_proj_qkv
         assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 2
-        assert gdn.in_proj_fused is qkv_before
+        # Fresh container (failure atomicity): the live in_proj_qkv is
+        # never mutated, but its quantization params carry over.
+        assert gdn.in_proj_fused is not qkv_before
+        assert gdn.in_proj_fused.group_size == qkv_before.group_size
+        assert gdn.in_proj_fused.bits == qkv_before.bits
         for name in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"):
             assert not hasattr(gdn, name)
         assert gdn._rapid_gdn_bounds[-1] == gdn.in_proj_fused.weight.shape[0] * 1
@@ -239,6 +243,41 @@ class TestFailureContainment:
         assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 0
         x = _inputs(2, model.hidden_size)
         _run_all(model, x)
+
+
+class TestPartialCommit:
+    def test_failure_between_layers_leaves_model_functional(self, monkeypatch):
+        # A crash after some layers were committed must leave a model
+        # whose fused layers are correct and whose stock layers are
+        # untouched — outputs byte-identical to the unfused model.
+        model = TinyGDNModel()
+        x = _inputs(2, model.hidden_size)
+        before = _run_all(model, x)
+
+        real = gdn_in_proj_fusion._fuse_one
+        calls = {"n": 0}
+
+        def fuse_then_boom(gdn, dtypes=None):
+            # The synthetic whole-layer probe also calls _fuse_one; only
+            # count commits against the real model's layers.
+            if any(gdn is layer for layer in model.layers):
+                if calls["n"] >= 1:
+                    raise RuntimeError("boom on second layer")
+                calls["n"] += 1
+            real(gdn, dtypes)
+
+        monkeypatch.setattr(gdn_in_proj_fusion, "_fuse_one", fuse_then_boom)
+        assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 0
+        # Module-scan order is not guaranteed; exactly one layer was
+        # committed before the crash, the other is untouched stock.
+        fused_flags = [hasattr(l, "in_proj_fused") for l in model.layers]
+        stock_flags = [hasattr(l, "in_proj_qkv") for l in model.layers]
+        assert sum(fused_flags) == 1
+        assert sum(stock_flags) == 1
+        assert all(f != st for f, st in zip(fused_flags, stock_flags))
+        after = _run_all(model, x)
+        for b, a in zip(before, after):
+            assert _bits_equal(b, a)
 
 
 class TestDtypeGate:

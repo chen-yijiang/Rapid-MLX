@@ -104,6 +104,12 @@ def _can_fuse(gdn: Any) -> bool:
             return False
         if p["weight"].dtype != base["weight"].dtype:
             return False
+        # Scale/bias precision decides kernel numerics; a quartet mixing
+        # them cannot share one fused matmul.
+        if p["scales"].dtype != base["scales"].dtype:
+            return False
+        if p["biases"].dtype != base["biases"].dtype:
+            return False
     return True
 
 
@@ -263,6 +269,8 @@ def _signature(gdn: Any) -> tuple:
         base.bits,
         getattr(base, "mode", "affine"),
         base["weight"].dtype,
+        base["scales"].dtype,
+        base["biases"].dtype,
         tuple(tuple(p["weight"].shape) for p in parts),
     )
 
@@ -394,6 +402,19 @@ def _probe_whole_layer_parity(gdn_cls, nn, gated_delta_update) -> bool:
 
 
 def _fuse_one(gdn: Any, dtypes: frozenset = frozenset({mx.bfloat16})) -> None:
+    """Rewrite one layer, failure-atomically.
+
+    Everything that can realistically fail (array concat + eval) happens
+    before any attribute on ``gdn`` changes. The commits are then plain
+    Python attribute writes ordered so that every intermediate state is
+    behaviorally correct: the patched ``__call__`` dispatches on
+    ``in_proj_fused``, which is set only after the fused container and
+    its bounds/dtype gates are complete; the stock projections are
+    deleted last (an interruption there merely leaks their buffers until
+    the next ``mx.clear_cache``).
+    """
+    import copy
+
     parts = _proj_modules(gdn)
     weight, scales, biases = _concat_params(parts)
     mx.eval(weight, scales, biases)
@@ -403,15 +424,17 @@ def _fuse_one(gdn: Any, dtypes: frozenset = frozenset({mx.bfloat16})) -> None:
         total += p["weight"].shape[0]
         bounds.append(total)
 
-    # Reuse in_proj_qkv as the fused container so quantization params and
-    # frozen state carry over; deleting the other three drops their buffers.
-    fused = parts[0]
+    # Fresh container (not the live in_proj_qkv) so the stock path is
+    # never observed with enlarged geometry; quantization params carry
+    # over via the copy, the copied arrays are replaced immediately.
+    fused = copy.deepcopy(parts[0])
     fused.weight = weight
     fused.scales = scales
     fused.biases = biases
-    gdn.in_proj_fused = fused
+
     gdn._rapid_gdn_bounds = bounds
     gdn._rapid_gdn_dtypes = dtypes
+    gdn.in_proj_fused = fused
     del gdn.in_proj_qkv
     del gdn.in_proj_z
     del gdn.in_proj_b
