@@ -2413,7 +2413,13 @@ def _preflight_ddtree_or_exit(args):
     from .model_aliases import resolve_profile
     from .model_profile import ModelProfile
     from .speculative.ddtree import DDTreeUnavailable, check
-    from .speculative.ddtree.eligibility import have_runtime, runtime_probe_error
+    from .speculative.ddtree.eligibility import (
+        have_runtime,
+        runtime_probe_error,
+    )
+    from .speculative.ddtree.eligibility import (
+        report as ddtree_report,
+    )
 
     alias_name = getattr(args, "_original_alias", None) or args.model
     profile = resolve_profile(alias_name)
@@ -2421,11 +2427,25 @@ def _preflight_ddtree_or_exit(args):
         profile = ModelProfile(hf_path=args.model)
     drafter = spec_config.model or profile.ddtree_draft_model
     speculative_tokens = (
-        spec_config.num_speculative_tokens or profile.ddtree_speculative_tokens
+        spec_config.num_speculative_tokens
+        if spec_config.num_speculative_tokens is not None
+        else profile.ddtree_speculative_tokens
     )
-    tree_budget = spec_config.tree_budget or profile.ddtree_tree_budget
+    tree_budget = (
+        spec_config.tree_budget
+        if spec_config.tree_budget is not None
+        else profile.ddtree_tree_budget
+    )
     try:
-        assessment = check(
+        assessment = ddtree_report(
+            profile,
+            alias=alias_name,
+            explicit=True,
+            drafter_model=drafter,
+            speculative_tokens=speculative_tokens,
+            tree_budget=tree_budget,
+        )
+        check(
             profile,
             alias=alias_name,
             explicit=True,
@@ -3439,6 +3459,7 @@ def serve_command(args):
         from .model_aliases import resolve_profile
         from .model_profile import ModelProfile
         from .speculative.dflash import DFlashUnavailable, check
+        from .speculative.dflash.eligibility import report as dflash_report
 
         # ``have_runtime()`` validated at the top-of-function boot-guard
         # tier — see the 0.9.2 dogfood comment near the audio probe.
@@ -3448,7 +3469,13 @@ def serve_command(args):
             _profile = ModelProfile(hf_path=args.model)
         _drafter = _resolve_dflash_drafter_repo(args, _profile)
         try:
-            _assessment = check(
+            _assessment = dflash_report(
+                _profile,
+                alias=_alias_name,
+                explicit=True,
+                drafter_model=_drafter,
+            )
+            check(
                 _profile,
                 alias=_alias_name,
                 explicit=True,

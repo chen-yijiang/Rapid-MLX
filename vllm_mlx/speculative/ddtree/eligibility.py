@@ -67,12 +67,26 @@ def report(
     has_drafter = bool(drafter_model or profile.ddtree_draft_model)
     if not has_drafter:
         reasons.append("DDTree requires an explicit drafter model")
+    effective_tokens = (
+        speculative_tokens
+        if speculative_tokens is not None
+        else profile.ddtree_speculative_tokens
+    )
     has_speculative_tokens = (
-        speculative_tokens or profile.ddtree_speculative_tokens
-    ) is not None
+        isinstance(effective_tokens, int)
+        and not isinstance(effective_tokens, bool)
+        and effective_tokens > 0
+    )
     if not has_speculative_tokens:
         reasons.append("DDTree requires num_speculative_tokens")
-    has_tree_budget = (tree_budget or profile.ddtree_tree_budget) is not None
+    effective_budget = (
+        tree_budget if tree_budget is not None else profile.ddtree_tree_budget
+    )
+    has_tree_budget = (
+        isinstance(effective_budget, int)
+        and not isinstance(effective_budget, bool)
+        and effective_budget > 0
+    )
     if not has_tree_budget:
         reasons.append("DDTree requires tree_budget")
     if explicit and not profile.supports_ddtree:
@@ -88,7 +102,11 @@ def report(
         has_drafter=has_drafter,
         has_speculative_tokens=has_speculative_tokens,
         has_tree_budget=has_tree_budget,
-        recommendation=("verified" if profile.supports_ddtree else "experimental"),
+        recommendation=(
+            "incompatible"
+            if profile.is_moe
+            else ("verified" if profile.supports_ddtree else "experimental")
+        ),
         warnings=tuple(warnings),
         reasons=tuple(reasons),
     )
@@ -110,7 +128,7 @@ def check(
     drafter_model: str | None = None,
     speculative_tokens: int | None = None,
     tree_budget: int | None = None,
-) -> EligibilityReport:
+) -> None:
     r = report(
         profile,
         alias=alias,
@@ -120,7 +138,7 @@ def check(
         tree_budget=tree_budget,
     )
     if not r.reasons:
-        return r
+        return
     header = f"DDTree unavailable for {alias!r}" if alias else "DDTree unavailable"
     bullet = "\n  - ".join(r.reasons)
     eligible = eligible_aliases()

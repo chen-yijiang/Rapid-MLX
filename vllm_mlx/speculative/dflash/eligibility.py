@@ -112,7 +112,11 @@ def report(
         is_moe=profile.is_moe,
         is_4bit=is_4bit,
         has_drafter=has_drafter,
-        recommendation=("verified" if profile.supports_dflash else "experimental"),
+        recommendation=(
+            "incompatible"
+            if profile.is_moe
+            else ("verified" if profile.supports_dflash else "experimental")
+        ),
         warnings=tuple(warnings),
         reasons=tuple(reasons),
     )
@@ -144,12 +148,12 @@ def check(
     *,
     explicit: bool = False,
     drafter_model: str | None = None,
-) -> EligibilityReport:
+) -> None:
     """Raise ``DFlashUnavailable`` with an actionable message if any
     eligibility gate fails. Returns ``None`` on success."""
     r = report(profile, alias=alias, explicit=explicit, drafter_model=drafter_model)
     if not r.reasons:
-        return r
+        return
     header = f"DFlash unavailable for {alias!r}" if alias else "DFlash unavailable"
     bullet = "\n  - ".join(r.reasons)
     eligible = eligible_aliases()

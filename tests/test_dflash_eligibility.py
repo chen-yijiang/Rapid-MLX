@@ -99,7 +99,7 @@ def test_explicit_4bit_main_model_is_experimental() -> None:
         supports_dflash=True,
         dflash_draft_model="z-lab/Qwen3.5-27B-DFlash",
     )
-    r = check(
+    r = report(
         p,
         alias="qwen3.5-27b-4bit",
         explicit=True,
@@ -191,7 +191,7 @@ def test_default_qwen3_5_27b_alias_fails_check_with_4bit_reason() -> None:
 
 def test_unknown_4bit_path_explicit_opt_in_is_allowed() -> None:
     profile = AliasProfile(hf_path="user/Qwen3.5-9B-abliterated-4bit")
-    result = check(
+    result = report(
         profile,
         alias=None,
         explicit=True,
@@ -200,3 +200,7 @@ def test_unknown_4bit_path_explicit_opt_in_is_allowed() -> None:
     assert result.recommendation == "experimental"
     assert result.reasons == ()
     assert "performance-validated" in " ".join(result.warnings)
+
+
+def test_check_preserves_none_success_contract() -> None:
+    assert check(_good_profile(), alias="qwen3.5-27b-8bit") is None
