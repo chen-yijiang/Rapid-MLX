@@ -216,6 +216,10 @@ def estimate_model_bytes(model_name: str) -> int:
     known_image_gib = {
         "flux2-klein-4b": 5.9,
         "z-image-turbo": 5.9,
+        # 6-bit Qwen-Image (20B) — ~23 GB on disk; the transformer +
+        # text-encoder + VAE stay resident. Without this the digit-free
+        # alias falls through to the 4 GB default and mis-admits.
+        "qwen-image": 18.0,
     }
     for token, gib in known_image_gib.items():
         if token in folded:
