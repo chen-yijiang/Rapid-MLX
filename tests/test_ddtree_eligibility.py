@@ -51,7 +51,7 @@ def test_check_rejects_moe_alias() -> None:
         check(p, alias="qwen3.6-35b-8bit")
 
 
-def test_check_rejects_4bit_main_model() -> None:
+def test_explicit_4bit_main_model_is_experimental() -> None:
     p = AliasProfile(
         hf_path="mlx-community/Qwen3.5-9B-4bit",
         supports_ddtree=True,
@@ -59,8 +59,16 @@ def test_check_rejects_4bit_main_model() -> None:
         ddtree_speculative_tokens=16,
         ddtree_tree_budget=24,
     )
-    with pytest.raises(DDTreeUnavailable, match="4-bit"):
-        check(p, alias="qwen3.5-9b-4bit")
+    r = check(
+        p,
+        alias="qwen3.5-9b-4bit",
+        explicit=True,
+        drafter_model=p.ddtree_draft_model,
+        speculative_tokens=16,
+        tree_budget=24,
+    )
+    assert r.reasons == ()
+    assert "4-bit" in " ".join(r.warnings)
 
 
 def test_report_collects_all_failures() -> None:
@@ -72,10 +80,10 @@ def test_report_collects_all_failures() -> None:
     r = report(bad, alias="qwen3.6-35b-4bit")
     joined = " ".join(r.reasons)
     assert "MoE" in joined
-    assert "4-bit" in joined
-    assert "ddtree_draft_model" in joined
-    assert "ddtree_speculative_tokens" in joined
-    assert "ddtree_tree_budget" in joined
+    assert "4-bit" in " ".join(r.warnings)
+    assert "drafter" in joined
+    assert "num_speculative_tokens" in joined
+    assert "tree_budget" in joined
 
 
 def test_qwen3_5_9b_8bit_alias_passes_check() -> None:
@@ -93,7 +101,20 @@ def test_qwen3_5_9b_4bit_alias_fails_with_4bit_reason() -> None:
     assert profile is not None
     with pytest.raises(DDTreeUnavailable) as excinfo:
         check(profile, alias="qwen3.5-9b-4bit")
-    assert "4-bit" in str(excinfo.value)
+    assert "not DDTree-enabled" in str(excinfo.value)
+
+
+def test_unknown_4bit_path_explicit_opt_in_is_allowed() -> None:
+    profile = AliasProfile(hf_path="user/Qwen3.5-9B-abliterated-4bit")
+    result = check(
+        profile,
+        explicit=True,
+        drafter_model="user/Qwen3.5-9B-abliterated-DFlash",
+        speculative_tokens=16,
+        tree_budget=24,
+    )
+    assert result.recommendation == "experimental"
+    assert result.reasons == ()
 
 
 def test_runtime_patches_rope_parameters_without_copying_weights(

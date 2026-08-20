@@ -2411,24 +2411,33 @@ def _preflight_ddtree_or_exit(args):
         sys.exit(2)
 
     from .model_aliases import resolve_profile
+    from .model_profile import ModelProfile
     from .speculative.ddtree import DDTreeUnavailable, check
     from .speculative.ddtree.eligibility import have_runtime, runtime_probe_error
 
     alias_name = getattr(args, "_original_alias", None) or args.model
     profile = resolve_profile(alias_name)
     if profile is None:
-        print(
-            f"\n  Error: DDTree requires a known alias, got "
-            f"{alias_name!r}. DDTree eligibility is recorded per-alias "
-            f"in aliases.json; ad-hoc HuggingFace paths can't be "
-            f"validated. Try ``rapid-mlx info qwen3.5-9b-8bit``.\n"
-        )
-        sys.exit(1)
+        profile = ModelProfile(hf_path=args.model)
+    drafter = spec_config.model or profile.ddtree_draft_model
+    speculative_tokens = (
+        spec_config.num_speculative_tokens or profile.ddtree_speculative_tokens
+    )
+    tree_budget = spec_config.tree_budget or profile.ddtree_tree_budget
     try:
-        check(profile, alias=alias_name)
+        assessment = check(
+            profile,
+            alias=alias_name,
+            explicit=True,
+            drafter_model=drafter,
+            speculative_tokens=speculative_tokens,
+            tree_budget=tree_budget,
+        )
     except DDTreeUnavailable as e:
         print(f"\n  Error: {e}\n")
         sys.exit(1)
+    for warning in assessment.warnings:
+        print(f"\n  ⚠ Experimental DDTree: {warning}.\n")
     if not have_runtime():
         probe_error = runtime_probe_error()
         detail = f" Probe failure: {probe_error}." if probe_error else ""
@@ -2441,11 +2450,9 @@ def _preflight_ddtree_or_exit(args):
 
     args._ddtree_alias_name = alias_name
     args._ddtree_profile = profile
-    args._ddtree_drafter_repo = spec_config.model or profile.ddtree_draft_model
-    args._ddtree_speculative_tokens = (
-        spec_config.num_speculative_tokens or profile.ddtree_speculative_tokens
-    )
-    args._ddtree_tree_budget = spec_config.tree_budget or profile.ddtree_tree_budget
+    args._ddtree_drafter_repo = drafter
+    args._ddtree_speculative_tokens = speculative_tokens
+    args._ddtree_tree_budget = tree_budget
     return alias_name, profile
 
 
@@ -3430,6 +3437,7 @@ def serve_command(args):
     # aliases.json + checks the module spec); no model load yet.
     if args.enable_dflash:
         from .model_aliases import resolve_profile
+        from .model_profile import ModelProfile
         from .speculative.dflash import DFlashUnavailable, check
 
         # ``have_runtime()`` validated at the top-of-function boot-guard
@@ -3437,18 +3445,22 @@ def serve_command(args):
         _alias_name = getattr(args, "_original_alias", None) or args.model
         _profile = resolve_profile(_alias_name)
         if _profile is None:
-            print(
-                f"\n  Error: DFlash requires a known alias, got "
-                f"{_alias_name!r}. DFlash eligibility is recorded per-alias "
-                f"in aliases.json; ad-hoc HuggingFace paths can't be "
-                f"validated. Try ``rapid-mlx info qwen3.5-27b-8bit``.\n"
-            )
-            sys.exit(1)
+            _profile = ModelProfile(hf_path=args.model)
+        _drafter = _resolve_dflash_drafter_repo(args, _profile)
         try:
-            check(_profile, alias=_alias_name)
+            _assessment = check(
+                _profile,
+                alias=_alias_name,
+                explicit=True,
+                drafter_model=_drafter,
+            )
         except DFlashUnavailable as e:
             print(f"\n  Error: {e}\n")
             sys.exit(1)
+        for _warning in _assessment.warnings:
+            print(f"\n  ⚠ Experimental DFlash: {_warning}.\n")
+        args._dflash_profile = _profile
+        args._dflash_drafter_repo = _drafter
         # ``have_runtime()`` is already validated by the boot-guard tier
         # at the top of ``serve_command`` — see the 0.9.2 dogfood comment
         # there. We keep the import + the deeper DFlashUnavailable / alias
@@ -3588,17 +3600,17 @@ def serve_command(args):
         from .speculative.dflash.server import run_dflash_server
 
         _alias_name = getattr(args, "_original_alias", None) or args.model
-        _profile = resolve_profile(_alias_name)
-        assert _profile is not None and _profile.supports_dflash, (
-            f"DFlash profile invariant violated for {_alias_name!r}"
+        _profile = getattr(args, "_dflash_profile", None) or resolve_profile(
+            _alias_name
         )
 
         _check_disk_space(args.model, force=getattr(args, "force_disk_check", False))
         _check_memory_capacity(args.model)
         server._sync_config()
         run_dflash_server(
-            main_model_repo=_profile.hf_path,
-            drafter_repo=_resolve_dflash_drafter_repo(args, _profile),
+            main_model_repo=_profile.hf_path if _profile else args.model,
+            drafter_repo=getattr(args, "_dflash_drafter_repo", None)
+            or _resolve_dflash_drafter_repo(args, _profile),
             host=args.host,
             port=args.port,
             served_model_name=args.served_model_name or _alias_name,
@@ -4065,14 +4077,8 @@ def serve_command(args):
         _profile = getattr(args, "_ddtree_profile", None)
         if _alias_name is None or _profile is None:
             _alias_name, _profile = _preflight_ddtree_or_exit(args)
-        assert _profile is not None and _profile.supports_ddtree, (
-            f"DDTree profile invariant violated for {_alias_name!r}"
-        )
-        assert _profile.ddtree_draft_model is not None
-        assert _profile.ddtree_speculative_tokens is not None
-        assert _profile.ddtree_tree_budget is not None
         run_ddtree_server(
-            main_model_repo=_profile.hf_path,
+            main_model_repo=_profile.hf_path or args.model,
             drafter_repo=getattr(args, "_ddtree_drafter_repo", None)
             or _profile.ddtree_draft_model,
             speculative_tokens=getattr(args, "_ddtree_speculative_tokens", None)
@@ -5948,8 +5954,8 @@ def models_command(args):
         ("Reasoning", reasoning_width),
         ("Spec-Decode", 10),
         ("Suffix Tier", 11),
-        ("DFlash", 7),
-        ("DDTree", 7),
+        ("DFlash", 9),
+        ("DDTree", 9),
         ("Preset", 8),
     )
     width = sum(w for _, w in cols) + len(cols) - 1
@@ -5958,6 +5964,8 @@ def models_command(args):
     print(sep)
     print(header)
     print(sep)
+
+    from .spec_decode.capability import assess_method
 
     for alias in sorted(profiles.keys()):
         p = profiles[alias]
@@ -5978,13 +5986,22 @@ def models_command(args):
             preset = "Suffix" if p.supports_spec_decode else "—"
         if p.is_hybrid and not p.mtp_draft_model:
             preset = "—"
+
         # DFlash column — eligible aliases show ✓, everything else "—" so
         # the visual scan immediately surfaces what supports it. We don't
         # re-run the eligibility gate here (which would also check that
         # mlx-vlm 0.5.0+ is installed) — that's a runtime concern; the
         # registry column is pure declarative state.
-        dflash = "✓" if p.supports_dflash else "—"
-        ddtree = "✓" if p.supports_ddtree else "—"
+        def _tier_mark(profile, method: str) -> str:
+            assessment = assess_method(profile, method)
+            if assessment.recommendation == "verified":
+                return "verified"
+            if assessment.recommendation == "incompatible":
+                return "✗"
+            return "exp"
+
+        dflash = _tier_mark(p, "dflash")
+        ddtree = _tier_mark(p, "ddtree")
         size = format_size(p.hf_path)
         row = (
             f"  {alias:<{alias_width}} {size:<10} {tools:<{tools_width}} "
@@ -5994,6 +6011,7 @@ def models_command(args):
         print(row)
 
     print(sep)
+    print("  Spec tiers: verified = curated; exp = explicit opt-in; ✗ = incompatible")
 
     # R10-C1: audio alias section. Pre-R10 ``rapid-mlx models`` listed
     # zero audio aliases because they don't live in ``aliases.json``
@@ -8248,10 +8266,8 @@ def _print_dflash_status(alias: str, profile) -> None:
     from vllm_mlx.speculative.dflash.eligibility import (
         _looks_like_4bit,
         have_runtime,
-        report,
     )
 
-    r = report(profile, alias=alias)
     inner = 60
     sep = "─" * inner
 
@@ -8289,8 +8305,15 @@ def _print_dflash_status(alias: str, profile) -> None:
         ),
     ]
 
-    eligible = not r.reasons and have_runtime()
-    summary = "✓ eligible" if eligible else "✗ ineligible"
+    capable = not profile.is_moe
+    verified = profile.supports_dflash
+    eligible = verified and have_runtime()
+    if not capable:
+        summary = "✗ incompatible"
+    elif verified:
+        summary = "✓ recommended / verified"
+    else:
+        summary = "⚠ experimental (explicit drafter required)"
 
     top = "┌" + "─" * (inner + 2) + "┐"
     bot = "└" + "─" * (inner + 2) + "┘"
@@ -8307,14 +8330,21 @@ def _print_dflash_status(alias: str, profile) -> None:
             """--speculative-config '{"method":"dflash"}'"""
         )
         print()
+    elif capable:
+        print(
+            f"  Experimental opt-in: rapid-mlx serve {alias} "
+            "--speculative-config "
+            '\'{"method":"dflash","model":"<drafter>"}\''
+        )
+        print("  Performance and output quality are not Rapid-MLX recommendations.")
+        print()
 
 
 def _print_ddtree_status(alias: str, profile) -> None:
     """Render DDTree status for ``rapid-mlx info <alias>``."""
-    from vllm_mlx.speculative.ddtree.eligibility import have_runtime, report
+    from vllm_mlx.speculative.ddtree.eligibility import have_runtime
     from vllm_mlx.speculative.dflash.eligibility import _looks_like_4bit
 
-    r = report(profile, alias=alias)
     inner = 60
     sep = "─" * inner
 
@@ -8372,8 +8402,15 @@ def _print_ddtree_status(alias: str, profile) -> None:
         ),
     ]
 
-    eligible = not r.reasons and have_runtime()
-    summary = "✓ eligible" if eligible else "✗ ineligible"
+    capable = not profile.is_moe
+    verified = profile.supports_ddtree
+    eligible = verified and have_runtime()
+    if not capable:
+        summary = "✗ incompatible"
+    elif verified:
+        summary = "✓ recommended / verified"
+    else:
+        summary = "⚠ experimental (explicit metadata required)"
     top = "┌" + "─" * (inner + 2) + "┐"
     bot = "└" + "─" * (inner + 2) + "┘"
     body = [top, _row(f"DDTree eligibility: {summary}"), _row(sep)]
@@ -8387,6 +8424,15 @@ def _print_ddtree_status(alias: str, profile) -> None:
             f"  Start with: rapid-mlx serve {alias} "
             """--speculative-config '{"method":"ddtree"}'"""
         )
+        print()
+    elif capable:
+        print(
+            f"  Experimental opt-in: rapid-mlx serve {alias} "
+            "--speculative-config "
+            '\'{"method":"ddtree","model":"<drafter>",'
+            '"num_speculative_tokens":16,"tree_budget":24}\''
+        )
+        print("  Performance and output quality are not Rapid-MLX recommendations.")
         print()
 
 

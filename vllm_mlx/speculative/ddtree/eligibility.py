@@ -32,12 +32,23 @@ class EligibilityReport:
     has_drafter: bool
     has_speculative_tokens: bool
     has_tree_budget: bool
+    recommendation: str
+    warnings: tuple[str, ...]
     reasons: tuple[str, ...]
 
 
-def report(profile: AliasProfile, alias: str | None = None) -> EligibilityReport:
+def report(
+    profile: AliasProfile,
+    alias: str | None = None,
+    *,
+    explicit: bool = False,
+    drafter_model: str | None = None,
+    speculative_tokens: int | None = None,
+    tree_budget: int | None = None,
+) -> EligibilityReport:
     reasons: list[str] = []
-    if not profile.supports_ddtree:
+    warnings: list[str] = []
+    if not profile.supports_ddtree and not explicit:
         reasons.append(
             "alias is not DDTree-enabled (set supports_ddtree=true only after "
             "benching this exact target/drafter pair)"
@@ -49,19 +60,26 @@ def report(profile: AliasProfile, alias: str | None = None) -> EligibilityReport
         )
     is_4bit = _looks_like_4bit(profile.hf_path)
     if is_4bit:
-        reasons.append(
+        warnings.append(
             f"main model hf_path={profile.hf_path!r} is 4-bit quantized; "
-            "DDTree on 4-bit is not validated yet"
+            "DDTree on this quantization is not performance-validated"
         )
-    has_drafter = bool(profile.ddtree_draft_model)
-    if profile.supports_ddtree and not has_drafter:
-        reasons.append("supports_ddtree is set but ddtree_draft_model is empty")
-    has_speculative_tokens = profile.ddtree_speculative_tokens is not None
-    if profile.supports_ddtree and not has_speculative_tokens:
-        reasons.append("supports_ddtree is set but ddtree_speculative_tokens is empty")
-    has_tree_budget = profile.ddtree_tree_budget is not None
-    if profile.supports_ddtree and not has_tree_budget:
-        reasons.append("supports_ddtree is set but ddtree_tree_budget is empty")
+    has_drafter = bool(drafter_model or profile.ddtree_draft_model)
+    if not has_drafter:
+        reasons.append("DDTree requires an explicit drafter model")
+    has_speculative_tokens = (
+        speculative_tokens or profile.ddtree_speculative_tokens
+    ) is not None
+    if not has_speculative_tokens:
+        reasons.append("DDTree requires num_speculative_tokens")
+    has_tree_budget = (tree_budget or profile.ddtree_tree_budget) is not None
+    if not has_tree_budget:
+        reasons.append("DDTree requires tree_budget")
+    if explicit and not profile.supports_ddtree:
+        warnings.append(
+            "this target/drafter pair is experimental and has not been "
+            "performance-validated by Rapid-MLX; it may be slower"
+        )
     return EligibilityReport(
         alias=alias,
         supports_ddtree=profile.supports_ddtree,
@@ -70,6 +88,8 @@ def report(profile: AliasProfile, alias: str | None = None) -> EligibilityReport
         has_drafter=has_drafter,
         has_speculative_tokens=has_speculative_tokens,
         has_tree_budget=has_tree_budget,
+        recommendation=("verified" if profile.supports_ddtree else "experimental"),
+        warnings=tuple(warnings),
         reasons=tuple(reasons),
     )
 
@@ -82,10 +102,25 @@ def eligible_aliases() -> list[str]:
     )
 
 
-def check(profile: AliasProfile, alias: str | None = None) -> None:
-    r = report(profile, alias=alias)
+def check(
+    profile: AliasProfile,
+    alias: str | None = None,
+    *,
+    explicit: bool = False,
+    drafter_model: str | None = None,
+    speculative_tokens: int | None = None,
+    tree_budget: int | None = None,
+) -> EligibilityReport:
+    r = report(
+        profile,
+        alias=alias,
+        explicit=explicit,
+        drafter_model=drafter_model,
+        speculative_tokens=speculative_tokens,
+        tree_budget=tree_budget,
+    )
     if not r.reasons:
-        return
+        return r
     header = f"DDTree unavailable for {alias!r}" if alias else "DDTree unavailable"
     bullet = "\n  - ".join(r.reasons)
     eligible = eligible_aliases()

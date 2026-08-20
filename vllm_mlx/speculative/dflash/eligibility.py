@@ -42,6 +42,8 @@ class EligibilityReport:
     is_moe: bool
     is_4bit: bool
     has_drafter: bool
+    recommendation: str
+    warnings: tuple[str, ...]
     reasons: tuple[str, ...]  # all failing-gate reasons (empty if eligible)
 
 
@@ -64,12 +66,19 @@ def _looks_like_4bit(hf_path: str) -> bool:
     return False
 
 
-def report(profile: AliasProfile, alias: str | None = None) -> EligibilityReport:
+def report(
+    profile: AliasProfile,
+    alias: str | None = None,
+    *,
+    explicit: bool = False,
+    drafter_model: str | None = None,
+) -> EligibilityReport:
     """Compute the eligibility report without raising. Used by ``info``
     to render gate status — ``check`` is the raise-on-failure variant.
     """
     reasons: list[str] = []
-    if not profile.supports_dflash:
+    warnings: list[str] = []
+    if not profile.supports_dflash and not explicit:
         reasons.append(
             "alias is not DFlash-enabled (set supports_dflash=true in "
             "aliases.json after benching to validate ≥1.3× speedup)"
@@ -82,21 +91,29 @@ def report(profile: AliasProfile, alias: str | None = None) -> EligibilityReport
         )
     is_4bit = _looks_like_4bit(profile.hf_path)
     if is_4bit:
-        reasons.append(
+        warnings.append(
             f"main model hf_path={profile.hf_path!r} is 4-bit quantized; "
-            "DFlash regresses on 4-bit (use an 8-bit or higher variant)"
+            "this pair has not been performance-validated and may be slower"
         )
-    has_drafter = bool(profile.dflash_draft_model)
-    if profile.supports_dflash and not has_drafter:
+    has_drafter = bool(drafter_model or profile.dflash_draft_model)
+    if not has_drafter:
         # Should be caught at JSON-load time by _coerce, but defend
         # against direct AliasProfile construction in tests/code.
-        reasons.append("supports_dflash is set but dflash_draft_model is empty")
+        reasons.append("DFlash requires an explicit drafter model")
+    if explicit and not profile.supports_dflash:
+        warnings.append(
+            "this target/drafter pair is experimental and has not been "
+            "performance-validated by Rapid-MLX; it may provide no speedup "
+            "or may be slower than autoregressive decoding"
+        )
     return EligibilityReport(
         alias=alias,
         supports_dflash=profile.supports_dflash,
         is_moe=profile.is_moe,
         is_4bit=is_4bit,
         has_drafter=has_drafter,
+        recommendation=("verified" if profile.supports_dflash else "experimental"),
+        warnings=tuple(warnings),
         reasons=tuple(reasons),
     )
 
@@ -121,12 +138,18 @@ def eligible_aliases() -> list[str]:
         return []
 
 
-def check(profile: AliasProfile, alias: str | None = None) -> None:
+def check(
+    profile: AliasProfile,
+    alias: str | None = None,
+    *,
+    explicit: bool = False,
+    drafter_model: str | None = None,
+) -> EligibilityReport:
     """Raise ``DFlashUnavailable`` with an actionable message if any
     eligibility gate fails. Returns ``None`` on success."""
-    r = report(profile, alias=alias)
+    r = report(profile, alias=alias, explicit=explicit, drafter_model=drafter_model)
     if not r.reasons:
-        return
+        return r
     header = f"DFlash unavailable for {alias!r}" if alias else "DFlash unavailable"
     bullet = "\n  - ".join(r.reasons)
     eligible = eligible_aliases()

@@ -93,17 +93,20 @@ def test_check_rejects_moe_alias() -> None:
         check(p, alias="qwen3.6-35b-8bit")
 
 
-def test_check_rejects_4bit_main_model() -> None:
-    """4-bit main model → reject. Note: aliases marked
-    ``supports_dflash=True`` can't be 4-bit (alias-contract guard),
-    so this gate primarily defends against test-only profiles."""
+def test_explicit_4bit_main_model_is_experimental() -> None:
     p = AliasProfile(
         hf_path="mlx-community/Qwen3.5-27B-4bit",  # 4-bit!
         supports_dflash=True,
         dflash_draft_model="z-lab/Qwen3.5-27B-DFlash",
     )
-    with pytest.raises(DFlashUnavailable, match="4-bit"):
-        check(p, alias="qwen3.5-27b-4bit")
+    r = check(
+        p,
+        alias="qwen3.5-27b-4bit",
+        explicit=True,
+        drafter_model=p.dflash_draft_model,
+    )
+    assert r.reasons == ()
+    assert "4-bit" in " ".join(r.warnings)
 
 
 def test_check_message_lists_eligible_aliases() -> None:
@@ -137,7 +140,7 @@ def test_report_collects_all_failures() -> None:
     assert len(r.reasons) == 3, f"expected 3 reasons, got: {r.reasons}"
     joined = " ".join(r.reasons)
     assert "MoE" in joined
-    assert "4-bit" in joined
+    assert "4-bit" in " ".join(r.warnings)
     assert "not DFlash-enabled" in joined
 
 
@@ -183,6 +186,17 @@ def test_default_qwen3_5_27b_alias_fails_check_with_4bit_reason() -> None:
     with pytest.raises(DFlashUnavailable) as excinfo:
         check(profile, alias="qwen3.5-27b-4bit")
     msg = str(excinfo.value)
-    assert "4-bit" in msg, (
-        f"4-bit hint missing from DFlashUnavailable message; got:\n{msg}"
+    assert "not DFlash-enabled" in msg
+
+
+def test_unknown_4bit_path_explicit_opt_in_is_allowed() -> None:
+    profile = AliasProfile(hf_path="user/Qwen3.5-9B-abliterated-4bit")
+    result = check(
+        profile,
+        alias=None,
+        explicit=True,
+        drafter_model="user/Qwen3.5-9B-abliterated-DFlash",
     )
+    assert result.recommendation == "experimental"
+    assert result.reasons == ()
+    assert "performance-validated" in " ".join(result.warnings)

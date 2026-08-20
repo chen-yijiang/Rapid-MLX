@@ -2103,21 +2103,8 @@ def run_dflash_server(
             "for optional extras."
         )
 
-    # Belt-and-suspenders eligibility re-check for programmatic callers
-    # (the CLI's serve_command already gates on the alias upstream, but
-    # we don't want to depend on it being the only entrypoint).
-    from .eligibility import (
-        DFlashUnavailable,
-        _looks_like_4bit,  # noqa: PLC2701 — internal helper
-    )
+    from .eligibility import DFlashUnavailable
 
-    if _looks_like_4bit(main_model_repo):
-        raise DFlashUnavailable(
-            f"DFlash cannot run on a 4-bit quantized model "
-            f"(main_model_repo={main_model_repo!r}); upstream PoC measured "
-            "regression to 0.63-0.96× on Qwen3.5-4B-MLX-4bit. Use the "
-            "8-bit variant."
-        )
     if not drafter_repo:
         raise DFlashUnavailable(
             "DFlash requires a non-empty drafter_repo — pass the DFlash "

@@ -233,16 +233,16 @@ def test_info_dflash_block_skipped_for_unknown_alias(capsys) -> None:
     assert "DFlash eligibility" not in captured.out
 
 
-def test_info_dflash_marks_4bit_alias_ineligible(capsys) -> None:
+def test_info_dflash_marks_4bit_alias_experimental(capsys) -> None:
     """The default ``qwen3.5-27b-4bit`` alias points at the 4-bit variant and
-    must surface as ineligible with the right gate failing."""
+    must surface as explicit experimental opt-in."""
     from vllm_mlx.cli import info_command
 
     args = type("Args", (), {"model": "qwen3.5-27b-4bit"})()
     info_command(args)
     captured = capsys.readouterr()
     assert "DFlash eligibility" in captured.out
-    assert "ineligible" in captured.out
+    assert "experimental" in captured.out
 
 
 def test_info_dflash_start_with_uses_alias_not_hf_path(capsys, monkeypatch) -> None:
@@ -290,8 +290,8 @@ def test_info_dflash_start_with_uses_alias_not_hf_path(capsys, monkeypatch) -> N
 
 def test_models_listing_renders_dflash_column(capsys) -> None:
     """``rapid-mlx models`` must show a ``DFlash`` column so users can
-    scan eligibility at a glance. The known-good alias renders ✓; a
-    non-DFlash alias renders —."""
+    scan recommendation at a glance. The known-good alias renders verified;
+    an unverified alias renders exp."""
     from vllm_mlx.cli import models_command
 
     models_command(None)
@@ -307,7 +307,9 @@ def test_models_listing_renders_dflash_column(capsys) -> None:
         None,
     )
     assert eligible_row is not None, "qwen3.5-27b-8bit row missing"
-    assert "✓" in eligible_row, f"DFlash column should be ✓: {eligible_row!r}"
+    assert "verified" in eligible_row, (
+        f"DFlash column should be verified: {eligible_row!r}"
+    )
 
     # A non-DFlash alias renders — in the DFlash column.
     ineligible_row = next(
@@ -315,7 +317,7 @@ def test_models_listing_renders_dflash_column(capsys) -> None:
         None,
     )
     assert ineligible_row is not None, "qwen3.5-4b-4bit row missing"
-    assert "—" in ineligible_row, f"DFlash column should be —: {ineligible_row!r}"
+    assert "exp" in ineligible_row, f"DFlash column should be exp: {ineligible_row!r}"
 
 
 # =============================================================================

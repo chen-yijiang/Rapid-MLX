@@ -113,14 +113,14 @@ def test_info_renders_ddtree_block_for_eligible_alias(capsys, monkeypatch) -> No
     )
 
 
-def test_info_ddtree_marks_4bit_alias_ineligible(capsys) -> None:
+def test_info_ddtree_marks_4bit_alias_experimental(capsys) -> None:
     from vllm_mlx.cli import info_command
 
     args = type("Args", (), {"model": "qwen3.5-9b-4bit"})()
     info_command(args)
     captured = capsys.readouterr()
     assert "DDTree eligibility" in captured.out
-    assert "ineligible" in captured.out
+    assert "experimental" in captured.out
     assert "4-bit" in captured.out
 
 
@@ -152,16 +152,16 @@ def test_models_listing_renders_ddtree_column(capsys) -> None:
         None,
     )
     assert eligible_row is not None
-    assert ddtree_cell(eligible_row) == "✓", (
-        f"DDTree column should be ✓: {eligible_row!r}"
+    assert ddtree_cell(eligible_row) == "verified", (
+        f"DDTree column should be verified: {eligible_row!r}"
     )
     ineligible_row = next(
         (line for line in lines if line.strip().startswith("qwen3.5-9b-4bit ")),
         None,
     )
     assert ineligible_row is not None
-    assert ddtree_cell(ineligible_row) == "—", (
-        f"DDTree column should be —: {ineligible_row!r}"
+    assert ddtree_cell(ineligible_row) == "exp", (
+        f"DDTree column should be exp: {ineligible_row!r}"
     )
 
 
