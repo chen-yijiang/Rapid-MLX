@@ -2323,13 +2323,18 @@ def _normalize_speculative_config_or_exit(args):
     _fill_suffix_defaults()
 
 
-def _resolve_dflash_drafter_repo(args, profile) -> str:
+def _resolve_dflash_drafter_repo(args, profile) -> str | None:
     """Return the effective DFlash drafter repo for normalized CLI args."""
 
     spec_config = getattr(args, "_speculative_config", None)
     if spec_config is not None and spec_config.method == "dflash" and spec_config.model:
         return spec_config.model
-    return profile.dflash_draft_model
+    # Only verified aliases may inherit a curated registry default. An
+    # experimental pair is enabled by the operator explicitly naming its
+    # drafter, never by stale/residual profile metadata.
+    if profile.supports_dflash:
+        return profile.dflash_draft_model
+    return None
 
 
 def _preflight_dflash_mutexes_or_exit(args) -> None:
@@ -2425,17 +2430,24 @@ def _preflight_ddtree_or_exit(args):
     profile = resolve_profile(alias_name)
     if profile is None:
         profile = ModelProfile(hf_path=args.model)
-    drafter = spec_config.model or profile.ddtree_draft_model
-    speculative_tokens = (
-        spec_config.num_speculative_tokens
-        if spec_config.num_speculative_tokens is not None
-        else profile.ddtree_speculative_tokens
-    )
-    tree_budget = (
-        spec_config.tree_budget
-        if spec_config.tree_budget is not None
-        else profile.ddtree_tree_budget
-    )
+    if profile.supports_ddtree:
+        drafter = spec_config.model or profile.ddtree_draft_model
+        speculative_tokens = (
+            spec_config.num_speculative_tokens
+            if spec_config.num_speculative_tokens is not None
+            else profile.ddtree_speculative_tokens
+        )
+        tree_budget = (
+            spec_config.tree_budget
+            if spec_config.tree_budget is not None
+            else profile.ddtree_tree_budget
+        )
+    else:
+        # Experimental profiles never inherit residual registry metadata:
+        # explicit opt-in means the operator supplies the whole pair.
+        drafter = spec_config.model
+        speculative_tokens = spec_config.num_speculative_tokens
+        tree_budget = spec_config.tree_budget
     try:
         assessment = ddtree_report(
             profile,
@@ -8290,6 +8302,7 @@ def _print_dflash_status(alias: str, profile) -> None:
     present) so a user who tried DFlash and got a vague error can see
     exactly which gate they're tripping.
     """
+    from vllm_mlx.spec_decode.capability import assess_method
     from vllm_mlx.speculative.dflash.eligibility import (
         _looks_like_4bit,
         have_runtime,
@@ -8332,8 +8345,9 @@ def _print_dflash_status(alias: str, profile) -> None:
         ),
     ]
 
-    capable = not profile.is_moe
-    verified = profile.supports_dflash
+    shared = assess_method(profile, "dflash")
+    capable = shared.recommendation != "incompatible"
+    verified = shared.recommendation == "verified"
     eligible = verified and have_runtime()
     if not capable:
         summary = "✗ incompatible"
@@ -8369,6 +8383,7 @@ def _print_dflash_status(alias: str, profile) -> None:
 
 def _print_ddtree_status(alias: str, profile) -> None:
     """Render DDTree status for ``rapid-mlx info <alias>``."""
+    from vllm_mlx.spec_decode.capability import assess_method
     from vllm_mlx.speculative.ddtree.eligibility import have_runtime
     from vllm_mlx.speculative.dflash.eligibility import _looks_like_4bit
 
@@ -8429,8 +8444,9 @@ def _print_ddtree_status(alias: str, profile) -> None:
         ),
     ]
 
-    capable = not profile.is_moe
-    verified = profile.supports_ddtree
+    shared = assess_method(profile, "ddtree")
+    capable = shared.recommendation != "incompatible"
+    verified = shared.recommendation == "verified"
     eligible = verified and have_runtime()
     if not capable:
         summary = "✗ incompatible"

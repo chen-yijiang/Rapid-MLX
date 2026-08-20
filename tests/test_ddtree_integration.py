@@ -115,6 +115,34 @@ def test_unknown_4bit_target_can_explicitly_opt_in(monkeypatch, capsys) -> None:
     assert "Experimental DDTree" in capsys.readouterr().out
 
 
+def test_unverified_ddtree_requires_all_fields_even_with_residual_profile(
+    monkeypatch,
+) -> None:
+    import pytest
+
+    from vllm_mlx.cli import (
+        _normalize_speculative_config_or_exit,
+        _preflight_ddtree_or_exit,
+    )
+    from vllm_mlx.model_aliases import AliasProfile
+
+    residual = AliasProfile(
+        hf_path="user/unverified",
+        supports_ddtree=False,
+        ddtree_draft_model="registry/residual",
+        ddtree_speculative_tokens=16,
+        ddtree_tree_budget=24,
+    )
+    monkeypatch.setattr("vllm_mlx.model_aliases.resolve_profile", lambda _: residual)
+    args = _ddtree_cli_args(
+        model="user/unverified",
+        speculative_config='{"method":"ddtree"}',
+    )
+    _normalize_speculative_config_or_exit(args)
+    with pytest.raises(SystemExit):
+        _preflight_ddtree_or_exit(args)
+
+
 def test_info_renders_ddtree_block_for_eligible_alias(capsys, monkeypatch) -> None:
     from vllm_mlx.cli import info_command
 

@@ -158,6 +158,18 @@ def test_speculative_config_dflash_normalizes_to_legacy_server_flag() -> None:
     assert _resolve_dflash_drafter_repo(args, profile) == "z-lab/Qwen3.5-27B-DFlash"
 
 
+def test_unverified_dflash_profile_cannot_inherit_residual_drafter() -> None:
+    from vllm_mlx.cli import _resolve_dflash_drafter_repo
+
+    args = _dflash_cli_args()
+    args._speculative_config = SimpleNamespace(method="dflash", model=None)
+    profile = SimpleNamespace(
+        supports_dflash=False,
+        dflash_draft_model="registry/residual-drafter",
+    )
+    assert _resolve_dflash_drafter_repo(args, profile) is None
+
+
 def test_dflash_preflight_rejects_legacy_mtp_alias(capsys) -> None:
     from vllm_mlx.cli import _preflight_dflash_mutexes_or_exit
 
