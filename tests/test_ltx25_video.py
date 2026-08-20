@@ -219,6 +219,40 @@ def test_ltx25_runtime_is_provisioned_once(
     assert calls[0][0][:3] == ["/trusted/uv", "sync", "--frozen"]
 
 
+def test_ltx25_generation_uses_cache_without_rechecking_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        ltx25, "_prepared_ltx25_runtime", lambda: tmp_path / "runtime-cache"
+    )
+    monkeypatch.setattr(
+        ltx25,
+        "resolve_ltx25_runtime",
+        lambda: pytest.fail("a prepared runtime must not recheck the checkout"),
+    )
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, command: list[str], **kwargs) -> None:
+            self.command = command
+
+        def communicate(self, *, input: str, timeout: int) -> None:
+            Path(self.command[self.command.index("--output") + 1]).write_bytes(b"mp4")
+
+    monkeypatch.setattr(ltx25.subprocess, "Popen", Process)
+    ltx25.LTX25VideoEngine("MrMofer/ltx-2.5-mlx-q8").generate(
+        prompt="fox",
+        output_path=tmp_path / "result.mp4",
+        width=704,
+        height=480,
+        num_frames=97,
+        fps=24,
+        seed=7,
+        image=None,
+    )
+
+
 def test_serve_routes_ltx25_model_to_specific_preflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

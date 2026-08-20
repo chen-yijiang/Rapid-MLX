@@ -130,14 +130,14 @@ def prepare_ltx25_runtime(executable: str) -> Path:
     """Provision the pinned runtime once into a process-private workspace."""
     global _RUNTIME_CACHE
 
-    uv = shutil.which("uv")
-    if uv is None:
-        raise LTX25BackendError(
-            "LTX-2.5 support requires uv to build its pinned runtime."
-        )
     with _RUNTIME_CACHE_LOCK:
         if _RUNTIME_CACHE is not None:
             return Path(_RUNTIME_CACHE.name)
+        uv = shutil.which("uv")
+        if uv is None:
+            raise LTX25BackendError(
+                "LTX-2.5 support requires uv to build its pinned runtime."
+            )
         cache: tempfile.TemporaryDirectory[str] | None = None
         try:
             cache = tempfile.TemporaryDirectory(prefix="rapidmlx-ltx25-runtime-")
@@ -177,6 +177,11 @@ def prepare_ltx25_runtime(executable: str) -> Path:
             ) from exc
         _RUNTIME_CACHE = cache
         return workspace
+
+
+def _prepared_ltx25_runtime() -> Path | None:
+    with _RUNTIME_CACHE_LOCK:
+        return Path(_RUNTIME_CACHE.name) if _RUNTIME_CACHE is not None else None
 
 
 def _generation_timeout_seconds() -> int:
@@ -257,14 +262,16 @@ class LTX25VideoEngine:
         image: Path | None,
         conditioning_strength: float | None = None,
     ) -> None:
-        executable = resolve_ltx25_runtime()
-        if executable is None:
-            raise LTX25BackendError(
-                "LTX-2.5 support requires the pinned ltx-2-mlx runtime. "
-                "See the LTX-2.5 setup in the video generation guide."
-            )
         timeout = _generation_timeout_seconds()
-        workspace = prepare_ltx25_runtime(executable)
+        workspace = _prepared_ltx25_runtime()
+        if workspace is None:
+            executable = resolve_ltx25_runtime()
+            if executable is None:
+                raise LTX25BackendError(
+                    "LTX-2.5 support requires the pinned ltx-2-mlx runtime. "
+                    "See the LTX-2.5 setup in the video generation guide."
+                )
+            workspace = prepare_ltx25_runtime(executable)
         try:
             staging = tempfile.TemporaryDirectory(
                 prefix=f".{output_path.name}.",
