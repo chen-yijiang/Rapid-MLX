@@ -876,6 +876,20 @@ def split_model_local_snapshot(repo_id: str) -> str | None:
     return snap_dir if os.path.isdir(snap_dir) else None
 
 
+#: Repos whose weights must resolve to an exact, previously-verified commit,
+#: mirroring ``video/wan.py``'s ``WAN_REVISIONS``. Without this, an alias
+#: only ever resolves whatever ``refs/main`` currently points to (see
+#: ``_resolved_snapshot_sha``) — an upstream force-push or account
+#: compromise on the repo would silently change the weights a fresh pull
+#: (or a not-yet-cached machine) fetches next, with nothing here to notice.
+#: A repo absent from this map is unpinned and falls through to today's
+#: behavior; one present here is refused unless the resolved snapshot
+#: matches exactly (see the check in ``_mflux_snapshot_dir``).
+IMAGE_MODEL_REVISIONS: dict[str, str] = {
+    "mflux-community/qwen-image-mflux-q6": "c628fe4392d963557c3013c2709e6d3b67bca79d",
+}
+
+
 def _mflux_snapshot_dir(repo_id: str) -> tuple[str, str] | None:
     """``(repo_root, snapshot_dir)`` for a registered image-gen repo, or ``None``.
 
@@ -930,6 +944,13 @@ def _mflux_snapshot_dir(repo_id: str) -> tuple[str, str] | None:
         ):
             return None
         resolved_sha = candidates[0]
+    pinned_revision = IMAGE_MODEL_REVISIONS.get(repo_id)
+    if pinned_revision is not None and resolved_sha != pinned_revision:
+        # Whatever is cached does not match the verified-good commit — do
+        # not vouch for it. This includes a cache populated before this
+        # repo was pinned, so pinning a repo re-validates every existing
+        # install rather than only new downloads.
+        return None
     snap_dir = os.path.join(repo_root, "snapshots", resolved_sha)
     if not os.path.isdir(snap_dir):
         return None

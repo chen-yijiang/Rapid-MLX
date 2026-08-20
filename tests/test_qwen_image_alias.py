@@ -20,13 +20,25 @@ in the text encoder's RMSNorm with a shape mismatch
 against this project's pinned mflux before this alias was pointed
 elsewhere. ``mflux-community/qwen-image-mflux-q6`` (uploaded 2026-08-16,
 commit ``c628fe4392d963557c3013c2709e6d3b67bca79d`` at the time of
-pinning — the alias tracks the mutable ``main`` ref, not this SHA;
-``aliases.json`` has no revision-pin field today, and adding one is a
-system-wide change out of scope here) keeps the text encoder
-full-precision (verified: zero ``scale``/``bias`` keys, correct
-``[152064, 3584]`` embed shape) and was confirmed end-to-end: both a
-plain text-to-image prompt and a text-rendering prompt ("RAPID MLX" on a
-sign) produced correct images with this project's pinned mflux.
+pinning) keeps the text encoder full-precision (verified: zero
+``scale``/``bias`` keys, correct ``[152064, 3584]`` embed shape) and was
+confirmed end-to-end: both a plain text-to-image prompt and a
+text-rendering prompt ("RAPID MLX" on a sign) produced correct images
+with this project's pinned mflux.
+
+Revision pinning: ``aliases.json`` has no revision-pin field (adding one
+across every alias/modality would be a system-wide schema change out of
+scope here), so the commit above is enforced separately — a code-only
+pin table, ``_download_gate.IMAGE_MODEL_REVISIONS``, mirroring
+``video/wan.py``'s ``WAN_REVISIONS``. Without it, this alias would only
+ever resolve whatever ``refs/main`` currently points to (see
+``_resolved_snapshot_sha``), so an upstream force-push or account
+compromise on ``mflux-community``'s repo — plausible given the
+provenance caveat below — would silently change the weights a fresh
+pull fetches next. A cached snapshot that resolves to any other commit
+is treated as unvouched-for, exactly like an incomplete download; a cold
+pull fetches the pinned commit explicitly rather than whatever ``main``
+is at pull time.
 
 Provenance: the ``mflux-community`` HF account has published ~50 repos
 as a systematic multi-family, multi-bitwidth conversion pipeline (krea-2,
@@ -122,6 +134,59 @@ def test_qwen_image_resident_estimate_is_not_the_bare_default() -> None:
     # Both the alias and the pinned repo id must resolve to the real charge.
     for name in ("qwen-image", resolve_profile("qwen-image").hf_path):
         assert estimate_model_bytes(name) == int(55.7 * _GIB)
+
+
+# MARK: - Revision pinning for a cold (not-yet-cached) pull
+#
+# ``mflux_local_snapshot`` (exercised in test_download_gate.py) already
+# refuses to vouch for a cached snapshot that doesn't match the registered
+# pin. These tests cover the other half: when there is nothing cached to
+# vouch for at all, ``_model_path_for_mflux`` must fetch the pinned commit
+# itself rather than let mflux resolve and download whatever ``main``
+# currently is.
+
+
+def test_model_path_for_mflux_forces_pinned_revision_on_cold_pull(
+    monkeypatch,
+) -> None:
+    from vllm_mlx._download_gate import IMAGE_MODEL_REVISIONS
+
+    repo = "mflux-community/qwen-image-mflux-q6"
+    pinned_sha = IMAGE_MODEL_REVISIONS[repo]
+    engine = ImageGenerationEngine(repo)
+    monkeypatch.setattr(
+        "vllm_mlx._download_gate.mflux_local_snapshot", lambda _repo: None
+    )
+    calls = []
+
+    def _fake_snapshot_download(repo_id, revision=None):
+        calls.append((repo_id, revision))
+        return "/fake/snapshot/dir"
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot_download)
+
+    assert engine._model_path_for_mflux() == "/fake/snapshot/dir"
+    assert calls == [(repo, pinned_sha)]
+
+
+def test_model_path_for_mflux_falls_back_to_bare_repo_when_unpinned(
+    monkeypatch,
+) -> None:
+    # A prequantized repo with no entry in IMAGE_MODEL_REVISIONS keeps
+    # today's behavior: hand mflux the bare repo id and let it resolve +
+    # download normally, rather than raising or refusing.
+    engine = ImageGenerationEngine("filipstrand/Z-Image-Turbo-mflux-4bit")
+    assert engine._prequantized is True
+    monkeypatch.setattr(
+        "vllm_mlx._download_gate.mflux_local_snapshot", lambda _repo: None
+    )
+
+    def _unexpected_download(*_args, **_kwargs):
+        raise AssertionError("must not download an unpinned repo itself")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _unexpected_download)
+
+    assert engine._model_path_for_mflux() == "filipstrand/Z-Image-Turbo-mflux-4bit"
 
 
 # MARK: - Structural guard against a quantized text encoder
@@ -387,6 +452,26 @@ def test_missing_index_does_not_raise(tmp_path, monkeypatch) -> None:
     empty_snapshot.mkdir()
     engine = _engine_for_family_check(monkeypatch, empty_snapshot)
     engine._verify_text_encoder_not_quantized()  # no-op, must not raise
+
+
+def test_index_present_but_key_wholly_absent_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    # A readable, non-empty index that simply never mentions
+    # `encoder.embed_tokens.weight` (as opposed to `_make_snapshot`'s shard
+    # naming the key but the shard's own header omitting it, covered by
+    # `test_shard_present_but_key_absent_fails_closed`) must not be read as
+    # "nothing to check" — codex review: silently passing here let a
+    # differently packaged or renamed quantized encoder bypass the guard.
+    snapshot = tmp_path / "snapshot"
+    text_encoder = snapshot / "text_encoder"
+    text_encoder.mkdir(parents=True)
+    (text_encoder / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"some.other.tensor": "0.safetensors"}})
+    )
+    engine = _engine_for_family_check(monkeypatch, snapshot)
+    with pytest.raises(ImageRuntimeError, match="does not expose the expected"):
+        engine._verify_text_encoder_not_quantized()
 
 
 def test_no_verdict_completeness_skips_the_text_encoder_check(

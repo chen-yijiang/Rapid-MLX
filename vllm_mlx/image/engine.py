@@ -231,13 +231,24 @@ class ImageGenerationEngine:
         start rather than failing fast. Resolving the cached snapshot ourselves
         and passing the directory keeps a warm start entirely local. Falls back
         to the repo id whenever the cache can't be vouched for, so a cold or
-        partial cache still pulls exactly as before.
+        partial cache still pulls exactly as before — unless the repo is
+        pinned (``IMAGE_MODEL_REVISIONS``), in which case we fetch it
+        ourselves at the exact verified commit rather than let mflux resolve
+        and download whatever ``main`` currently points to.
         """
         if not self._prequantized:
             return None
-        from .._download_gate import mflux_local_snapshot
+        from .._download_gate import IMAGE_MODEL_REVISIONS, mflux_local_snapshot
 
-        return mflux_local_snapshot(self.model_name) or self.model_name
+        snapshot = mflux_local_snapshot(self.model_name)
+        if snapshot is not None:
+            return snapshot
+        pinned_revision = IMAGE_MODEL_REVISIONS.get(self.model_name)
+        if pinned_revision is None:
+            return self.model_name
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(self.model_name, revision=pinned_revision)
 
     def _build_model(self):
         """Instantiate the backing mflux model (import-lazy)."""
@@ -377,14 +388,30 @@ class ImageGenerationEngine:
         weight_key = "encoder.embed_tokens.weight"
         text_encoder_dir = Path(snapshot) / "text_encoder"
         weight_map = self._read_text_encoder_weight_map(text_encoder_dir)
-        if weight_map is None or weight_key not in weight_map:
-            # No index, unreadable, or no entry for this key: outside what
-            # this check can vouch for. ``_verify_weights_complete`` already
-            # required the index to exist and name every shard; a missing
-            # KEY (as opposed to a missing shard, handled below) is reached
-            # only if a future component definition renames it, which a
-            # check anchored to the OLD name cannot meaningfully block.
+        if weight_map is None:
+            # No index, or unreadable: outside what this check can vouch
+            # for — ``_verify_weights_complete`` already required the index
+            # to exist and name every shard to reach this point, so this is
+            # an environment problem, not a signal about the checkpoint.
             return
+        if weight_key not in weight_map:
+            # The index is readable and complete but simply does not name
+            # this key. Every Qwen-Image / Qwen-Image-Edit checkpoint this
+            # check has ever seen uses it, so an absent key is more likely a
+            # differently packaged or renamed encoder than a legitimate
+            # repackaging — and this check exists specifically to catch
+            # checkpoints that would otherwise fail confusingly, minutes
+            # into generation. Refuse rather than fabricate an "OK" verdict
+            # for a layout it cannot actually vouch for.
+            raise ImageRuntimeError(
+                f"Image model '{self.model_name}' text encoder does not "
+                f"expose the expected weight key {weight_key!r} in its "
+                "safetensors index, so the text-encoder-not-quantized guard "
+                "has no way to vouch for it (unsupported layout, not "
+                "necessarily quantization). Refusing to load rather than "
+                "risk minutes of generation before an unrelated-looking "
+                "shape error."
+            )
         # Checked against the WHOLE index, not just the header of the shard
         # holding ``embed_tokens.weight``: a quantized embedding's
         # ``scales``/``biases`` siblings can land in a DIFFERENT shard, which
