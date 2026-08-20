@@ -15,10 +15,12 @@ Features:
 
 import atexit
 import base64
+import ipaddress
 import logging
 import math
 import os
 import re
+import socket
 import sys
 import tempfile
 import threading
@@ -26,7 +28,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import numpy as np
 import requests
@@ -527,6 +529,195 @@ def decode_base64_image(
     return base64.b64decode(base64_string)
 
 
+class RemoteMediaFetchError(ValueError):
+    """A user-supplied remote media URL was denied by the SSRF guard.
+
+    Subclasses ``ValueError`` so it surfaces as a clean HTTP 400 from the
+    route exception handlers instead of a raw 5xx.
+    """
+
+
+# RFC1918 private ranges, loopback, link-local (incl. the cloud metadata
+# address 169.254.169.254), multicast, unspecified, and reserved addresses are
+# never valid targets for a user-supplied remote media URL coming from a
+# network-facing process.
+def _is_blocked_address(ip_str: str) -> bool:
+    """Return True if ``ip_str`` is a private/loopback/link-local/etc address."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        # Unparseable address -> conservative deny.
+        return True
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _assert_safe_remote_url(url: str) -> None:
+    """Reject remote media URLs whose effective target is a blocked host.
+
+    This closes the SSRF primitive on user-supplied image/video URLs: the
+    request is refused when the target resolves to loopback, RFC1918 private
+    space, link-local (e.g. cloud metadata ``169.254.169.254``), multicast,
+    unspecified, or reserved addresses.
+
+    Note: hostname resolution is validated at request time, so a hostile DNS
+    rebind between the resolve below and the actual connect is not fully
+    closed here. Operators who expose the server past the loopback boundary
+    should terminate at a network perimeter (reverse proxy with egress
+    controls) and set an API key.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise RemoteMediaFetchError(
+            f"Remote media URL must use http(s), got scheme {parsed.scheme!r}"
+        )
+    host = parsed.hostname
+    if not host:
+        raise RemoteMediaFetchError(f"Remote media URL has no host: {url[:80]!r}")
+    try:
+        port = parsed.port
+    except ValueError:
+        raise RemoteMediaFetchError(f"Invalid port in remote media URL: {url[:80]!r}")
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        raise RemoteMediaFetchError(f"Could not resolve remote media host {host!r}")
+    for info in infos:
+        ip = info[4][0]
+        if _is_blocked_address(ip):
+            raise RemoteMediaFetchError(
+                "Remote media URL resolves to a blocked address "
+                f"(private/loopback/link-local/metadata): {ip}"
+            )
+
+
+def _guarded_request(
+    method: str, url: str, *, timeout: int, headers: dict, stream: bool
+):
+    """Issue ``method`` on ``url``, validating the host on every hop.
+
+    Redirects are followed manually (bounded) so each destination is checked
+    against the SSRF guard — otherwise a malicious or compromised host could
+    ``302`` us straight to ``http://169.254.169.254/...`` or an internal host.
+    """
+    session = requests.Session()
+    current = url
+    seen = {current}
+    for _ in range(6):  # initial request + up to 5 validated redirects
+        _assert_safe_remote_url(current)
+        response = session.request(
+            method,
+            current,
+            timeout=timeout,
+            headers=headers,
+            stream=stream,
+            allow_redirects=False,
+            verify=True,
+        )
+        if response.is_redirect or response.is_permanent_redirect:
+            location = response.headers.get("Location")
+            response.close()
+            if not location:
+                break
+            current = urljoin(current, location)
+            if current in seen:
+                raise RemoteMediaFetchError("Remote media URL redirect loop")
+            seen.add(current)
+            continue
+        return response
+    raise RemoteMediaFetchError("Remote media URL redirected too many times")
+
+
+# Local media file reads are confined to regular files with a media extension
+# so a malicious caller cannot use the image/video path branch to read
+# arbitrary files (``/etc/passwd``, ``~/.ssh/id_rsa``, configs, secrets). The
+# extension allowlist is intentionally wide so local operators and the desktop
+# app can keep passing real image/video paths picked from the filesystem. For
+# remote-facing deployments set ``RAPID_MLX_DISABLE_LOCAL_MEDIA_PATHS=1`` to
+# refuse local files entirely (URLs / base64 only), or set
+# ``RAPID_MLX_MEDIA_ROOT`` to additionally confine reads to one directory
+# tree.
+_ALLOWED_MEDIA_EXTENSIONS = frozenset(
+    {
+        # images
+        ".jpg",
+        ".jpeg",
+        ".jfif",
+        ".png",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".heic",
+        ".heif",
+        # video
+        ".mp4",
+        ".webm",
+        ".mov",
+        ".avi",
+        ".mkv",
+        ".m4v",
+        ".mpg",
+        ".mpeg",
+        ".flv",
+        ".3gp",
+    }
+)
+
+
+def _local_media_root() -> Path | None:
+    """Return the confinement root for local media reads, if configured."""
+    root = os.environ.get("RAPID_MLX_MEDIA_ROOT")
+    if not root:
+        return None
+    try:
+        return Path(root).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _resolve_local_media(path: str) -> str | None:
+    """Return ``path`` if it is an allowed local media file, else None.
+
+    Guards: regular file only, a media extension only, and (when
+    ``RAPID_MLX_MEDIA_ROOT`` is set) resolved inside that root so ``..``
+    escapes, absolute paths elsewhere, and symlinks pointing outside are all
+    refused. ``RAPID_MLX_DISABLE_LOCAL_MEDIA_PATHS=1`` disables the local-file
+    branch entirely.
+    """
+    if os.environ.get("RAPID_MLX_DISABLE_LOCAL_MEDIA_PATHS") == "1":
+        return None
+    if not path or len(path) >= 4096:
+        return None
+    try:
+        candidate = Path(path).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+    if not candidate.is_file():
+        return None
+    if candidate.suffix.lower() not in _ALLOWED_MEDIA_EXTENSIONS:
+        return None
+    root = _local_media_root()
+    if root is not None:
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            logger.warning(
+                "Refusing media path outside allowed root %s: %s", root, path
+            )
+            return None
+    return path
+
+
 def download_image(url: str, timeout: int = 30, max_size: int = MAX_IMAGE_SIZE) -> str:
     """
     Download image from URL and return local path.
@@ -548,8 +739,8 @@ def download_image(url: str, timeout: int = 30, max_size: int = MAX_IMAGE_SIZE) 
 
     # First, make a HEAD request to check Content-Length
     try:
-        head_response = requests.head(
-            url, timeout=timeout, headers=headers, allow_redirects=True, verify=True
+        head_response = _guarded_request(
+            "HEAD", url, timeout=timeout, headers=headers, stream=False
         )
         content_length = head_response.headers.get("content-length")
         if content_length and int(content_length) > max_size:
@@ -561,8 +752,8 @@ def download_image(url: str, timeout: int = 30, max_size: int = MAX_IMAGE_SIZE) 
         # HEAD request failed, proceed with GET and check during download
         pass
 
-    response = requests.get(
-        url, timeout=timeout, headers=headers, stream=True, verify=True
+    response = _guarded_request(
+        "GET", url, timeout=timeout, headers=headers, stream=True
     )
     response.raise_for_status()
 
@@ -638,8 +829,8 @@ def download_video(url: str, timeout: int = 120, max_size: int = MAX_VIDEO_SIZE)
 
     # First, make a HEAD request to check Content-Length
     try:
-        head_response = requests.head(
-            url, timeout=timeout, headers=headers, allow_redirects=True, verify=True
+        head_response = _guarded_request(
+            "HEAD", url, timeout=timeout, headers=headers, stream=False
         )
         content_length = head_response.headers.get("content-length")
         if content_length and int(content_length) > max_size:
@@ -651,8 +842,8 @@ def download_video(url: str, timeout: int = 120, max_size: int = MAX_VIDEO_SIZE)
         # HEAD request failed, proceed with GET and check during download
         pass
 
-    response = requests.get(
-        url, timeout=timeout, headers=headers, stream=True, verify=True
+    response = _guarded_request(
+        "GET", url, timeout=timeout, headers=headers, stream=True
     )
     response.raise_for_status()
 
@@ -787,9 +978,11 @@ def process_video_input(video: str | dict) -> str:
     if not video:
         raise ValueError("Empty video input")
 
-    # Check if it's a local file
-    if Path(video).exists():
-        return video
+    # Check if it's a local file (confined to regular media files; see
+    # ``_resolve_local_media`` for the extension / root-lockdown guards).
+    local = _resolve_local_media(video)
+    if local is not None:
+        return local
 
     # Check if it's a URL
     if is_url(video):
@@ -882,9 +1075,11 @@ def process_image_input(image: str | dict) -> str:
     if is_url(image):
         return download_image(image)
 
-    # Check if it's a local file (only for short strings that could be paths)
-    if len(image) < 4096 and Path(image).exists():
-        return image
+    # Local file path — only for short strings that resolve to a regular
+    # media file (extension / root-lockdown guards; see ``_resolve_local_media``).
+    local = _resolve_local_media(image)
+    if local is not None:
+        return local
 
     raise ValueError(f"Cannot process image: {image[:50]}...")
 

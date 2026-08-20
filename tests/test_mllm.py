@@ -285,6 +285,149 @@ class TestVideoProcessing:
             process_video_input({})
 
 
+class TestMediaSecurity:
+    """SSRF + arbitrary-file-read hardening for image/video media inputs."""
+
+    @staticmethod
+    def _fake_getaddrinfo(host_to_ips):
+        """Host-aware getaddrinfo stand-in so unit tests never hit DNS."""
+        import socket as _socket
+
+        def _fake(host, port, family=0, type=0, proto=0, flags=0):
+            ips = host_to_ips.get(host) or host_to_ips.get("*", ["93.184.216.34"])
+            return [
+                (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", (ip, port)) for ip in ips
+            ]
+
+        return _fake
+
+    # ---- SSRF / remote-URL guard -----------------------------------------
+
+    def test_assert_safe_remote_url_allows_public(self, monkeypatch):
+        from vllm_mlx.models.mllm import _assert_safe_remote_url
+
+        monkeypatch.setattr(
+            "vllm_mlx.models.mllm.socket.getaddrinfo",
+            self._fake_getaddrinfo({"*": ["93.184.216.34"]}),
+        )
+        # Should not raise.
+        _assert_safe_remote_url("http://example.com/photo.jpg")
+
+    def test_assert_safe_remote_url_blocks_loopback(self, monkeypatch):
+        from vllm_mlx.models.mllm import RemoteMediaFetchError, _assert_safe_remote_url
+
+        monkeypatch.setattr(
+            "vllm_mlx.models.mllm.socket.getaddrinfo",
+            self._fake_getaddrinfo({"*": ["127.0.0.1"]}),
+        )
+        with pytest.raises(RemoteMediaFetchError):
+            _assert_safe_remote_url("http://internal.local/i.jpg")
+
+    def test_assert_safe_remote_url_blocks_metadata(self, monkeypatch):
+        from vllm_mlx.models.mllm import RemoteMediaFetchError, _assert_safe_remote_url
+
+        monkeypatch.setattr(
+            "vllm_mlx.models.mllm.socket.getaddrinfo",
+            self._fake_getaddrinfo({"*": ["169.254.169.254"]}),
+        )
+        with pytest.raises(RemoteMediaFetchError):
+            _assert_safe_remote_url("http://metadata.internal/latest/meta-data/")
+
+    def test_assert_safe_remote_url_blocks_rfc1918(self, monkeypatch):
+        from vllm_mlx.models.mllm import RemoteMediaFetchError, _assert_safe_remote_url
+
+        for ip in ("10.0.0.1", "172.16.0.1", "192.168.1.1"):
+            monkeypatch.setattr(
+                "vllm_mlx.models.mllm.socket.getaddrinfo",
+                self._fake_getaddrinfo({"*": [ip]}),
+            )
+            with pytest.raises(RemoteMediaFetchError):
+                _assert_safe_remote_url("http://internal.example/i.jpg")
+
+    def test_guarded_request_blocks_redirect_to_internal(self, monkeypatch):
+        """A 302 to a private/metadata address must be refused, not followed."""
+        from vllm_mlx.models.mllm import RemoteMediaFetchError, _guarded_request
+
+        class _Redirect:
+            is_redirect = True
+            is_permanent_redirect = False
+            headers = {"Location": "http://169.254.169.254/latest/meta-data/"}
+
+            def close(self):
+                pass
+
+            def raise_for_status(self):
+                pass
+
+        class _FakeSession:
+            def request(self, method, url, **kwargs):
+                return _Redirect()
+
+        monkeypatch.setattr("vllm_mlx.models.mllm.requests.Session", _FakeSession)
+        monkeypatch.setattr(
+            "vllm_mlx.models.mllm.socket.getaddrinfo",
+            self._fake_getaddrinfo(
+                {
+                    "evil.example": ["93.184.216.34"],
+                    "169.254.169.254": ["169.254.169.254"],
+                }
+            ),
+        )
+        with pytest.raises(RemoteMediaFetchError):
+            _guarded_request(
+                "GET",
+                "http://evil.example/a.jpg",
+                timeout=5,
+                headers={},
+                stream=True,
+            )
+
+    # ---- arbitrary-file-read guard --------------------------------------
+
+    def test_local_media_blocks_non_media_extension(self, tmp_path):
+        from vllm_mlx.models.mllm import process_image_input
+
+        secret = tmp_path / "config.json"
+        secret.write_text('{"api_key": "sekrit"}')
+        with pytest.raises(ValueError):
+            process_image_input(str(secret))
+
+    def test_local_media_blocks_etc_passwd(self, monkeypatch, tmp_path):
+        from vllm_mlx.models.mllm import process_image_input
+
+        # Extension guard already covers /etc/passwd; rooting makes it airtight.
+        monkeypatch.setenv("RAPID_MLX_MEDIA_ROOT", str(tmp_path))
+        with pytest.raises(ValueError):
+            process_image_input("/etc/passwd")
+
+    def test_local_media_confined_to_media_root(self, monkeypatch, tmp_path):
+        from vllm_mlx.models.mllm import process_image_input
+
+        root = tmp_path / "media"
+        root.mkdir()
+        good = root / "img.jpg"
+        good.write_bytes(b"\xff\xd8\xff\xe0")
+
+        outside = tmp_path / "outside.jpg"
+        outside.write_bytes(b"\xff\xd8\xff\xe0")
+
+        monkeypatch.setenv("RAPID_MLX_MEDIA_ROOT", str(root))
+        assert process_image_input(str(good)) == str(good)
+        with pytest.raises(ValueError):
+            process_image_input(str(outside))  # inside tmp but outside root
+        with pytest.raises(ValueError):
+            process_image_input(str(root / ".." / "outside.jpg"))  # .. escape
+
+    def test_disable_local_media_paths_env(self, monkeypatch, tmp_path):
+        from vllm_mlx.models.mllm import process_image_input
+
+        img = tmp_path / "ok.jpg"
+        img.write_bytes(b"\xff\xd8\xff\xe0")
+        monkeypatch.setenv("RAPID_MLX_DISABLE_LOCAL_MEDIA_PATHS", "1")
+        with pytest.raises(ValueError):
+            process_image_input(str(img))
+
+
 # =============================================================================
 # MLLM Model Tests
 # =============================================================================
