@@ -17,6 +17,8 @@ LTX25_RUNTIME_COMMIT = "57952288076766abe27dda3a774b2c24f7346977"
 LTX25_RUNTIME_REPOSITORY = "https://github.com/MrMoferFRAN/ltx-2-mlx.git"
 _DEFAULT_TIMEOUT_SECONDS = 7200
 _TERMINATE_GRACE_SECONDS = 10
+_RUNTIME_CACHE_LOCK = threading.Lock()
+_RUNTIME_CACHE: tempfile.TemporaryDirectory[str] | None = None
 _STDIN_PROMPT_RUNNER = """\
 import sys
 from ltx_pipelines_mlx.cli import main
@@ -124,6 +126,59 @@ def _materialize_runtime(repository: Path, destination: Path) -> None:
         ) from exc
 
 
+def prepare_ltx25_runtime(executable: str) -> Path:
+    """Provision the pinned runtime once into a process-private workspace."""
+    global _RUNTIME_CACHE
+
+    uv = shutil.which("uv")
+    if uv is None:
+        raise LTX25BackendError(
+            "LTX-2.5 support requires uv to build its pinned runtime."
+        )
+    with _RUNTIME_CACHE_LOCK:
+        if _RUNTIME_CACHE is not None:
+            return Path(_RUNTIME_CACHE.name)
+        cache: tempfile.TemporaryDirectory[str] | None = None
+        try:
+            cache = tempfile.TemporaryDirectory(prefix="rapidmlx-ltx25-runtime-")
+            workspace = Path(cache.name)
+            _materialize_runtime(Path(executable).parents[2], workspace)
+            subprocess.run(
+                [
+                    str(Path(uv).absolute()),
+                    "sync",
+                    "--frozen",
+                    "--project",
+                    str(workspace),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1800,
+            )
+            interpreter = workspace / ".venv" / "bin" / "python"
+            if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
+                raise LTX25BackendError(
+                    "The pinned LTX-2.5 runtime did not create its Python environment."
+                )
+        except LTX25BackendError:
+            if cache is not None:
+                cache.cleanup()
+            raise
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            if cache is not None:
+                cache.cleanup()
+            raise LTX25BackendError(
+                "The pinned LTX-2.5 runtime could not be provisioned."
+            ) from exc
+        _RUNTIME_CACHE = cache
+        return workspace
+
+
 def _generation_timeout_seconds() -> int:
     raw = os.environ.get("RAPID_MLX_LTX25_TIMEOUT_SEC", "").strip()
     if not raw:
@@ -208,17 +263,9 @@ class LTX25VideoEngine:
                 "LTX-2.5 support requires the pinned ltx-2-mlx runtime. "
                 "See the LTX-2.5 setup in the video generation guide."
             )
-        repository = Path(executable).parents[2]
-        uv = shutil.which("uv")
-        if uv is None:
-            raise LTX25BackendError(
-                "LTX-2.5 support requires uv to build its pinned isolated runtime."
-            )
         timeout = _generation_timeout_seconds()
-        snapshot = tempfile.TemporaryDirectory(prefix="rapidmlx-ltx25-runtime-")
+        workspace = prepare_ltx25_runtime(executable)
         try:
-            snapshot_path = Path(snapshot.name)
-            _materialize_runtime(repository, snapshot_path)
             descriptor, staged_name = tempfile.mkstemp(
                 prefix=f".{output_path.name}.",
                 suffix=".tmp.mp4",
@@ -227,18 +274,13 @@ class LTX25VideoEngine:
             os.close(descriptor)
             staged_output = Path(staged_name)
             staged_output.unlink()
-        except Exception:
-            snapshot.cleanup()
-            raise
+        except OSError as exc:
+            raise LTX25BackendError(
+                "LTX-2.5 generation could not create its temporary output."
+            ) from exc
 
         command = [
-            str(Path(uv).absolute()),
-            "run",
-            "--isolated",
-            "--frozen",
-            "--project",
-            str(snapshot_path),
-            "python",
+            str(workspace / ".venv" / "bin" / "python"),
             "-c",
             _STDIN_PROMPT_RUNNER,
             "generate",
@@ -323,4 +365,3 @@ class LTX25VideoEngine:
                 if self._process is process:
                     self._process = None
             staged_output.unlink(missing_ok=True)
-            snapshot.cleanup()

@@ -105,15 +105,26 @@ def require_video_runtime_or_exit(model_name: str | None = None) -> None:
 
     missing = []
     if _is_ltx25_name(model_name):
-        from ..video.ltx25 import LTX25_RUNTIME_COMMIT, resolve_ltx25_runtime
+        from ..video.ltx25 import (
+            LTX25_RUNTIME_COMMIT,
+            LTX25BackendError,
+            prepare_ltx25_runtime,
+            resolve_ltx25_runtime,
+        )
 
-        if resolve_ltx25_runtime() is None:
+        runtime = resolve_ltx25_runtime()
+        if runtime is None:
             missing.append(
                 "the pinned LTX-2.5 runtime "
                 f"(commit {LTX25_RUNTIME_COMMIT}; see the video generation guide)"
             )
         if shutil.which("uv") is None:
             missing.append("uv (`brew install uv`)")
+        elif runtime is not None:
+            try:
+                prepare_ltx25_runtime(runtime)
+            except LTX25BackendError:
+                missing.append("a provisioned pinned LTX-2.5 runtime")
     elif _is_cogvideox_name(model_name):
         cogvideox_modules = {
             "videox_fun_mlx": "the bundled VideoX-Fun-mlx runtime",
