@@ -6,7 +6,14 @@ from vllm_mlx.spec_decode.capability import REGISTERED_METHODS, assess_method
 def test_report_covers_every_alias_and_method():
     report = build_report()
     assert set(report) == set(list_profiles())
-    assert all(set(methods) == set(REGISTERED_METHODS) for methods in report.values())
+    assert all(
+        set(entry["methods"]) == set(REGISTERED_METHODS) for entry in report.values()
+    )
+    assert all(
+        {"hf_path", "checkpoint_format", "quantization", "modality"}
+        <= set(entry["model"])
+        for entry in report.values()
+    )
 
 
 def test_4bit_is_recommendation_evidence_not_capability_ban():

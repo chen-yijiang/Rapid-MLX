@@ -92,6 +92,29 @@ def test_speculative_config_ddtree_preflight_falls_back_to_alias_defaults(
     assert args._ddtree_tree_budget == 24
 
 
+def test_unknown_4bit_target_can_explicitly_opt_in(monkeypatch, capsys) -> None:
+    from vllm_mlx.cli import (
+        _normalize_speculative_config_or_exit,
+        _preflight_ddtree_or_exit,
+    )
+
+    monkeypatch.setattr(
+        "vllm_mlx.speculative.ddtree.eligibility.have_runtime", lambda: True
+    )
+    args = _ddtree_cli_args(
+        model="user/Qwen3.5-9B-abliterated-4bit",
+        speculative_config=(
+            '{"method":"ddtree","model":"user/matching-drafter",'
+            '"num_speculative_tokens":8,"tree_budget":12}'
+        ),
+    )
+    _normalize_speculative_config_or_exit(args)
+    _, profile = _preflight_ddtree_or_exit(args)
+    assert profile.hf_path == args.model
+    assert args._ddtree_drafter_repo == "user/matching-drafter"
+    assert "Experimental DDTree" in capsys.readouterr().out
+
+
 def test_info_renders_ddtree_block_for_eligible_alias(capsys, monkeypatch) -> None:
     from vllm_mlx.cli import info_command
 
