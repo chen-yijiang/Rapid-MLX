@@ -95,7 +95,10 @@ def report(
             f"main model hf_path={profile.hf_path!r} is 4-bit quantized; "
             "this pair has not been performance-validated and may be slower"
         )
-    has_drafter = bool(drafter_model or profile.dflash_draft_model)
+    if explicit and not profile.supports_dflash:
+        has_drafter = bool(drafter_model)
+    else:
+        has_drafter = bool(drafter_model or profile.dflash_draft_model)
     if not has_drafter:
         # Should be caught at JSON-load time by _coerce, but defend
         # against direct AliasProfile construction in tests/code.

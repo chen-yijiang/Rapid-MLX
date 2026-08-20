@@ -64,12 +64,17 @@ def report(
             f"main model hf_path={profile.hf_path!r} is 4-bit quantized; "
             "DDTree on this quantization is not performance-validated"
         )
-    has_drafter = bool(drafter_model or profile.ddtree_draft_model)
+    experimental_explicit = explicit and not profile.supports_ddtree
+    has_drafter = (
+        bool(drafter_model)
+        if experimental_explicit
+        else bool(drafter_model or profile.ddtree_draft_model)
+    )
     if not has_drafter:
         reasons.append("DDTree requires an explicit drafter model")
     effective_tokens = (
         speculative_tokens
-        if speculative_tokens is not None
+        if experimental_explicit or speculative_tokens is not None
         else profile.ddtree_speculative_tokens
     )
     has_speculative_tokens = (
@@ -80,7 +85,9 @@ def report(
     if not has_speculative_tokens:
         reasons.append("DDTree requires num_speculative_tokens")
     effective_budget = (
-        tree_budget if tree_budget is not None else profile.ddtree_tree_budget
+        tree_budget
+        if experimental_explicit or tree_budget is not None
+        else profile.ddtree_tree_budget
     )
     has_tree_budget = (
         isinstance(effective_budget, int)

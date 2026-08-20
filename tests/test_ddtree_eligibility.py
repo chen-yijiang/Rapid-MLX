@@ -142,6 +142,22 @@ def test_explicit_non_positive_tree_values_are_rejected() -> None:
             )
 
 
+def test_unverified_explicit_check_does_not_inherit_residual_metadata() -> None:
+    profile = AliasProfile(
+        hf_path="user/unverified",
+        supports_ddtree=False,
+        ddtree_draft_model="registry/residual",
+        ddtree_speculative_tokens=16,
+        ddtree_tree_budget=24,
+    )
+    with pytest.raises(DDTreeUnavailable) as excinfo:
+        check(profile, explicit=True)
+    message = str(excinfo.value)
+    assert "drafter" in message
+    assert "num_speculative_tokens" in message
+    assert "tree_budget" in message
+
+
 def test_runtime_patches_rope_parameters_without_copying_weights(
     tmp_path, monkeypatch
 ) -> None:

@@ -204,3 +204,13 @@ def test_unknown_4bit_path_explicit_opt_in_is_allowed() -> None:
 
 def test_check_preserves_none_success_contract() -> None:
     assert check(_good_profile(), alias="qwen3.5-27b-8bit") is None
+
+
+def test_unverified_explicit_check_does_not_inherit_residual_drafter() -> None:
+    profile = AliasProfile(
+        hf_path="user/unverified",
+        supports_dflash=False,
+        dflash_draft_model="registry/residual",
+    )
+    with pytest.raises(DFlashUnavailable, match="explicit drafter"):
+        check(profile, explicit=True, drafter_model=None)
