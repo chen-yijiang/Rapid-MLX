@@ -678,7 +678,7 @@ def _guarded_request(
                     raise RemoteMediaFetchError("Remote media URL redirect loop")
                 seen.add(current)
                 continue
-            setattr(response, "_rapid_mlx_session", session)
+            response._rapid_mlx_session = session
             return response
         raise RemoteMediaFetchError("Remote media URL redirected too many times")
     except Exception:
