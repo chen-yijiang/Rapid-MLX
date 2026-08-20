@@ -490,6 +490,10 @@ ALLOWED_RAPID_MLX_ENV_VARS: frozenset[str] = frozenset(
         "RAPID_MLX_WAN_LORA",
         "RAPID_MLX_WAN_LORA_HIGH",
         "RAPID_MLX_WAN_LORA_LOW",
+        # LTX-2.5 runtime executable selected only after aliases.json has
+        # routed the request to the audited LTX-2.5 video lane. It changes
+        # dependency location, not model/parser/tier routing.
+        "RAPID_MLX_LTX25_RUNTIME",
     }
 )
 
