@@ -93,6 +93,29 @@ def test_ltx25_runtime_rejects_unpinned_checkout(
     assert ltx25.resolve_ltx25_runtime() is None
 
 
+def test_ltx25_runtime_rejects_dirty_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "runtime"
+    runtime = repository / ".venv" / "bin" / "ltx-2-mlx"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("#!/bin/sh\n")
+    runtime.chmod(0o755)
+    (repository / ".git").mkdir()
+
+    def git(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        if "rev-parse" in command:
+            stdout = ltx25.LTX25_RUNTIME_COMMIT + "\n"
+        elif "status" in command:
+            stdout = " M packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/cli.py\n"
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(ltx25.subprocess, "run", git)
+    assert ltx25._runtime_revision(str(runtime)) is None
+
+
 def test_serve_routes_ltx25_model_to_specific_preflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -134,9 +157,10 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
         def __init__(self, command: list[str], **kwargs) -> None:
             calls.append((command, kwargs))
 
-        def communicate(self, *, input: str, timeout: int) -> None:
+        def communicate(self, *, input: str, timeout: int) -> tuple[str, str]:
             communicates.append((input, timeout))
             output.write_bytes(b"mp4-with-audio")
+            return "", ""
 
     monkeypatch.setattr(ltx25.subprocess, "Popen", Process)
     ltx25.LTX25VideoEngine("MrMofer/ltx-2.5-mlx-q8").generate(
@@ -159,7 +183,12 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
     assert "--low-ram" in command
     assert "a fox" not in command
     assert command[command.index("--image") + 1 :] == [str(image), "0", "0.6"]
-    assert run_kwargs == {"stdin": subprocess.PIPE, "text": True}
+    assert run_kwargs == {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
     assert communicates == [("a fox", 7200)]
     assert output.read_bytes() == b"mp4-with-audio"
 
@@ -181,8 +210,8 @@ def test_ltx25_engine_reports_subprocess_failure_without_leaking_details(
         def __init__(self, command: list[str], **kwargs) -> None:
             pass
 
-        def communicate(self, *, input: str, timeout: int) -> None:
-            pass
+        def communicate(self, *, input: str, timeout: int) -> tuple[str, str]:
+            return "private-output-sentinel", "private-error-sentinel"
 
     monkeypatch.setattr(ltx25.subprocess, "Popen", Process)
     engine = ltx25.LTX25VideoEngine("MrMofer/ltx-2.5-mlx-q8")
@@ -197,7 +226,11 @@ def test_ltx25_engine_reports_subprocess_failure_without_leaking_details(
             seed=7,
             image=None,
         )
-    assert "secret" not in str(exc.value)
+    assert str(exc.value) == (
+        "LTX-2.5 generation failed; check the server logs for runtime details."
+    )
+    assert "private-output-sentinel" not in str(exc.value)
+    assert "private-error-sentinel" not in str(exc.value)
 
 
 def test_ltx25_timeout_terminates_process(
@@ -244,6 +277,36 @@ def test_ltx25_timeout_terminates_process(
 
     assert terminated == [process]
     assert engine._process is None
+
+
+def test_ltx25_invalid_timeout_does_not_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "bin" / "ltx-2-mlx"
+    runtime.parent.mkdir()
+    runtime.write_text("#!/bin/sh\n")
+    runtime.chmod(0o755)
+    runtime.with_name("python").write_text("#!/bin/sh\n")
+    runtime.with_name("python").chmod(0o755)
+    monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
+    monkeypatch.setenv("RAPID_MLX_LTX25_TIMEOUT_SEC", "invalid")
+    monkeypatch.setattr(
+        ltx25.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("invalid config must fail before spawn"),
+    )
+
+    with pytest.raises(ltx25.LTX25BackendError, match="integer"):
+        ltx25.LTX25VideoEngine("MrMofer/ltx-2.5-mlx-q8").generate(
+            prompt="a fox",
+            output_path=tmp_path / "result.mp4",
+            width=704,
+            height=480,
+            num_frames=97,
+            fps=24,
+            seed=7,
+            image=None,
+        )
 
 
 def test_video_engine_selects_ltx25_and_preserves_generated_audio(

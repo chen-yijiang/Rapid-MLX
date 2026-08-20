@@ -51,7 +51,7 @@ def resolve_ltx25_runtime() -> str | None:
 
 
 def _runtime_revision(executable: str) -> str | None:
-    """Read the immutable git identity of the documented workspace install."""
+    """Verify the documented workspace install is pinned and unmodified."""
     path = Path(executable)
     try:
         repository = path.parents[2]
@@ -59,14 +59,26 @@ def _runtime_revision(executable: str) -> str | None:
         return None
     if not (repository / ".git").exists():
         return None
+    if path.absolute() != (repository / ".venv" / "bin" / "ltx-2-mlx").absolute():
+        return None
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+
+        def git(*arguments: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "-C", str(repository), *arguments],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+
+        result = git("rev-parse", "HEAD")
+        # The runtime packages are editable workspace installs, so verifying
+        # every tracked source and lockfile is clean verifies the code Python
+        # imports. Reject a missing/untracked lockfile as an incomplete clone.
+        if git("status", "--porcelain=v1", "--untracked-files=no").stdout.strip():
+            return None
+        git("ls-files", "--error-unmatch", "uv.lock")
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
     return result.stdout.strip()
@@ -83,9 +95,7 @@ def _generation_timeout_seconds() -> int:
             "The LTX-2.5 timeout must be an integer number of seconds."
         ) from exc
     if value < 60:
-        raise LTX25BackendError(
-            "The LTX-2.5 timeout must be at least 60 seconds."
-        )
+        raise LTX25BackendError("The LTX-2.5 timeout must be at least 60 seconds.")
     return value
 
 
@@ -146,6 +156,7 @@ class LTX25VideoEngine:
                 "The LTX-2.5 runtime does not have its isolated Python executable. "
                 "Reinstall it using the video generation guide."
             )
+        timeout = _generation_timeout_seconds()
 
         command = [
             str(runtime_python),
@@ -185,10 +196,18 @@ class LTX25VideoEngine:
         try:
             # Prompts may contain private user data. Keep them out of argv and
             # local process listings by feeding the isolated runtime over stdin.
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, text=True)
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
             with self._process_lock:
                 self._process = process
-            process.communicate(input=prompt, timeout=_generation_timeout_seconds())
+            # Captured output is deliberately discarded: upstream diagnostics
+            # are not a safe public/logging channel for request data.
+            process.communicate(input=prompt, timeout=timeout)
             if process.returncode:
                 raise subprocess.CalledProcessError(process.returncode, command)
         except subprocess.TimeoutExpired as exc:
