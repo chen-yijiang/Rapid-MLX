@@ -12,10 +12,22 @@ from vllm_mlx.spec_decode.capability import REGISTERED_METHODS, assess_method
 
 def _quantization(hf_path: str) -> str:
     lowered = hf_path.lower()
-    for label in ("nvfp4", "mxfp4", "4bit", "6bit", "8bit", "2bit", "3bit"):
+    for label in (
+        "nvfp4",
+        "mxfp4",
+        "4bit",
+        "6bit",
+        "8bit",
+        "2bit",
+        "3bit",
+        "bfloat16",
+        "bf16",
+        "float16",
+        "fp16",
+    ):
         if label in lowered:
             return label
-    return "unknown"
+    return "not-encoded-in-repo-name"
 
 
 def build_report() -> dict[str, dict]:

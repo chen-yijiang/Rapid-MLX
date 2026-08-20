@@ -170,6 +170,24 @@ def test_unverified_dflash_profile_cannot_inherit_residual_drafter() -> None:
     assert _resolve_dflash_drafter_repo(args, profile) is None
 
 
+def test_programmatic_4bit_requires_explicit_experimental_opt_in(monkeypatch) -> None:
+    from vllm_mlx.speculative.dflash.eligibility import DFlashUnavailable
+    from vllm_mlx.speculative.dflash.server import run_dflash_server
+
+    monkeypatch.setattr("vllm_mlx.speculative.dflash.server.have_runtime", lambda: True)
+    with pytest.raises(DFlashUnavailable, match="experimental_opt_in=True"):
+        run_dflash_server(
+            main_model_repo="user/target-4bit",
+            drafter_repo="user/drafter",
+            host="127.0.0.1",
+            port=8000,
+            served_model_name="target",
+            default_max_tokens=32,
+            cors_origins=[],
+            uvicorn_log_level="error",
+        )
+
+
 def test_dflash_preflight_rejects_legacy_mtp_alias(capsys) -> None:
     from vllm_mlx.cli import _preflight_dflash_mutexes_or_exit
 

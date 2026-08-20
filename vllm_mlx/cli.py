@@ -3500,6 +3500,7 @@ def serve_command(args):
             print(f"\n  ⚠ Experimental DFlash: {_warning}.\n")
         args._dflash_profile = _profile
         args._dflash_drafter_repo = _drafter
+        args._dflash_experimental = _assessment.recommendation != "verified"
         # ``have_runtime()`` is already validated by the boot-guard tier
         # at the top of ``serve_command`` — see the 0.9.2 dogfood comment
         # there. We keep the import + the deeper DFlashUnavailable / alias
@@ -3668,6 +3669,7 @@ def serve_command(args):
                 args.tool_call_parser if args.enable_auto_tool_choice else None
             ),
             reasoning_parser_name=args.reasoning_parser,
+            experimental_opt_in=getattr(args, "_dflash_experimental", False),
         )
         return
 
