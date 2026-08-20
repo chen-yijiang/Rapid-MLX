@@ -95,6 +95,9 @@ def report(
             f"main model hf_path={profile.hf_path!r} is 4-bit quantized; "
             "this pair has not been performance-validated and may be slower"
         )
+    curated_pair = profile.supports_dflash and (
+        drafter_model is None or drafter_model == profile.dflash_draft_model
+    )
     if explicit and not profile.supports_dflash:
         has_drafter = bool(drafter_model)
     else:
@@ -103,7 +106,7 @@ def report(
         # Should be caught at JSON-load time by _coerce, but defend
         # against direct AliasProfile construction in tests/code.
         reasons.append("DFlash requires an explicit drafter model")
-    if explicit and not profile.supports_dflash:
+    if explicit and not curated_pair:
         warnings.append(
             "this target/drafter pair is experimental and has not been "
             "performance-validated by Rapid-MLX; it may provide no speedup "
@@ -118,7 +121,7 @@ def report(
         recommendation=(
             "incompatible"
             if profile.is_moe
-            else ("verified" if profile.supports_dflash else "experimental")
+            else ("verified" if curated_pair else "experimental")
         ),
         warnings=tuple(warnings),
         reasons=tuple(reasons),

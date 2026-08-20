@@ -8348,11 +8348,16 @@ def _print_dflash_status(alias: str, profile) -> None:
     shared = assess_method(profile, "dflash")
     capable = shared.recommendation != "incompatible"
     verified = shared.recommendation == "verified"
-    eligible = verified and have_runtime()
+    runtime_available = have_runtime()
+    eligible = verified and runtime_available
     if not capable:
         summary = "✗ incompatible"
-    elif verified:
+    elif verified and runtime_available:
         summary = "✓ recommended / verified"
+    elif verified:
+        summary = "⚠ verified pair; runtime unavailable"
+    elif not runtime_available:
+        summary = "⚠ experimental; runtime unavailable"
     else:
         summary = "⚠ experimental (explicit drafter required)"
 
@@ -8447,11 +8452,16 @@ def _print_ddtree_status(alias: str, profile) -> None:
     shared = assess_method(profile, "ddtree")
     capable = shared.recommendation != "incompatible"
     verified = shared.recommendation == "verified"
-    eligible = verified and have_runtime()
+    runtime_available = have_runtime()
+    eligible = verified and runtime_available
     if not capable:
         summary = "✗ incompatible"
-    elif verified:
+    elif verified and runtime_available:
         summary = "✓ recommended / verified"
+    elif verified:
+        summary = "⚠ verified pair; runtime unavailable"
+    elif not runtime_available:
+        summary = "⚠ experimental; runtime unavailable"
     else:
         summary = "⚠ experimental (explicit metadata required)"
     top = "┌" + "─" * (inner + 2) + "┐"

@@ -96,7 +96,13 @@ def report(
     )
     if not has_tree_budget:
         reasons.append("DDTree requires tree_budget")
-    if explicit and not profile.supports_ddtree:
+    curated_pair = (
+        profile.supports_ddtree
+        and (drafter_model is None or drafter_model == profile.ddtree_draft_model)
+        and effective_tokens == profile.ddtree_speculative_tokens
+        and effective_budget == profile.ddtree_tree_budget
+    )
+    if explicit and not curated_pair:
         warnings.append(
             "this target/drafter pair is experimental and has not been "
             "performance-validated by Rapid-MLX; it may be slower"
@@ -112,7 +118,7 @@ def report(
         recommendation=(
             "incompatible"
             if profile.is_moe
-            else ("verified" if profile.supports_ddtree else "experimental")
+            else ("verified" if curated_pair else "experimental")
         ),
         warnings=tuple(warnings),
         reasons=tuple(reasons),

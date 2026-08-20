@@ -158,6 +158,20 @@ def test_unverified_explicit_check_does_not_inherit_residual_metadata() -> None:
     assert "tree_budget" in message
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"drafter_model": "user/different"},
+        {"speculative_tokens": 8},
+        {"tree_budget": 12},
+    ],
+)
+def test_verified_target_with_any_override_is_experimental(overrides) -> None:
+    result = report(_good_profile(), explicit=True, **overrides)
+    assert result.recommendation == "experimental"
+    assert result.warnings
+
+
 def test_runtime_patches_rope_parameters_without_copying_weights(
     tmp_path, monkeypatch
 ) -> None:

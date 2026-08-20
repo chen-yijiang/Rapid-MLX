@@ -214,3 +214,13 @@ def test_unverified_explicit_check_does_not_inherit_residual_drafter() -> None:
     )
     with pytest.raises(DFlashUnavailable, match="explicit drafter"):
         check(profile, explicit=True, drafter_model=None)
+
+
+def test_verified_target_with_overridden_drafter_is_experimental() -> None:
+    result = report(
+        _good_profile(),
+        explicit=True,
+        drafter_model="user/different-drafter",
+    )
+    assert result.recommendation == "experimental"
+    assert "performance-validated" in " ".join(result.warnings)
