@@ -32,7 +32,7 @@ def assess_method(profile: ModelProfile, method: str) -> SpecCapability:
             method, False, "incompatible", False, ("non-text serving lane",)
         )
     if method == "suffix":
-        if profile.is_hybrid or not profile.supports_spec_decode:
+        if profile.is_hybrid:
             return SpecCapability(
                 method,
                 False,
@@ -41,8 +41,16 @@ def assess_method(profile: ModelProfile, method: str) -> SpecCapability:
                 ("target verifier does not support lossless rollback",),
             )
         tier = profile.suffix_decoding_tier
-        recommendation = "verified" if tier == "verified" else "experimental"
-        return SpecCapability(method, True, recommendation, True)
+        verified = profile.supports_spec_decode and tier == "verified"
+        return SpecCapability(
+            method,
+            True if verified else None,
+            "verified" if verified else "experimental",
+            True,
+            warnings=()
+            if verified
+            else ("runtime validates lossless rollback support",),
+        )
     if method == "dflash":
         if profile.is_moe:
             return SpecCapability(

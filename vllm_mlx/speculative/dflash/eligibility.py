@@ -97,9 +97,6 @@ def report(
         )
         if not explicit:
             reasons.append("4-bit DFlash requires explicit experimental opt-in")
-    curated_pair = not is_4bit and profile.supports_dflash and (
-        drafter_model is None or drafter_model == profile.dflash_draft_model
-    )
     if explicit and not profile.supports_dflash:
         has_drafter = bool(drafter_model)
     else:
@@ -108,6 +105,12 @@ def report(
         # Should be caught at JSON-load time by _coerce, but defend
         # against direct AliasProfile construction in tests/code.
         reasons.append("DFlash requires an explicit drafter model")
+    curated_pair = (
+        not is_4bit
+        and profile.supports_dflash
+        and has_drafter
+        and (drafter_model is None or drafter_model == profile.dflash_draft_model)
+    )
     if explicit and not curated_pair:
         warnings.append(
             "this target/drafter pair is experimental and has not been "

@@ -32,6 +32,14 @@ def test_true_verifier_incompatibility_remains_hard_failure():
     assert suffix.recommendation == "incompatible"
 
 
+def test_uncurated_non_hybrid_suffix_is_experimental():
+    profile = AliasProfile(hf_path="user/custom-text-model")
+    suffix = assess_method(profile, "suffix")
+    assert suffix.capable is None
+    assert suffix.recommendation == "experimental"
+    assert suffix.explicit_opt_in is True
+
+
 def test_quantization_recognizes_hyphenated_spellings():
     assert _quantization("user/model-4-bit") == "4bit"
     assert _quantization("user/model-8-bit") == "8bit"

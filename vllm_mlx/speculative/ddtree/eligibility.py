@@ -101,6 +101,9 @@ def report(
     curated_pair = (
         not is_4bit
         and profile.supports_ddtree
+        and has_drafter
+        and has_speculative_tokens
+        and has_tree_budget
         and (drafter_model is None or drafter_model == profile.ddtree_draft_model)
         and effective_tokens == profile.ddtree_speculative_tokens
         and effective_budget == profile.ddtree_tree_budget
