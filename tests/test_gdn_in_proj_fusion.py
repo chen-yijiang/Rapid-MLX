@@ -190,6 +190,14 @@ class TestStructuralGate:
         gdn.in_proj_z = requant
         assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 1
 
+    def test_non_affine_mode_rejected(self):
+        # The sliced wide path calls mx.quantized_matmul with the affine
+        # interpretation; a quartet in any other mode must stay stock.
+        model = TinyGDNModel()
+        for name in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"):
+            getattr(model.layers[0], name).mode = "mxfp4"
+        assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 1
+
     def test_non_gdn_model_noop(self):
         model = nn.Sequential(nn.Linear(8, 8), nn.Linear(8, 8))
         assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 0

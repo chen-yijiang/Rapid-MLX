@@ -89,6 +89,11 @@ def _can_fuse(gdn: Any) -> bool:
     base = parts[0]
     if not all(type(p) is nn.QuantizedLinear for p in parts):
         return False
+    # The sliced wide path calls mx.quantized_matmul without a mode
+    # argument, i.e. with the affine interpretation; any other mode must
+    # stay stock.
+    if getattr(base, "mode", "affine") != "affine":
+        return False
     for p in parts:
         if (p.group_size, p.bits, getattr(p, "mode", "affine")) != (
             base.group_size,
@@ -257,22 +262,6 @@ def _bytes_of(arr: mx.array) -> bytes:
 # enabled after the projection probe passes for it; anything else takes
 # the (always byte-exact) sliced path at runtime.
 _PROBE_DTYPES = ("bfloat16", "float16")
-
-
-def _signature(gdn: Any) -> tuple:
-    """Kernel-dispatch-relevant identity of a projection quartet: parity
-    proven for one member holds for every member with the same signature."""
-    parts = _proj_modules(gdn)
-    base = parts[0]
-    return (
-        base.group_size,
-        base.bits,
-        getattr(base, "mode", "affine"),
-        base["weight"].dtype,
-        base["scales"].dtype,
-        base["biases"].dtype,
-        tuple(tuple(p["weight"].shape) for p in parts),
-    )
 
 
 def _probe_projection_parity(gdn: Any) -> frozenset:
@@ -480,23 +469,19 @@ def _install(model: Any) -> int:
     if not targets:
         return 0
 
-    # Phase 1 (no mutation): group targets by kernel-dispatch signature
-    # and byte-parity-probe one representative per signature. Parity is
-    # dispatch-dependent, so a mixed-precision checkpoint gets each
-    # distinct quartet geometry/quantization probed on its own weights.
+    # Phase 1 (no mutation): byte-parity-probe EVERY eligible layer on
+    # its own real weights. The probes are single-row-to-8-row matmuls,
+    # so the whole pass costs well under a second even at 48 layers, and
+    # no layer is ever fused on the strength of another layer's parity.
     plans = []
-    sig_cache: dict = {}
     for gdn in targets:
-        sig = _signature(gdn)
-        if sig not in sig_cache:
-            sig_cache[sig] = _probe_projection_parity(gdn)
-        dtypes = sig_cache[sig]
+        dtypes = _probe_projection_parity(gdn)
         if dtypes:
             plans.append((gdn, dtypes))
     if not plans:
         logger.warning(
             "[gdn_fusion] projection byte-parity probe failed for every "
-            "quartet signature on this mlx/hardware configuration; "
+            "eligible layer on this mlx/hardware configuration; "
             "leaving model stock"
         )
         return 0
