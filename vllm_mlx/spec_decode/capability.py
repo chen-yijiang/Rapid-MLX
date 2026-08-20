@@ -46,7 +46,7 @@ def assess_method(profile: ModelProfile, method: str) -> SpecCapability:
             method,
             True if verified else None,
             "verified" if verified else "experimental",
-            True,
+            not verified,
             warnings=()
             if verified
             else ("runtime validates lossless rollback support",),
@@ -56,11 +56,12 @@ def assess_method(profile: ModelProfile, method: str) -> SpecCapability:
             return SpecCapability(
                 method, False, "incompatible", False, ("MoE verifier unsupported",)
             )
+        verified = profile.supports_dflash
         return SpecCapability(
             method,
             None,
-            "verified" if profile.supports_dflash else "experimental",
-            True,
+            "verified" if verified else "experimental",
+            not verified,
             warnings=("requires a structurally compatible drafter",),
         )
     if method == "ddtree":
@@ -68,19 +69,21 @@ def assess_method(profile: ModelProfile, method: str) -> SpecCapability:
             return SpecCapability(
                 method, False, "incompatible", False, ("MoE tree verifier unsupported",)
             )
+        verified = profile.supports_ddtree
         return SpecCapability(
             method,
             None,
-            "verified" if profile.supports_ddtree else "experimental",
-            True,
+            "verified" if verified else "experimental",
+            not verified,
             warnings=("requires drafter, speculative-token, and tree-budget metadata",),
         )
     if method == "mtp":
+        verified = bool(profile.mtp_draft_model)
         return SpecCapability(
             method,
             None,
-            "verified" if profile.mtp_draft_model else "experimental",
-            True,
+            "verified" if verified else "experimental",
+            not verified,
             warnings=("runtime validates architecture and sidecar metadata",),
         )
     if method == "dspark":

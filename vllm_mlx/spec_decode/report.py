@@ -4,29 +4,30 @@
 from __future__ import annotations
 
 import json
+import re
 
 from vllm_mlx.model_aliases import list_profiles
 from vllm_mlx.spec_decode.capability import REGISTERED_METHODS, assess_method
 
 
 def _quantization(hf_path: str) -> str:
-    lowered = hf_path.lower().replace("-", "").replace("_", "")
-    for label in (
-        "nvfp4",
-        "mxfp4",
-        "int4",
-        "4bit",
-        "6bit",
-        "8bit",
-        "2bit",
-        "3bit",
-        "fp8",
-        "bfloat16",
-        "bf16",
-        "float16",
-        "fp16",
+    lowered = hf_path.lower()
+    for label, pattern in (
+        ("nvfp4", r"nvfp4"),
+        ("mxfp4", r"mxfp4"),
+        ("int4", r"int4"),
+        ("4bit", r"4[-_]?bit"),
+        ("6bit", r"6[-_]?bit"),
+        ("8bit", r"8[-_]?bit"),
+        ("2bit", r"2[-_]?bit"),
+        ("3bit", r"3[-_]?bit"),
+        ("fp8", r"fp8"),
+        ("bfloat16", r"bfloat16"),
+        ("bf16", r"bf16"),
+        ("float16", r"float16"),
+        ("fp16", r"fp16"),
     ):
-        if label in lowered:
+        if re.search(rf"(?<![a-z0-9])(?:{pattern})(?![a-z0-9])", lowered):
             return label
     return "not-encoded-in-repo-name"
 

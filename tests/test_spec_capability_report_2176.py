@@ -40,6 +40,22 @@ def test_uncurated_non_hybrid_suffix_is_experimental():
     assert suffix.explicit_opt_in is True
 
 
+def test_verified_entries_do_not_require_experimental_opt_in():
+    profile = AliasProfile(
+        hf_path="user/verified-8bit",
+        supports_spec_decode=True,
+        suffix_decoding_tier="verified",
+        supports_dflash=True,
+        supports_ddtree=True,
+        mtp_draft_model="user/mtp-head",
+    )
+    for method in ("suffix", "dflash", "ddtree", "mtp"):
+        assessment = assess_method(profile, method)
+        assert assessment.recommendation == "verified"
+        assert assessment.explicit_opt_in is False
+
+
 def test_quantization_recognizes_hyphenated_spellings():
     assert _quantization("user/model-4-bit") == "4bit"
     assert _quantization("user/model-8-bit") == "8bit"
+    assert _quantization("user/paint4bitmaps") == "not-encoded-in-repo-name"
