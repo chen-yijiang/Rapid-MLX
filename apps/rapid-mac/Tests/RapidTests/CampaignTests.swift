@@ -8,10 +8,9 @@ struct CampaignTests {
         #expect(Campaign.previewFromEnvironment([:]) == nil)
         let campaign = Campaign.previewFromEnvironment(["RAPID_GUI_CAMPAIGN_PREVIEW": "1"])
         #expect(campaign?.id == "model-qwen35-35b-202608")
-        #expect(campaign?.action == .pullModel(
-            alias: "qwen3.5-35b-4bit",
-            hfRepo: "mlx-community/Qwen3.5-35B-A3B-4bit"
-        ))
+        #expect(campaign?.action == .pullModel(.qwen35_35B4Bit))
+        #expect(Campaign.Model.qwen35_35B4Bit.alias == "qwen3.5-35b-4bit")
+        #expect(Campaign.Model.qwen35_35B4Bit.hfRepo == "mlx-community/Qwen3.5-35B-A3B-4bit")
     }
 
     @Test("dismissal is namespaced by immutable campaign id")

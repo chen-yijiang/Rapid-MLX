@@ -397,14 +397,15 @@ struct ContentView: View {
 
     private func performCampaignAction(_ action: Campaign.Action) {
         switch action {
-        case .pullModel(let alias, let hfRepo):
-            _ = downloads.startDownload(alias: alias, hfPath: hfRepo)
+        case .pullModel(let model):
+            _ = downloads.startDownload(alias: model.alias, hfPath: model.hfRepo)
         }
     }
 
     private func campaignActionState(for campaign: Campaign) -> Campaign.ActionState {
         switch campaign.action {
-        case .pullModel(let alias, _):
+        case .pullModel(let model):
+            let alias = model.alias
             let downloadState: Campaign.DownloadState? = switch downloads.job(for: alias)?.status {
             case .running: .running
             case .completed: .completed

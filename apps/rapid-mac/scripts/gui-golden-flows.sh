@@ -2494,7 +2494,14 @@ flow_campaign_banner() {
         "$OUT/campaign-visible.json" >/dev/null \
         || die "campaign CTA is absent or disabled"
     baseline campaign-banner.visible "$OUT/campaign-visible.json"
-    press "$OUT/campaign-visible.json" Campaign.Dismiss "$OUT/campaign-dismiss.json"
+    press "$OUT/campaign-visible.json" Campaign.Action "$OUT/campaign-action.json"
+    wait_fake_event \
+        '.event == "command" and .subcommand == "pull" and .alias == "qwen3.5-35b-4bit"' \
+        "campaign CTA did not start the allowlisted model pull"
+    [[ "$(jq -s '[.[] | select(.event == "command" and .subcommand == "pull" and .alias == "qwen3.5-35b-4bit")] | length' "$OUT/fake-events.jsonl")" == 1 ]] \
+        || die "campaign CTA started the model pull more than once"
+    wait_identifier Campaign.Dismiss "$OUT/campaign-after-action.json"
+    press "$OUT/campaign-after-action.json" Campaign.Dismiss "$OUT/campaign-dismiss.json"
     for _ in {1..40}; do
         see_main "$OUT/campaign-dismissed.json"
         if ! jq -e '.data.ui_elements[]? | select(.identifier == "Campaign.Banner")' \

@@ -5,8 +5,14 @@ import SwiftUI
 /// URL or execute a command: every action must be a case the client knows.
 struct Campaign: Equatable, Sendable {
     enum Kind: String, Sendable { case newModel }
+    enum Model: Equatable, Sendable {
+        case qwen35_35B4Bit
+
+        var alias: String { "qwen3.5-35b-4bit" }
+        var hfRepo: String { "mlx-community/Qwen3.5-35B-A3B-4bit" }
+    }
     enum Action: Equatable, Sendable {
-        case pullModel(alias: String, hfRepo: String?)
+        case pullModel(Model)
     }
     enum ActionState: Equatable, Sendable {
         case checking
@@ -52,10 +58,7 @@ struct Campaign: Equatable, Sendable {
         title: "Qwen3.5 35B is ready",
         body: "A smarter agentic model, tuned for Rapid-MLX. Download it now and keep working locally.",
         actionLabel: "Download model",
-        action: .pullModel(
-            alias: "qwen3.5-35b-4bit",
-            hfRepo: "mlx-community/Qwen3.5-35B-A3B-4bit"
-        )
+        action: .pullModel(.qwen35_35B4Bit)
     )
 
     static func previewFromEnvironment(_ environment: [String: String]) -> Campaign? {
