@@ -315,17 +315,25 @@ class TestDtypeGate:
 
 class TestWidthDispatch:
     def test_narrow_and_wide_paths_agree(self):
-        # The fused (narrow) and sliced (wide) paths must agree with each
-        # other where their gates meet: run the same rows through a fused
-        # layer at the widest fused width and compare against stock.
+        # Same input, same fused layer: once through the fused single
+        # matmul, once with the dtype gate emptied to force the sliced
+        # path — the two dispatch arms must agree byte-for-byte.
         model = TinyGDNModel()
+        assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 2
         rows = gdn_in_proj_fusion._FUSED_MAX_ROWS
         x = _inputs(rows, model.hidden_size, seed=11)
-        before = _run_all(model, x)
-        assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 2
-        after = _run_all(model, x)
-        for b, a in zip(before, after):
-            assert _bits_equal(b, a)
+        gdn = model.layers[0]
+        assert x.dtype in gdn._rapid_gdn_dtypes
+        y_fused = gdn(x, None, None)
+        mx.eval(y_fused)
+        saved = gdn._rapid_gdn_dtypes
+        try:
+            gdn._rapid_gdn_dtypes = frozenset()
+            y_sliced = gdn(x, None, None)
+            mx.eval(y_sliced)
+        finally:
+            gdn._rapid_gdn_dtypes = saved
+        assert _bits_equal(y_fused, y_sliced)
 
     def test_wide_path_uses_slices(self, monkeypatch):
         model = TinyGDNModel()
