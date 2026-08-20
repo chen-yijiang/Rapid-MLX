@@ -509,6 +509,13 @@ def _install(model: Any) -> int:
             # worth.
             mx.clear_cache()
     except Exception:  # noqa: BLE001 — keep the partially-fused model serving
+        # A crash inside _fuse_one after ``in_proj_fused`` was installed
+        # (i.e. during the trailing deletes) still leaves that layer on
+        # the fused path — count it by its observable state, not by
+        # whether _fuse_one returned.
+        committed = sum(
+            1 for gdn, _ in plans if getattr(gdn, "in_proj_fused", None) is not None
+        )
         logger.warning(
             "[gdn_fusion] commit failed after %d/%d layers; the fused "
             "layers remain active and parity-proven",

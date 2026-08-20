@@ -243,12 +243,24 @@ class TestFailureContainment:
         _run_all(model, x)
 
     def test_fuse_one_exception_contained(self, monkeypatch):
+        model = TinyGDNModel()
+        entered = {"commit": False}
+        real = gdn_in_proj_fusion._fuse_one
+
         def boom(gdn, dtypes=None):
-            raise RuntimeError("commit blew up")
+            # Leave the synthetic whole-layer probe's _fuse_one intact so
+            # the install reaches the real commit phase, then blow up on
+            # the first real-model layer (before any mutation).
+            if any(gdn is layer for layer in model.layers):
+                entered["commit"] = True
+                raise RuntimeError("commit blew up")
+            real(gdn, dtypes)
 
         monkeypatch.setattr(gdn_in_proj_fusion, "_fuse_one", boom)
-        model = TinyGDNModel()
         assert gdn_in_proj_fusion.fuse_gdn_in_proj(model) == 0
+        assert entered["commit"]
+        for layer in model.layers:
+            assert hasattr(layer, "in_proj_qkv")
         x = _inputs(2, model.hidden_size)
         _run_all(model, x)
 
