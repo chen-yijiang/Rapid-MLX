@@ -212,16 +212,12 @@ class LTX25VideoEngine:
     @staticmethod
     def _terminate_process(process: subprocess.Popen[str]) -> None:
         leader_running = process.poll() is None
+        if not leader_running:
+            return
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
-            if leader_running:
-                process.wait(timeout=_TERMINATE_GRACE_SECONDS)
-            return
-        # Once a reaped leader's PID is reusable, signaling its old PGID again
-        # could target an unrelated group. TERM is therefore the final signal
-        # for an already-exited leader and any surviving descendants.
-        if not leader_running:
+            process.wait(timeout=_TERMINATE_GRACE_SECONDS)
             return
         try:
             process.wait(timeout=_TERMINATE_GRACE_SECONDS)
@@ -270,14 +266,11 @@ class LTX25VideoEngine:
         timeout = _generation_timeout_seconds()
         workspace = prepare_ltx25_runtime(executable)
         try:
-            descriptor, staged_name = tempfile.mkstemp(
+            staging = tempfile.TemporaryDirectory(
                 prefix=f".{output_path.name}.",
-                suffix=".tmp.mp4",
                 dir=output_path.parent,
             )
-            os.close(descriptor)
-            staged_output = Path(staged_name)
-            staged_output.unlink()
+            staged_output = Path(staging.name) / "output.mp4"
         except OSError as exc:
             raise LTX25BackendError(
                 "LTX-2.5 generation could not create its temporary output."
@@ -368,4 +361,4 @@ class LTX25VideoEngine:
             with self._process_lock:
                 if self._process is process:
                     self._process = None
-            staged_output.unlink(missing_ok=True)
+            staging.cleanup()

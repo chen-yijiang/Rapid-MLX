@@ -288,7 +288,7 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
     assert command[3:5] == ["generate", "--model"]
     generated = Path(command[command.index("--output") + 1])
     assert generated != output
-    assert generated.parent == output.parent
+    assert generated.parent.parent == output.parent
     assert output.read_bytes() == b"mp4-with-audio"
     assert "--distilled" in command
     assert "--low-ram" in command
@@ -400,7 +400,7 @@ def test_ltx25_zero_exit_cannot_reuse_stale_output(
         )
 
     assert output.read_bytes() == b"stale-video"
-    assert list(tmp_path.glob(".result.mp4.*.tmp.mp4")) == []
+    assert list(tmp_path.glob(".result.mp4.*")) == []
     assert len(terminated) == 1
 
 
@@ -471,7 +471,7 @@ def test_ltx25_termination_does_not_reuse_exited_leader_pgid(
 
     ltx25.LTX25VideoEngine._terminate_process(Process())  # type: ignore[arg-type]
 
-    assert signals == [(123, signal.SIGTERM)]
+    assert signals == []
 
 
 def test_ltx25_termination_escalates_while_leader_is_unreaped(
