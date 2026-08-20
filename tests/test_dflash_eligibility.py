@@ -137,14 +137,15 @@ def test_report_collects_all_failures() -> None:
     bad = AliasProfile(
         hf_path="mlx-community/Qwen3.6-35B-A3B-4bit",  # 4-bit AND MoE
         is_moe=True,
-        # supports_dflash=False (default) → 3 reasons total
+        # supports_dflash=False (default)
     )
     r = report(bad, alias="qwen3.6-35b-4bit")
-    assert len(r.reasons) == 3, f"expected 3 reasons, got: {r.reasons}"
     joined = " ".join(r.reasons)
     assert "MoE" in joined
     assert "4-bit" in " ".join(r.warnings)
+    assert "explicit experimental opt-in" in joined
     assert "not DFlash-enabled" in joined
+    assert "drafter" in joined
 
 
 def test_report_no_alias_name_renders_cleanly() -> None:
