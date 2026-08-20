@@ -10,6 +10,13 @@ from pathlib import Path
 
 LTX25_RUNTIME_COMMIT = "57952288076766abe27dda3a774b2c24f7346977"
 LTX25_RUNTIME_REPOSITORY = "https://github.com/MrMoferFRAN/ltx-2-mlx.git"
+_STDIN_PROMPT_RUNNER = """\
+import sys
+from ltx_pipelines_mlx.cli import main
+
+sys.argv = ["ltx-2-mlx", *sys.argv[1:], "--prompt", sys.stdin.read()]
+main()
+"""
 
 
 def is_ltx25_model(model_name: str | None) -> bool:
@@ -63,17 +70,23 @@ class LTX25VideoEngine:
                 "LTX-2.5 support requires the pinned ltx-2-mlx runtime. "
                 "See the LTX-2.5 setup in the video generation guide."
             )
+        runtime_python = Path(executable).with_name("python")
+        if not runtime_python.is_file() or not os.access(runtime_python, os.X_OK):
+            raise LTX25BackendError(
+                "The LTX-2.5 runtime does not have its isolated Python executable. "
+                "Reinstall it using the video generation guide."
+            )
 
         command = [
-            executable,
+            str(runtime_python),
+            "-c",
+            _STDIN_PROMPT_RUNNER,
             "generate",
             "--model",
             self.model_name,
             "--distilled",
             "--low-ram",
             "--quiet",
-            "--prompt",
-            prompt,
             "--height",
             str(height),
             "--width",
@@ -99,7 +112,9 @@ class LTX25VideoEngine:
                 ]
             )
         try:
-            subprocess.run(command, check=True)
+            # Prompts may contain private user data. Keep them out of argv and
+            # local process listings by feeding the isolated runtime over stdin.
+            subprocess.run(command, check=True, input=prompt, text=True)
         except (OSError, subprocess.CalledProcessError) as exc:
             raise LTX25BackendError(
                 "LTX-2.5 generation failed; check the server logs for runtime details."

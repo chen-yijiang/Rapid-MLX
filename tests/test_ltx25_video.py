@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -100,11 +101,18 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
     output = tmp_path / "result.mp4"
     image = tmp_path / "reference.png"
     image.write_bytes(b"png")
-    calls: list[list[str]] = []
-    monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: "/trusted/ltx-2-mlx")
+    calls: list[tuple[list[str], dict]] = []
+    runtime = tmp_path / "bin" / "ltx-2-mlx"
+    runtime.parent.mkdir()
+    runtime.write_text("#!/bin/sh\n")
+    runtime.chmod(0o755)
+    runtime_python = runtime.with_name("python")
+    runtime_python.write_text("#!/bin/sh\n")
+    runtime_python.chmod(0o755)
+    monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
 
     def run(command: list[str], **kwargs) -> None:
-        calls.append(command)
+        calls.append((command, kwargs))
         output.write_bytes(b"mp4-with-audio")
 
     monkeypatch.setattr(ltx25.subprocess, "run", run)
@@ -120,19 +128,28 @@ def test_ltx25_engine_invokes_pinned_runtime_contract(
         conditioning_strength=0.6,
     )
 
-    command = calls[0]
-    assert command[0] == "/trusted/ltx-2-mlx"
-    assert command[1:3] == ["generate", "--model"]
+    command, run_kwargs = calls[0]
+    assert command[0] == str(runtime_python)
+    assert command[1] == "-c"
+    assert command[3:5] == ["generate", "--model"]
     assert "--distilled" in command
     assert "--low-ram" in command
+    assert "a fox" not in command
     assert command[command.index("--image") + 1 :] == [str(image), "0", "0.6"]
+    assert run_kwargs == {"check": True, "input": "a fox", "text": True}
     assert output.read_bytes() == b"mp4-with-audio"
 
 
 def test_ltx25_engine_reports_subprocess_failure_without_leaking_details(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: "/trusted/ltx-2-mlx")
+    runtime = tmp_path / "bin" / "ltx-2-mlx"
+    runtime.parent.mkdir()
+    runtime.write_text("#!/bin/sh\n")
+    runtime.chmod(0o755)
+    runtime.with_name("python").write_text("#!/bin/sh\n")
+    runtime.with_name("python").chmod(0o755)
+    monkeypatch.setattr(ltx25, "resolve_ltx25_runtime", lambda: str(runtime))
 
     def fail(*args, **kwargs) -> None:
         raise subprocess.CalledProcessError(1, ["ltx-2-mlx"], stderr="secret")
@@ -184,6 +201,66 @@ def test_video_engine_selects_ltx25_and_preserves_generated_audio(
     assert engine.video_family == "ltx-2.5"
     assert output.read_bytes() == b"mp4-with-audio"
     assert captured["crop"]["family"] == "LTX-2.5"
+
+
+def test_ltx25_real_crop_preserves_audio_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ffmpeg = video_lane._resolve_ffmpeg()
+    ffprobe = shutil.which("ffprobe")
+    if ffmpeg is None or ffprobe is None:
+        pytest.skip("ffmpeg and ffprobe are required for the real media assertion")
+    output = tmp_path / "with-audio.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=64x64:d=0.2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=0.2",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(output),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    VideoEngine._crop_generated_output(
+        output_path=output,
+        width=64,
+        height=64,
+        output_width=32,
+        output_height=32,
+        family="LTX-2.5",
+    )
+    streams = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert streams.stdout.strip() == "audio"
 
 
 def test_ltx25_distilled_rejects_cfg_controls() -> None:
