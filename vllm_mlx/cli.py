@@ -2756,6 +2756,8 @@ def serve_command(args):
         from .runtime.video_lane import require_video_runtime_or_exit
         from .video.wan import is_wan_model
 
+        # Used by the generic model-prefetch guard later in this function;
+        # Wan owns its own revision-pinned download path.
         _is_wan_video = is_wan_model(args.model)
         require_video_runtime_or_exit(args.model)
 

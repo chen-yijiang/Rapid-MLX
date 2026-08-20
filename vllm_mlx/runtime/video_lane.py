@@ -236,6 +236,10 @@ class VideoEngine:
                     "LTX-2.5 distilled generation does not support negative_prompt "
                     "or guidance_scale."
                 )
+            if image is None and conditioning_strength is not None:
+                raise VideoRuntimeError(
+                    "LTX-2.5 conditioning_strength requires an input image."
+                )
             try:
                 with self._generation_lock:
                     self._ltx25_engine.generate(

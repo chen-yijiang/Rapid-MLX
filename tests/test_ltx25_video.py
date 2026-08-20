@@ -44,6 +44,24 @@ def test_ltx25_capabilities_match_distilled_controls() -> None:
     }
 
 
+def test_ltx25_direct_engine_rejects_conditioning_without_image() -> None:
+    engine = VideoEngine.__new__(VideoEngine)
+    engine._ltx25_engine = object()
+
+    with pytest.raises(VideoRuntimeError, match="requires an input image"):
+        engine.generate(
+            prompt="fox",
+            output_path=Path("unused.mp4"),
+            width=704,
+            height=480,
+            num_frames=97,
+            fps=24,
+            seed=7,
+            image=None,
+            conditioning_strength=0.5,
+        )
+
+
 def test_ltx25_runtime_preflight_fails_before_download(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
