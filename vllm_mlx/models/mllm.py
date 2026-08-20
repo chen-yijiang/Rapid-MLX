@@ -15,6 +15,7 @@ Features:
 
 import atexit
 import base64
+import fcntl
 import ipaddress
 import logging
 import math
@@ -771,6 +772,14 @@ def _has_media_signature(header: bytes) -> bool:
     return len(header) >= 12 and header[4:8] == b"ftyp"
 
 
+def _opened_fd_path(fd: int) -> Path:
+    """Return the kernel-resolved path of an open descriptor."""
+    if sys.platform == "darwin":
+        raw = fcntl.fcntl(fd, 50, b"\0" * 1024)  # F_GETPATH
+        return Path(raw.split(b"\0", 1)[0].decode())
+    return Path(os.readlink(f"/proc/self/fd/{fd}"))
+
+
 def _local_media_root() -> Path | None:
     """Return the confinement root for local media reads, if configured."""
     root = os.environ.get("RAPID_MLX_MEDIA_ROOT")
@@ -823,7 +832,7 @@ def _resolve_local_media(path: str) -> str | None:
         return None
     temp_file = None
     try:
-        opened = Path(f"/dev/fd/{fd}").resolve()
+        opened = _opened_fd_path(fd).resolve()
         try:
             opened.relative_to(root)
         except ValueError:
