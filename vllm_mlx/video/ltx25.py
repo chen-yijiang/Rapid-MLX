@@ -74,6 +74,7 @@ def _runtime_revision(executable: str) -> str | None:
                 capture_output=True,
                 text=True,
                 timeout=5,
+                env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
             )
 
         result = git("rev-parse", "HEAD")
@@ -98,6 +99,7 @@ def _materialize_runtime(repository: Path, destination: Path) -> None:
             check=True,
             capture_output=True,
             timeout=30,
+            env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
         ).stdout
         root = destination.resolve()
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as source:

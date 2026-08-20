@@ -94,7 +94,7 @@ def test_ltx25_runtime_rejects_unpinned_checkout(
     assert ltx25.resolve_ltx25_runtime() is None
 
 
-def test_ltx25_materialization_excludes_untracked_files(
+def test_ltx25_materialization_ignores_checkout_and_replace_refs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -128,6 +128,31 @@ def test_ltx25_materialization_excludes_untracked_files(
     ).stdout.strip()
     subprocess.run(
         ["git", "-C", str(repository), "update-ref", "HEAD", commit], check=True
+    )
+    tracked.write_text("raise RuntimeError('replaced')\n")
+    subprocess.run(["git", "-C", str(repository), "add", "tracked.py"], check=True)
+    replacement_tree = subprocess.run(
+        ["git", "-C", str(repository), "write-tree"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    replacement_commit = subprocess.run(
+        ["git", "-C", str(repository), "commit-tree", replacement_tree, "-m", "evil"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(repository), "replace", commit, replacement_commit],
+        check=True,
     )
     (repository / "untracked.py").write_text("raise RuntimeError('unsafe')\n")
     destination = tmp_path / "snapshot"
