@@ -494,6 +494,9 @@ ALLOWED_RAPID_MLX_ENV_VARS: frozenset[str] = frozenset(
         # routed the request to the audited LTX-2.5 video lane. It changes
         # dependency location, not model/parser/tier routing.
         "RAPID_MLX_LTX25_RUNTIME",
+        # Hard deadline for an already-selected LTX-2.5 generation process;
+        # affects lifecycle only, never model/parser/tier routing.
+        "RAPID_MLX_LTX25_TIMEOUT_SEC",
     }
 )
 

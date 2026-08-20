@@ -463,5 +463,7 @@ class VideoEngine:
         """Video weights load lazily; startup must not trigger a 40+ GB pull."""
 
     async def stop(self) -> None:
+        if getattr(self, "_ltx25_engine", None) is not None:
+            self._ltx25_engine.stop()
         if self._cog_engine is not None:
             await self._cog_engine.close()
