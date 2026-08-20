@@ -488,7 +488,7 @@ struct OnboardingCompletionBehaviorTests {
         // the transaction, in that order.
         let handoff = "privatefuncfinishOnboardingHandoff(){section=.chat" +
             #"VoiceOverAnnouncer.announce("Setupcomplete.Openingyourfirstchat.")"# +
-            "composerFocusRequest&+=1}"
+            "composerFocusRequest&+=1"
         #expect(
             body.contains(handoff),
             """
@@ -498,6 +498,8 @@ struct OnboardingCompletionBehaviorTests {
             hear that setup finished never learns their action worked.
             """
         )
+        #expect(body.contains("showOnboardingCompletePrompt=true"),
+                "first onboarding completion must present its completion prompt")
         // The parent half must be gated on the coordinator's verdict so a
         // repeated activation cannot re-run the transition.
         let view = try Self.strippedSource("Sources/Rapid/UI/QuickstartView.swift")
