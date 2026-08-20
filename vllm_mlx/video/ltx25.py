@@ -19,12 +19,36 @@ _DEFAULT_TIMEOUT_SECONDS = 7200
 _TERMINATE_GRACE_SECONDS = 10
 _RUNTIME_CACHE_LOCK = threading.Lock()
 _RUNTIME_CACHE: tempfile.TemporaryDirectory[str] | None = None
-_STDIN_PROMPT_RUNNER = """\
+_INNER_PROMPT_RUNNER = """\
+import signal
 import sys
 from ltx_pipelines_mlx.cli import main
 
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
 sys.argv = ["ltx-2-mlx", *sys.argv[1:], "--prompt", sys.stdin.read()]
 main()
+"""
+_STDIN_PROMPT_RUNNER = f"""\
+import os
+import signal
+import subprocess
+import sys
+
+prompt = sys.stdin.read()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen(
+    [sys.executable, "-c", {_INNER_PROMPT_RUNNER!r}, *sys.argv[1:]],
+    stdin=subprocess.PIPE,
+    text=True,
+)
+try:
+    child.communicate(input=prompt)
+finally:
+    try:
+        os.killpg(os.getpgrp(), signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+raise SystemExit(child.returncode)
 """
 
 
@@ -33,7 +57,7 @@ def is_ltx25_model(model_name: str | None) -> bool:
     if not model_name:
         return False
     normalized = model_name.casefold().replace("_", "-")
-    return "ltx-2.5" in normalized or "ltx25" in normalized
+    return normalized.rsplit("/", 1)[-1] == "ltx-2.5-mlx-q8"
 
 
 def resolve_ltx25_runtime() -> str | None:
@@ -218,6 +242,8 @@ class LTX25VideoEngine:
     def _terminate_process(process: subprocess.Popen[str]) -> None:
         leader_running = process.poll() is None
         if not leader_running:
+            # The runner is a group supervisor: before it exits it signals the
+            # still-owned process group, so no stale PGID needs to be reused.
             return
         try:
             os.killpg(process.pid, signal.SIGTERM)

@@ -24,6 +24,7 @@ def test_ltx25_alias_routes_to_video_lane() -> None:
     assert profile.hf_path == "MrMofer/ltx-2.5-mlx-q8"
     assert profile.modality == "video-gen"
     assert profile.min_memory_gb == 24
+    assert ltx25.is_ltx25_model("org/my-ltx25-experiment") is False
 
 
 def test_ltx25_capabilities_match_distilled_controls() -> None:
