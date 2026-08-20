@@ -408,7 +408,10 @@ struct ContentView: View {
             let alias = model.alias
             let downloadState: Campaign.DownloadState? = switch downloads.job(for: alias)?.status {
             case .running: .running
-            case .completed: .completed
+            case .completed:
+                downloads.job(for: alias)?.completedCacheGeneration.map {
+                    .completed(cacheGeneration: $0)
+                } ?? .retryable
             case .failed, .cancelled: .retryable
             case nil: nil
             }

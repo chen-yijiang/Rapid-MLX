@@ -30,7 +30,11 @@ struct Campaign: Equatable, Sendable {
             }
         }
     }
-    enum DownloadState: Equatable, Sendable { case running, completed, retryable }
+    enum DownloadState: Equatable, Sendable {
+        case running
+        case completed(cacheGeneration: UInt)
+        case retryable
+    }
 
     static func actionState(
         download: DownloadState?,
@@ -40,6 +44,7 @@ struct Campaign: Equatable, Sendable {
         currentGeneration: UInt
     ) -> ActionState {
         if download == .running { return .inProgress }
+        if download == .completed(cacheGeneration: currentGeneration) { return .completed }
         if catalogGeneration != currentGeneration { return .checking }
         if isCached { return .completed }
         return catalogLoaded ? .idle : .checking
