@@ -69,7 +69,10 @@ final class DictationController {
             // renders from has to move with it — otherwise picking a model
             // leaves the Enable switch stuck until something else refreshes.
             refreshReadiness()
-            Task { await prewarmModel() }
+            // Replacing, not joining: a prewarm still in flight here is
+            // warming the PREVIOUS model, and joining it would return with
+            // the new selection never warmed.
+            Task { await prewarmModel(replacingCurrent: true) }
         }
     }
 
@@ -310,22 +313,36 @@ final class DictationController {
     ///    parakeet), so ``warmUpEngine()`` sends a beat of silence to make
     ///    the sidecar pay that now instead of inside the user's first real
     ///    dictation.
-    func prewarmModel() async {
-        // Single-flight. The checks below are MainActor-synchronous, so two
-        // triggers (enable + tab appear + model didSet can all fire close
-        // together) cannot both slip past: the second one joins the task the
-        // first created instead of racing it through the engine's serial STT
-        // lane.
+    /// - Parameter replacingCurrent: pass `true` when the model CHANGED —
+    ///   an in-flight prewarm is then warming the wrong model and must be
+    ///   superseded, not joined. The default joins it: for a same-model
+    ///   trigger (enable + tab appear firing close together) the running
+    ///   flight already covers this call.
+    func prewarmModel(replacingCurrent: Bool = false) async {
+        if replacingCurrent {
+            prewarmTask?.cancel()
+            prewarmTask = nil
+        }
+        // Single-flight. The check-and-assign below is MainActor-synchronous
+        // (no await between them), so concurrent triggers cannot both slip
+        // past: the second joins the task the first created instead of
+        // racing it through the engine's serial STT lane.
         if let running = prewarmTask {
             await running.value
             return
         }
-        let task = Task { [weak self] in
+        var created: Task<Void, Never>!
+        created = Task { [weak self] in
             await self?.performPrewarm()
-            self?.prewarmTask = nil
+            // Only the flight that still OWNS the slot may clear it. A
+            // cancelled predecessor finishing late must not null out the
+            // task a later enable started, or single-flight breaks.
+            if let self, self.prewarmTask == created {
+                self.prewarmTask = nil
+            }
         }
-        prewarmTask = task
-        await task.value
+        prewarmTask = created
+        await created.value
     }
 
     private func performPrewarm() async {
