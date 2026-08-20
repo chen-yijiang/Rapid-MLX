@@ -1690,7 +1690,7 @@
     "supports_spec_decode": false,
     "supports_dflash": false,
     "suffix_decoding_tier": "unknown",
-    "min_memory_gb": 48
+    "min_memory_gb": 64
   },
   "embeddinggemma-300m-6bit": {
     "hf_path": "mlx-community/embeddinggemma-300m-6bit",
