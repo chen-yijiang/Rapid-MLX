@@ -363,6 +363,9 @@ class TestMediaSecurity:
             def request(self, method, url, **kwargs):
                 return _Redirect()
 
+            def close(self):
+                pass
+
         monkeypatch.setattr("vllm_mlx.models.mllm.requests.Session", _FakeSession)
         monkeypatch.setattr(
             "vllm_mlx.models.mllm.socket.getaddrinfo",
