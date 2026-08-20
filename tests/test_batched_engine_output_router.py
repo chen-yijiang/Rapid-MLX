@@ -296,14 +296,18 @@ async def test_router_propagates_logprobs_list_form_per_index():
 
 
 @pytest.mark.asyncio
-async def test_stream_chat_keeps_think_tag_tokenizers_on_legacy_path():
-    """Think-tag routers are detected but not engine-enabled until validated."""
+async def test_stream_chat_routes_think_tag_tokenizers():
+    """Think-tag (Qwen3 / DeepSeek R1) routers route reasoning tokens into
+    the ``reasoning`` channel and post-`` response`` text into ``content``.
+    Previously gated off engine-enablement until validated (issue #63); now
+    enabled in ``_OUTPUT_ROUTER_ALLOWLIST`` the same way gemma4/harmony are.
+    """
     engine = _make_engine(FakeTokenizer(QWEN3_VOCAB))
 
     async def fake_stream_generate(**kwargs):
         yield GenerationOutput(
             text="",
-            new_text="<think>Reason</think>Answer",
+            new_text=" thinkingReason responseAnswer",
             tokens=[248068, 2, 248069, 4],
             finished=True,
             finish_reason="stop",
@@ -316,9 +320,15 @@ async def test_stream_chat_keeps_think_tag_tokenizers_on_legacy_path():
         engine.stream_chat(messages=[{"role": "user", "content": "hi"}])
     )
 
-    assert len(outputs) == 1
-    assert outputs[0].new_text == "<think>Reason</think>Answer"
-    assert outputs[0].channel is None
+    # `` thinking`` (248068) opens the REASONING channel and is suppressed;
+    # ``Reason`` (2) routes to ``reasoning``. `` response`` (248069) closes
+    # thinking and is suppressed; ``Answer`` (4) routes to ``content``. The
+    # router markers must never leak into either channel's text.
+    assert [o.new_text for o in outputs] == ["Reason", "Answer"]
+    assert [o.channel for o in outputs] == ["reasoning", "content"]
+    # The final routed chunk carries the terminal state through.
+    assert outputs[-1].finished is True
+    assert outputs[-1].finish_reason == "stop"
 
 
 @pytest.mark.asyncio
@@ -411,6 +421,11 @@ _ROUTER_FAMILIES_TOOL_CALL_AGGREGATE: dict[str, dict] = {
 _ROUTER_FAMILIES_TOOL_CALL_AT_PARSER_LAYER: set[str] = {
     "harmony",  # tool calls routed via <|channel|>commentary + <|call|>;
     # extracted by HarmonyToolParser, not OutputRouter.feed()
+    # Qwen3 / DeepSeek R1 ``think``-tag routers route only reasoning vs.
+    # content; they never emit a deferred ``Channel.TOOL_CALL`` aggregate,
+    # so tool-call extraction flows through the per-family ToolParser on
+    # the content channel.
+    "think",
 }
 
 

@@ -3120,7 +3120,7 @@ def _engine_supports_channel_routed_tool_calls(engine) -> bool:
     if not getattr(engine, "supports_tool_calls", True):
         return False
     try:
-        from ..engine.batched import _OUTPUT_ROUTER_ALLOWLIST
+        from ..engine.batched import _OUTPUT_ROUTER_TOOL_CALL_ALLOWLIST
         from ..output_router import OutputRouter
 
         tokenizer = getattr(engine, "tokenizer", None)
@@ -3129,7 +3129,7 @@ def _engine_supports_channel_routed_tool_calls(engine) -> bool:
         router = OutputRouter.from_tokenizer_for_streaming(tokenizer)
         if router is None:
             return False
-        return router.map.format_tag in _OUTPUT_ROUTER_ALLOWLIST
+        return router.map.format_tag in _OUTPUT_ROUTER_TOOL_CALL_ALLOWLIST
     except Exception:
         # Capability probe is best-effort — any failure means we
         # cannot prove channel-routed support, so the gate falls

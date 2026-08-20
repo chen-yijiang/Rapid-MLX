@@ -610,7 +610,18 @@ _CHANNEL_TO_STRING = {
     Channel.TOOL_CALL: "tool_call",
 }
 
-_OUTPUT_ROUTER_ALLOWLIST = {"gemma4", "harmony"}
+_OUTPUT_ROUTER_ALLOWLIST = {"gemma4", "harmony", "think"}
+
+# Subset of ``_OUTPUT_ROUTER_ALLOWLIST`` whose router actually EMITS
+# ``Channel.TOOL_CALL`` aggregate events (or structured ``tool_calls``), so
+# the server has a way to produce structured tool_calls WITHOUT a text
+# tool-call parser. The ``think`` family (Qwen3 / DeepSeek R1) only routes
+# reasoning vs. content — it never emits an aggregate ``Channel.TOOL_CALL``,
+# so its tool calls must flow through a per-family ``ToolParser`` on the
+# content channel. Keeping it out of this set preserves the
+# ``tool_choice="required" + stream`` 422 enforcement (see
+# ``_engine_supports_channel_routed_tool_calls`` in routes/chat.py).
+_OUTPUT_ROUTER_TOOL_CALL_ALLOWLIST = {"gemma4", "harmony"}
 
 
 def _channel_name(channel: Channel) -> str:
