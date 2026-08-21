@@ -305,17 +305,18 @@ def test_window_ordering_ignores_a_title_the_baseline_hides():
     )
 
 
-def test_expanded_system_scrollbar_is_dropped_but_leaf_bar_remains():
+def test_expanded_system_scrollbar_is_collapsed_to_leaf_bar():
     root = ax_baseline.Node({"role": "AXScrollArea"})
     scrollbar = ax_baseline.Node({"role": "AXScrollBar", "value": 0.5})
     scrollbar.children.append(ax_baseline.Node({"role": "AXValueIndicator"}))
     root.children.append(scrollbar)
 
-    assert ax_baseline.render(root, ()) == ["AXScrollArea"]
+    expanded = ax_baseline.render(root, ())
 
     leaf = ax_baseline.Node({"role": "AXScrollBar", "value": 0.5})
     root.children = [leaf]
-    assert ax_baseline.render(root, ()) == [
+    leaf_render = ax_baseline.render(root, ())
+    assert expanded == leaf_render == [
         "AXScrollArea",
         "  AXScrollBar value=number",
     ]

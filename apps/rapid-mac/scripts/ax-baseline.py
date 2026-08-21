@@ -231,8 +231,8 @@ def is_system_scrollbar_subtree(node: Node) -> bool:
     Whether a SwiftUI ``ScrollView`` publishes this subtree varies with the
     macOS release and the runner's scrollbar preference.  The owning
     ``AXScrollArea`` remains in the fingerprint; only the anonymous system
-    control and its arrows/pages are dropped. A leaf scrollbar remains part of
-    the fingerprint: it is the semantic scrollbar SwiftUI consistently
+    control remains while its arrows/pages are dropped. A leaf scrollbar also
+    remains part of the fingerprint: it is the semantic scrollbar SwiftUI
     publishes. Requiring children narrows this to the release-variable expanded
     implementation observed on macOS 15. A labelled or identified application
     scrollbar deliberately does not match either.
@@ -598,12 +598,12 @@ def render(root: Node, extra_tokens: tuple[str, ...]) -> list[str]:
             # for user-visible tooltip text.
             return
         children = node.children
-        # Anonymous AppKit scrollbars are OS/session chrome.  Keep the owning
-        # scroll area and every app-authored child, but not this volatile
-        # implementation subtree.
-        children = [
-            child for child in children if not is_system_scrollbar_subtree(child)
-        ]
+        # Anonymous AppKit scrollbar internals are OS/session chrome. Keep the
+        # semantic scrollbar itself so an expanded macOS 15 tree matches the
+        # leaf representation published by other releases, but do not include
+        # its volatile value-indicator and arrow/page implementation children.
+        if is_system_scrollbar_subtree(node):
+            children = []
         if sort_children:
             # Only the window level is reordered. AX hands back the app's
             # windows in z-order, so merely focusing Settings would otherwise
