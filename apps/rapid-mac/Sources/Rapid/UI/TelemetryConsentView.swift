@@ -6,6 +6,7 @@ import SwiftUI
 /// modal sheet that would also block normal application termination.
 struct TelemetryConsentView: View {
     let onDecision: (Bool) -> Void
+    @FocusState private var primaryActionFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -56,11 +57,13 @@ struct TelemetryConsentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
+                .focused($primaryActionFocused)
                 .accessibilityIdentifier("TelemetryConsent.Share")
             }
         }
         .padding(24)
         .frame(width: 500)
+        .onAppear { primaryActionFocused = true }
     }
 
     private func disclosureRow(icon: String, text: String) -> some View {

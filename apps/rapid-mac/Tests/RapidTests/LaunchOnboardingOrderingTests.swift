@@ -242,13 +242,17 @@ struct LaunchOnboardingOrderingTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/Rapid/UI/ContentView.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
-            .replacingOccurrences(of: " ", with: "")
-            .replacingOccurrences(of: "\n", with: "")
+        let rawSource = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = rawSource.filter { !$0.isWhitespace }
+        let presenterStart = try #require(
+            rawSource.range(of: "private var firstRunConsentGate"))
+        let presenterEnd = try #require(
+            rawSource.range(of: "private func decideTelemetry", range: presenterStart.upperBound..<rawSource.endIndex))
+        let presenter = rawSource[presenterStart.lowerBound..<presenterEnd.lowerBound]
 
-        #expect(source.contains("iftelemetryConsentPending{firstRunConsentOverlay}"))
-        #expect(!source.contains(".sheet(isPresented:firstRunSheetPresented)"))
-        #expect(!source.contains(".interactiveDismissDisabled()"))
+        #expect(source.contains("iftelemetryConsentPending{firstRunConsentGate}"))
+        #expect(!presenter.contains(".sheet"))
+        #expect(!presenter.contains("interactiveDismissDisabled"))
     }
 
     /// Once answered, the same user's model comes up — the deferral is a

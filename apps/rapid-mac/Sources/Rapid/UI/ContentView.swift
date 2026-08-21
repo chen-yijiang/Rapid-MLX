@@ -84,7 +84,9 @@ struct ContentView: View {
         // model comes up on first send (implicit lifecycle). Search belongs
         // to the sidebar column beside macOS's native collapse control.
         Group {
-            if quickstartVisible {
+            if telemetryConsentPending {
+                firstRunConsentGate
+            } else if quickstartVisible {
                 // Setup owns the window (Paper 05.1.A). See ``onboardingShell``.
                 onboardingShell
             } else {
@@ -122,11 +124,6 @@ struct ContentView: View {
                 }
                 .padding(20)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
-        }
-        .overlay {
-            if telemetryConsentPending {
-                firstRunConsentOverlay
             }
         }
         .onChange(of: server.state) { _, newState in
@@ -897,16 +894,12 @@ struct ContentView: View {
     // MARK: - First-run telemetry consent
 
     @ViewBuilder
-    private var firstRunConsentOverlay: some View {
-        ZStack {
-            RapidTheme.surfaceCanvas.opacity(0.92)
-                .contentShape(Rectangle())
-
-            TelemetryConsentView(onDecision: decideTelemetry)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-                .shadow(color: .black.opacity(0.16), radius: 24, y: 8)
-        }
+    private var firstRunConsentGate: some View {
+        TelemetryConsentView(onDecision: decideTelemetry)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .shadow(color: .black.opacity(0.16), radius: 24, y: 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(RapidTheme.surfaceCanvas)
         .accessibilityAddTraits(.isModal)
     }
 
