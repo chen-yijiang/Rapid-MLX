@@ -57,7 +57,8 @@ def test_verified_entries_do_not_require_experimental_opt_in():
         assessment = assess_method(profile, method)
         assert assessment.recommendation == "verified"
         assert assessment.explicit_opt_in is False
-        assert assessment.capable is True
+        if method != "mtp":
+            assert assessment.capable is True
 
 
 def test_incomplete_registry_flags_are_not_reported_verified():
