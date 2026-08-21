@@ -181,6 +181,7 @@ struct DictationView: View {
                             .tag(entry.alias)
                         }
                     }
+                    .accessibilityIdentifier("Dictation.Model.Options")
                     .pickerStyle(.inline)
                     .labelsHidden()
                 } label: {
@@ -258,6 +259,7 @@ struct DictationView: View {
                             Text(trigger.label).tag(trigger)
                         }
                     }
+                    .accessibilityIdentifier("Dictation.Hotkey.Options")
                     .pickerStyle(.inline)
                     .labelsHidden()
                 } label: {
