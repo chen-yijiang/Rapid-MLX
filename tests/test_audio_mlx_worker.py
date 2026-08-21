@@ -19,7 +19,6 @@ import asyncio
 import concurrent.futures
 import threading
 import unittest
-from unittest.mock import MagicMock
 
 from vllm_mlx import routes, server
 
@@ -119,9 +118,7 @@ class AudioMlxWorkerTests(unittest.TestCase):
     def test_run_audio_mlx_sync_falls_back_inline_without_runner(self):
         worker_core = _make_worker_core()  # no _run_on_step_thread attached
         _install_engine(_nested_topology(worker_core))
-        self.assertEqual(
-            routes.audio._run_audio_mlx_sync(lambda: "inline"), "inline"
-        )
+        self.assertEqual(routes.audio._run_audio_mlx_sync(lambda: "inline"), "inline")
 
 
 if __name__ == "__main__":

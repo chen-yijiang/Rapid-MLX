@@ -224,9 +224,7 @@ async def _run_audio_mlx(func, *args, **kwargs):
     if core is None:
         return func(*args, **kwargs)
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        core._mlx_executor, lambda: func(*args, **kwargs)
-    )
+    return await loop.run_in_executor(core._mlx_executor, lambda: func(*args, **kwargs))
 
 
 def _run_audio_mlx_sync(func, *args, **kwargs):
@@ -246,6 +244,7 @@ def _run_audio_mlx_sync(func, *args, **kwargs):
     if runner is None:
         return func(*args, **kwargs)
     return runner(func, *args, **kwargs)
+
 
 # OpenAI-style STT model alias → MLX repo. Promoted to module scope so
 # the route can validate the model BEFORE streaming the upload (F-165):
@@ -1736,9 +1735,7 @@ def _align_blocking(
         aligner = STTEngine(model_name)
         _run_audio_mlx_sync(aligner.load)
         _aligner_engine = aligner
-    return _run_audio_mlx_sync(
-        _aligner_engine.align, audio_path, text, **align_kwargs
-    )
+    return _run_audio_mlx_sync(_aligner_engine.align, audio_path, text, **align_kwargs)
 
 
 async def _run_alignment_request(
