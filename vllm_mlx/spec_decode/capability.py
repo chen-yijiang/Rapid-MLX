@@ -110,7 +110,9 @@ def assess_method(profile: ModelProfile, method: str) -> SpecCapability:
             warnings=("requires drafter, speculative-token, and tree-budget metadata",),
         )
     if method == "mtp":
-        verified = bool(profile.mtp_draft_model)
+        verified = bool(profile.mtp_draft_model) and not _is_experimental_quantization(
+            profile
+        )
         return SpecCapability(
             method,
             None,

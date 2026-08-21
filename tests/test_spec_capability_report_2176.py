@@ -79,10 +79,12 @@ def test_quantized_curated_flags_remain_experimental():
             hf_path=hf_path,
             supports_dflash=True,
             dflash_draft_model="user/drafter",
+            mtp_draft_model="user/mtp-head",
         )
-        assessment = assess_method(profile, "dflash")
-        assert assessment.recommendation == "experimental"
-        assert assessment.explicit_opt_in is True
+        for method in ("dflash", "mtp"):
+            assessment = assess_method(profile, method)
+            assert assessment.recommendation == "experimental"
+            assert assessment.explicit_opt_in is True
 
 
 def test_quantization_recognizes_hyphenated_spellings():
