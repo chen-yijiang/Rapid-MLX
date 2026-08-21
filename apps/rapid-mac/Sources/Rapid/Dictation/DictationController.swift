@@ -108,7 +108,10 @@ final class DictationController {
     private let hotkey = DictationHotkey()
     private let recorder = DictationRecorder()
     private let hud = DictationHUD()
-    private let audioCatalogLoader: @MainActor (URL) async -> [ModelEntry]
+    /// `nil` means the catalog probe itself failed; an array is authoritative.
+    /// Keeping those states distinct prevents a transient CLI failure from
+    /// masquerading as the user deleting every cached audio model.
+    private let audioCatalogLoader: @MainActor (URL) async -> [ModelEntry]?
 
     private var tickTimer: Timer?
     private var recordingStart: Date?
@@ -142,8 +145,10 @@ final class DictationController {
         vocabulary: DictationVocabulary? = nil,
         history: DictationHistory? = nil,
         testingEnabled: Bool? = nil,
-        audioCatalogLoader: @escaping @MainActor (URL) async -> [ModelEntry] = {
-            await ModelCatalog.audioEntries(binary: $0)
+        testingModelAlias: String? = nil,
+        testingPhase: Phase? = nil,
+        audioCatalogLoader: @escaping @MainActor (URL) async -> [ModelEntry]? = {
+            await ModelCatalog.audioEntriesIfAvailable(binary: $0)
         }
     ) {
         self.server = server
@@ -157,7 +162,8 @@ final class DictationController {
         self.trigger = DictationHotkey.Trigger(
             rawValue: defaults.string(forKey: Keys.trigger) ?? ""
         ) ?? .rightCommand
-        self.modelAlias = defaults.string(forKey: Keys.model) ?? ""
+        self.modelAlias = testingModelAlias ?? defaults.string(forKey: Keys.model) ?? ""
+        self.phase = testingPhase ?? .off
         // Raw microphone recordings are more sensitive than the transcript.
         // Keep them only after the user explicitly opts in from the Recent
         // section; existing explicit preferences continue to be respected.
@@ -359,7 +365,7 @@ final class DictationController {
     /// changes, and when a download finishes.
     func refreshModelCacheState() async {
         guard let binary = server.binaryPath else { return }
-        let entries = await audioCatalogLoader(binary)
+        guard let entries = await audioCatalogLoader(binary) else { return }
         var next: [String: CatalogFacts] = [:]
         for entry in entries {
             next[entry.alias] = CatalogFacts(repo: entry.hfRepo, cached: entry.cached)
@@ -498,7 +504,13 @@ final class DictationController {
     private func handleHotkey() {
         switch phase {
         case .idle:
-            guard beginRecordingTask == nil else { return }
+            if beginRecordingTask != nil {
+                beginRecordingTask?.cancel()
+                beginRecordingTask = nil
+                beginRecordingRequestID = nil
+                hud.hide()
+                return
+            }
             let requestID = UUID()
             beginRecordingRequestID = requestID
             beginRecordingTask = Task { [weak self] in
