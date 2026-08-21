@@ -108,12 +108,18 @@ final class DictationController {
     private let hotkey = DictationHotkey()
     private let recorder = DictationRecorder()
     private let hud = DictationHUD()
+    private let audioCatalogLoader: @MainActor (URL) async -> [ModelEntry]
 
     private var tickTimer: Timer?
     private var recordingStart: Date?
     private var capturingApp: String?
     private var level: Float = 0
     private var transcribeTask: Task<Void, Never>?
+    /// The on-disk revalidation between a hotkey tap and capture. Keeping the
+    /// task cancellable means turning dictation off while the catalog CLI is
+    /// running cannot let its stale continuation start the microphone later.
+    private var beginRecordingTask: Task<Void, Never>?
+    private var beginRecordingRequestID: UUID?
     /// The in-flight prewarm, retained so ``disable()`` and a hotkey press
     /// can cancel it and so concurrent triggers join it (single-flight)
     /// instead of stacking probes in the engine's serial STT lane.
@@ -134,15 +140,20 @@ final class DictationController {
         server: ServerManager,
         client: AudioClient = AudioClient(),
         vocabulary: DictationVocabulary? = nil,
-        history: DictationHistory? = nil
+        history: DictationHistory? = nil,
+        testingEnabled: Bool? = nil,
+        audioCatalogLoader: @escaping @MainActor (URL) async -> [ModelEntry] = {
+            await ModelCatalog.audioEntries(binary: $0)
+        }
     ) {
         self.server = server
         self.client = client
         self.vocabulary = vocabulary ?? DictationVocabulary()
         self.history = history ?? DictationHistory()
+        self.audioCatalogLoader = audioCatalogLoader
 
         let defaults = UserDefaults.standard
-        self.isEnabled = defaults.bool(forKey: Keys.enabled)
+        self.isEnabled = testingEnabled ?? defaults.bool(forKey: Keys.enabled)
         self.trigger = DictationHotkey.Trigger(
             rawValue: defaults.string(forKey: Keys.trigger) ?? ""
         ) ?? .rightCommand
@@ -219,6 +230,10 @@ final class DictationController {
         // judging readiness so a fresh launch doesn't refuse to arm a model
         // that is sitting right there in the cache.
         await refreshModelCacheState()
+        // The user can turn the switch off while the catalog subprocess is
+        // running. Never let that stale enable continuation install a hotkey
+        // after ``disable()`` has already torn the session down.
+        guard isEnabled else { return }
         refreshReadiness()
         guard readinessSnapshot.microphone else {
             lastError = "Dictation needs Microphone access before it can be enabled."
@@ -273,6 +288,9 @@ final class DictationController {
     func disable() {
         transcribeTask?.cancel()
         transcribeTask = nil
+        beginRecordingTask?.cancel()
+        beginRecordingTask = nil
+        beginRecordingRequestID = nil
         prewarmTask?.cancel()
         prewarmTask = nil
         stopTicking()
@@ -341,7 +359,7 @@ final class DictationController {
     /// changes, and when a download finishes.
     func refreshModelCacheState() async {
         guard let binary = server.binaryPath else { return }
-        let entries = await ModelCatalog.audioEntries(binary: binary)
+        let entries = await audioCatalogLoader(binary)
         var next: [String: CatalogFacts] = [:]
         for entry in entries {
             next[entry.alias] = CatalogFacts(repo: entry.hfRepo, cached: entry.cached)
@@ -479,7 +497,16 @@ final class DictationController {
 
     private func handleHotkey() {
         switch phase {
-        case .idle: beginRecording()
+        case .idle:
+            guard beginRecordingTask == nil else { return }
+            let requestID = UUID()
+            beginRecordingRequestID = requestID
+            beginRecordingTask = Task { [weak self] in
+                await self?.beginRecording(requestID: requestID)
+                guard let self, self.beginRecordingRequestID == requestID else { return }
+                self.beginRecordingTask = nil
+                self.beginRecordingRequestID = nil
+            }
         case .starting, .recording: finishRecording()
         case .transcribing, .off: break
         }
@@ -488,23 +515,31 @@ final class DictationController {
     /// Exposed so the UI (and tests) can drive a session without a real keypress.
     func toggleFromUI() { handleHotkey() }
 
-    private func beginRecording() {
+    private func beginRecording(requestID: UUID) async {
         guard !modelAlias.isEmpty else {
             lastError = "Choose a transcription model first."
             return
         }
+        let requestedAlias = modelAlias
         // A probe still in flight would sit in front of this dictation in the
         // engine's serial STT lane. Abandon it — if it already reached the
         // sidecar, the weight load it triggered continues server-side and
         // benefits the transcription that follows either way.
         prewarmTask?.cancel()
         prewarmTask = nil
-        // A model deleted mid-session (Settings → Model Management) would
-        // otherwise be discovered only after the user finished talking.
-        // Refuse before recording, and say so where the user is looking —
-        // the HUD — not just in a window that may be closed.
-        if catalogByAlias[modelAlias]?.cached == false {
-            lastError = "\(modelAlias) isn't on disk anymore. Open Rapid → Audio to download it."
+        // Model Management changes the cache out of process from this
+        // controller. Re-read disk facts on every hotkey press; trusting the
+        // enable-time snapshot here could pass a stale repo to ``serve`` and
+        // silently redownload a model the user just deleted.
+        let modelOnDisk = await modelIsOnDiskAfterRefresh(requestedAlias)
+        guard !Task.isCancelled,
+              beginRecordingRequestID == requestID,
+              isEnabled,
+              phase == .idle,
+              modelAlias == requestedAlias
+        else { return }
+        guard modelOnDisk else {
+            lastError = "\(requestedAlias) isn't on disk anymore. Open Rapid → Audio to download it."
             hud.update(.failed(message: "Model not downloaded"))
             Task {
                 try? await Task.sleep(nanoseconds: 1_600_000_000)
@@ -527,6 +562,14 @@ final class DictationController {
         phase = .starting
         hud.show(.starting)
         startTicking()
+    }
+
+    /// Fresh cache truth used at the recording boundary. Internal so the
+    /// deletion regression can exercise the real catalog refresh without
+    /// requiring microphone or Accessibility grants in the test process.
+    func modelIsOnDiskAfterRefresh(_ alias: String) async -> Bool {
+        await refreshModelCacheState()
+        return catalogByAlias[alias]?.cached == true
     }
 
     /// Fired from the audio thread the moment real samples arrive. Until this

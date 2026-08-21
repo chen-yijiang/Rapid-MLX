@@ -10,6 +10,11 @@ import Testing
 @Suite("Dictation")
 struct DictationTests {
 
+    @MainActor
+    private final class CatalogState {
+        var cached = true
+    }
+
     // MARK: - Transcript tidying
 
     /// The trailing period is stripped because a dictated fragment usually
@@ -258,6 +263,56 @@ struct DictationTests {
     }
 
     // MARK: - Hotkey
+
+    @MainActor
+    @Test("turning dictation off while catalog refresh waits cannot finish enabling")
+    func staleEnableCannotRearmAfterDisable() async {
+        var continuation: CheckedContinuation<[ModelEntry], Never>?
+        let binary = Self.tempDirectory().appendingPathComponent("rapid-mlx")
+        let server = ServerManager(testingState: .idle, binaryPath: binary)
+        let controller = DictationController(
+            server: server,
+            testingEnabled: true,
+            audioCatalogLoader: { _ in
+                await withCheckedContinuation { continuation = $0 }
+            }
+        )
+
+        let enabling = Task { await controller.enable() }
+        while continuation == nil { await Task.yield() }
+        controller.isEnabled = false
+        continuation?.resume(returning: [])
+        await enabling.value
+
+        #expect(controller.isEnabled == false)
+        #expect(controller.phase == .off)
+    }
+
+    @MainActor
+    @Test("a hotkey-boundary refresh observes a model deleted after enabling")
+    func recordingBoundaryRefreshObservesDeletion() async {
+        let state = CatalogState()
+        let entry: (Bool) -> ModelEntry = { cached in
+            ModelEntry(
+                alias: "whisper-small",
+                hfRepo: "mlx-community/whisper-small",
+                sizeOnDisk: cached ? "461 MiB" : nil,
+                cached: cached,
+                kind: .audio,
+                audioCapability: .transcription,
+                audioFamily: "whisper"
+            )
+        }
+        let binary = Self.tempDirectory().appendingPathComponent("rapid-mlx")
+        let controller = DictationController(
+            server: ServerManager(testingState: .idle, binaryPath: binary),
+            audioCatalogLoader: { _ in [entry(state.cached)] }
+        )
+
+        #expect(await controller.modelIsOnDiskAfterRefresh("whisper-small"))
+        state.cached = false
+        #expect(await !controller.modelIsOnDiskAfterRefresh("whisper-small"))
+    }
 
     /// Only right-hand modifiers are offered. Left ⌘ rides along with ⌘C/⌘V/
     /// ⌘Tab dozens of times an hour, so "tapped on its own" cannot be detected
