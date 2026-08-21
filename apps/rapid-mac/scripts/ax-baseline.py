@@ -225,6 +225,80 @@ def normalize_toolbar_children(children: list[Node]) -> list[Node]:
     return [*sidebar, *authored]
 
 
+def is_system_scrollbar_subtree(node: Node) -> bool:
+    """True for AppKit's expanded anonymous scrollbar implementation tree.
+
+    Whether a SwiftUI ``ScrollView`` publishes this subtree varies with the
+    macOS release and the runner's scrollbar preference.  The owning
+    ``AXScrollArea`` remains in the fingerprint; only the anonymous system
+    control and its arrows/pages are dropped. A leaf scrollbar remains part of
+    the fingerprint: it is the semantic scrollbar SwiftUI consistently
+    publishes. Requiring children narrows this to the release-variable expanded
+    implementation observed on macOS 15. A labelled or identified application
+    scrollbar deliberately does not match either.
+    """
+    record = node.record
+    return (
+        record.get("role") == "AXScrollBar"
+        and bool(node.children)
+        and not record.get("identifier")
+        and not record.get("title")
+        and not record.get("description")
+        and not record.get("help")
+    )
+
+
+def normalize_hosting_children(children: list[Node]) -> list[Node]:
+    """Canonicalise the search overlay's position beside the main split view.
+
+    macOS 15 exposes a SwiftUI overlay after its base view while macOS 26 can
+    expose the same two siblings in the opposite order.  This is z-stack/AX
+    enumeration, not user navigation order.  Scope the rewrite to the exact
+    search-panel and main-split identifiers; every other sibling keeps its
+    original position.
+    """
+    overlay_index = next(
+        (
+            index
+            for index, child in enumerate(children)
+            if child.record.get("identifier") == "ConversationSearch.Panel"
+        ),
+        None,
+    )
+    main = next(
+        (
+            child
+            for child in children
+            if str(child.record.get("identifier") or "").startswith(
+                "main, SidebarNavigationSplitView"
+            )
+        ),
+        None,
+    )
+    if overlay_index is None or main is None:
+        return children
+    overlay_nodes = [children[overlay_index]]
+    # SwiftUI exposes the panel marker and its result list as adjacent siblings,
+    # rather than parent/child. Keep the list attached to the marker while
+    # canonicalising the block; the exact adjacency makes this narrower than
+    # treating an arbitrary hosting-view scroll area as overlay content.
+    following = overlay_index + 1
+    if (
+        following < len(children)
+        and children[following].record.get("role") == "AXScrollArea"
+        and not children[following].record.get("identifier")
+    ):
+        overlay_nodes.append(children[following])
+    overlay_ids = {id(child) for child in overlay_nodes}
+    without_overlay = [child for child in children if id(child) not in overlay_ids]
+    main_index = without_overlay.index(main)
+    return [
+        *without_overlay[:main_index],
+        *overlay_nodes,
+        *without_overlay[main_index:],
+    ]
+
+
 # The footer's GPU gauge has no stable cross-machine shape. Apple Silicon
 # publishes a live utilisation reading (``AXUnknown desc="GPU 47 percent"``);
 # Intel Macs and sandboxed apps can't probe AGXAccelerator at all and instead
@@ -524,6 +598,12 @@ def render(root: Node, extra_tokens: tuple[str, ...]) -> list[str]:
             # for user-visible tooltip text.
             return
         children = node.children
+        # Anonymous AppKit scrollbars are OS/session chrome.  Keep the owning
+        # scroll area and every app-authored child, but not this volatile
+        # implementation subtree.
+        children = [
+            child for child in children if not is_system_scrollbar_subtree(child)
+        ]
         if sort_children:
             # Only the window level is reordered. AX hands back the app's
             # windows in z-order, so merely focusing Settings would otherwise
@@ -536,6 +616,11 @@ def render(root: Node, extra_tokens: tuple[str, ...]) -> list[str]:
         node_is_toolbar = node.record.get("role") == "AXToolbar"
         if node_is_toolbar:
             children = normalize_toolbar_children(children)
+        if (
+            node.record.get("role") == "AXGroup"
+            and node.record.get("subrole") == "AXHostingView"
+        ):
+            children = normalize_hosting_children(children)
         for child in children:
             walk(
                 child, depth + 1, sort_children=False, parent_is_toolbar=node_is_toolbar
