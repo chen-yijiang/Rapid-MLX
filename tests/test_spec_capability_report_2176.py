@@ -57,6 +57,7 @@ def test_verified_entries_do_not_require_experimental_opt_in():
         assessment = assess_method(profile, method)
         assert assessment.recommendation == "verified"
         assert assessment.explicit_opt_in is False
+        assert assessment.capable is True
 
 
 def test_incomplete_registry_flags_are_not_reported_verified():
@@ -87,3 +88,4 @@ def test_quantization_recognizes_hyphenated_spellings():
     assert _quantization("user/model-4-bit") == "4bit"
     assert _quantization("user/model-8-bit") == "8bit"
     assert _quantization("user/paint4bitmaps") == "not-encoded-in-repo-name"
+    assert _quantization("user/Foo-4bit-attention") == "not-encoded-in-repo-name"

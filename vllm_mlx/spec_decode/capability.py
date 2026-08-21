@@ -17,7 +17,10 @@ def looks_like_4bit(hf_path: str) -> bool:
     """Detect delimiter-bounded 4-bit quantization tags in repo names."""
     return bool(
         re.search(
-            r"(?<![a-z0-9])(?:4[-_]?bit|mxfp4|nvfp4)(?![a-z0-9])",
+            r"(?<![a-z0-9])(?:"
+            r"4[-_]?bit(?=$|[-_](?:mlx|dwq)(?:$|[-_]))|"
+            r"(?:mxfp4|nvfp4)(?![a-z0-9])"
+            r")",
             hf_path.lower(),
         )
     )
@@ -78,7 +81,7 @@ def assess_method(profile: ModelProfile, method: str) -> SpecCapability:
         )
         return SpecCapability(
             method,
-            None,
+            True if verified else None,
             "verified" if verified else "experimental",
             not verified,
             warnings=("requires a structurally compatible drafter",),
@@ -101,7 +104,7 @@ def assess_method(profile: ModelProfile, method: str) -> SpecCapability:
         )
         return SpecCapability(
             method,
-            None,
+            True if verified else None,
             "verified" if verified else "experimental",
             not verified,
             warnings=("requires drafter, speculative-token, and tree-budget metadata",),

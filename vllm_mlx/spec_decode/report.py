@@ -16,7 +16,7 @@ def _quantization(hf_path: str) -> str:
         ("nvfp4", r"nvfp4"),
         ("mxfp4", r"mxfp4"),
         ("int4", r"int4"),
-        ("4bit", r"4[-_]?bit"),
+        ("4bit", r"4[-_]?bit(?=$|[-_](?:mlx|dwq)(?:$|[-_]))"),
         ("6bit", r"6[-_]?bit"),
         ("8bit", r"8[-_]?bit"),
         ("2bit", r"2[-_]?bit"),
