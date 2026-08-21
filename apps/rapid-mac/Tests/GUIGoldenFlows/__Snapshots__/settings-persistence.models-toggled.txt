@@ -125,7 +125,6 @@ AXApplication title="Rapid-MLX"
           AXUnknown desc="Speed: untested" enabled=true
           AXStaticText help="Measured size on disk. Downloaded by another app — Rapid can't delete it." value=text enabled=true
         AXStaticText id="Settings.ModelManagement.Footer" value=text enabled=true
-        AXScrollBar value=number enabled=true
     AXButton subrole=AXCloseButton enabled=true
     AXButton subrole=AXZoomButton enabled=true
     AXButton subrole=AXMinimizeButton enabled=true
