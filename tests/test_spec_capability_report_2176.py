@@ -91,4 +91,4 @@ def test_quantization_recognizes_hyphenated_spellings():
     assert _quantization("user/model-4-bit") == "4bit"
     assert _quantization("user/model-8-bit") == "8bit"
     assert _quantization("user/paint4bitmaps") == "not-encoded-in-repo-name"
-    assert _quantization("user/Foo-4bit-attention") == "not-encoded-in-repo-name"
+    assert _quantization("user/model-4bit-instruct") == "4bit"

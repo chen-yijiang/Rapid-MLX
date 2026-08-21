@@ -46,7 +46,7 @@ def _good_profile() -> AliasProfile:
         ("mlx-community/Qwen3.6-35B-A3B-4bit-DWQ", True),
         ("user/Qwen3.5-9B-4-bit", True),
         ("user/Qwen3.5-9B_4bit", True),
-        ("user/Foo-4bit-attention", False),
+        ("user/model-4bit-instruct", True),
         # 8-bit + higher should NOT match
         ("mlx-community/Qwen3.5-27B-8bit", False),
         ("mlx-community/Qwen3.6-35B-A3B-8bit", False),
