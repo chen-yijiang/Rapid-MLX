@@ -249,8 +249,13 @@ struct LaunchOnboardingOrderingTests {
         let presenterEnd = try #require(
             rawSource.range(of: "private func decideTelemetry", range: presenterStart.upperBound..<rawSource.endIndex))
         let presenter = rawSource[presenterStart.lowerBound..<presenterEnd.lowerBound]
+        let bodyStart = try #require(rawSource.range(of: "var body: some View"))
+        let bodyEnd = try #require(
+            rawSource.range(of: "/// First-run setup", range: bodyStart.upperBound..<rawSource.endIndex))
+        let body = rawSource[bodyStart.lowerBound..<bodyEnd.lowerBound]
 
         #expect(source.contains("iftelemetryConsentPending{firstRunConsentGate}"))
+        #expect(!body.contains(".sheet"))
         #expect(!presenter.contains(".sheet"))
         #expect(!presenter.contains("interactiveDismissDisabled"))
     }
