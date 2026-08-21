@@ -7,14 +7,24 @@ an operator-explicit target/drafter pair; runtime preflight owns compatibility.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 
 from vllm_mlx.model_profile import ModelProfile
 
 
+def looks_like_4bit(hf_path: str) -> bool:
+    """Detect delimiter-bounded 4-bit quantization tags in repo names."""
+    return bool(
+        re.search(
+            r"(?<![a-z0-9])(?:4[-_]?bit|mxfp4|nvfp4)(?![a-z0-9])",
+            hf_path.lower(),
+        )
+    )
+
+
 def _is_experimental_quantization(profile: ModelProfile) -> bool:
-    lowered = profile.hf_path.lower()
-    return "-4bit" in lowered or "mxfp4" in lowered or "nvfp4" in lowered
+    return looks_like_4bit(profile.hf_path)
 
 
 @dataclass(frozen=True)

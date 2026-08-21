@@ -44,6 +44,8 @@ def _good_profile() -> AliasProfile:
         ("nightmedia/Qwen3.5-122B-A10B-Text-mxfp4-mlx", True),
         ("RedHatAI/Qwen3.6-35B-A3B-NVFP4", True),
         ("mlx-community/Qwen3.6-35B-A3B-4bit-DWQ", True),
+        ("user/Qwen3.5-9B-4-bit", True),
+        ("user/Qwen3.5-9B_4bit", True),
         # 8-bit + higher should NOT match
         ("mlx-community/Qwen3.5-27B-8bit", False),
         ("mlx-community/Qwen3.6-35B-A3B-8bit", False),

@@ -71,6 +71,18 @@ def test_incomplete_registry_flags_are_not_reported_verified():
         assert assessment.explicit_opt_in is True
 
 
+def test_quantized_curated_flags_remain_experimental():
+    for hf_path in ("user/target-4-bit", "user/target_4bit"):
+        profile = AliasProfile(
+            hf_path=hf_path,
+            supports_dflash=True,
+            dflash_draft_model="user/drafter",
+        )
+        assessment = assess_method(profile, "dflash")
+        assert assessment.recommendation == "experimental"
+        assert assessment.explicit_opt_in is True
+
+
 def test_quantization_recognizes_hyphenated_spellings():
     assert _quantization("user/model-4-bit") == "4bit"
     assert _quantization("user/model-8-bit") == "8bit"

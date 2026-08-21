@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vllm_mlx.model_aliases import AliasProfile
+from vllm_mlx.spec_decode.capability import looks_like_4bit
 
 
 class DFlashUnavailable(RuntimeError):  # noqa: N818 — domain-specific error name
@@ -54,16 +55,7 @@ def _looks_like_4bit(hf_path: str) -> bool:
     suffixes/segments. Mirrors the contract test's detection so a CLI
     error and a unit-test guard share one rule.
     """
-    lowered = hf_path.lower()
-    # Anchor the 4-bit infix on a leading hyphen so a model name like
-    # "Foo-4bit-attention" (where "4bit-" is part of the architecture
-    # tag rather than the quant suffix) doesn't get falsely flagged.
-    # "-4bit" handles both the trailing form and any mid-name segment.
-    if "-4bit" in lowered:
-        return True
-    if "mxfp4" in lowered or "nvfp4" in lowered:
-        return True
-    return False
+    return looks_like_4bit(hf_path)
 
 
 def report(
