@@ -124,6 +124,11 @@ struct ContentView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .overlay {
+            if telemetryConsentPending {
+                firstRunConsentOverlay
+            }
+        }
         .onChange(of: server.state) { _, newState in
             // #223: clear the download-prompt CTA the moment the server
             // moves out of ``.idle``.
@@ -212,9 +217,6 @@ struct ContentView: View {
         } message: { warning in
             Text(warning.message)
         }
-        .sheet(isPresented: firstRunSheetPresented) {
-            firstRunSheet
-        }
         .onChange(of: settingsRouter.quickstartReturnGeneration) { _, _ in
             quickstartDismissedThisSession = false
         }
@@ -227,7 +229,7 @@ struct ContentView: View {
         // so "may the model run this" is a decision that belongs on screen.
         .modifier(MCPToolApprovalDialog(store: mcpApproval))
         // #1589: keyed on the consent decision rather than fire-once, so
-        // the launch auto-start that stood down for the modal sheet gets
+        // the launch auto-start that stood down for the consent gate gets
         // its turn the moment the user answers it. The value only ever
         // moves true → false (once per install), so this is a single
         // re-run, and the first pass returns at the gate without an
@@ -894,22 +896,18 @@ struct ContentView: View {
 
     // MARK: - First-run telemetry consent
 
-    private var firstRunSheetPresented: Binding<Bool> {
-        Binding(
-            get: { telemetryConsentPending },
-            set: { presented in
-                // Swallow external dismiss attempts while undecided.
-                _ = presented
-            }
-        )
-    }
-
     @ViewBuilder
-    private var firstRunSheet: some View {
-        if telemetryConsentPending {
+    private var firstRunConsentOverlay: some View {
+        ZStack {
+            RapidTheme.surfaceCanvas.opacity(0.92)
+                .contentShape(Rectangle())
+
             TelemetryConsentView(onDecision: decideTelemetry)
-                .interactiveDismissDisabled()
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .shadow(color: .black.opacity(0.16), radius: 24, y: 8)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityAddTraits(.isModal)
     }
 
     private func decideTelemetry(_ enabled: Bool) {

@@ -218,14 +218,13 @@ struct LaunchOnboardingOrderingTests {
         #expect(decision == .skip(reason: .retiredStarter))
     }
 
-    // MARK: - Consent sheet
+    // MARK: - Consent gate
 
-    /// Nothing loads behind the modal first-run consent sheet. The sheet
-    /// is `interactiveDismissDisabled` and swallows external dismisses, so
-    /// the user cannot reach anything a warm model would serve — while an
-    /// 8.4 GB serve was being committed before they had answered the first
-    /// question the app asks.
-    @Test("Nothing auto-starts while the first-run consent sheet is still unanswered")
+    /// Nothing loads behind the full-window first-run consent gate. The
+    /// overlay owns hit testing, so the user cannot reach anything a warm
+    /// model would serve. Previously an 8.4 GB serve could be committed
+    /// before they had answered the first question the app asks.
+    @Test("Nothing auto-starts while the first-run consent gate is still unanswered")
     func consentPendingBlocksAutoStart() {
         let decision = launchDecision(
             lastServedAlias: "qwen3.5-4b-4bit",
@@ -234,6 +233,22 @@ struct LaunchOnboardingOrderingTests {
             consentPending: true
         )
         #expect(decision == .skip(reason: .firstRunDecisionPending))
+    }
+
+    @Test("Consent blocks the workspace without an AppKit modal sheet")
+    func consentUsesNonModalOverlay() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Rapid/UI/ContentView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+
+        #expect(source.contains("iftelemetryConsentPending{firstRunConsentOverlay}"))
+        #expect(!source.contains(".sheet(isPresented:firstRunSheetPresented)"))
+        #expect(!source.contains(".interactiveDismissDisabled()"))
     }
 
     /// Once answered, the same user's model comes up — the deferral is a

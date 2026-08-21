@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// First-run disclosure for the shared desktop + embedded-engine
-/// telemetry pipeline. The user must make an explicit choice; closing
-/// the sheet without an answer is disabled by the presenter.
+/// telemetry pipeline. The full-window presenter blocks the workspace
+/// until the user makes an explicit choice without creating an AppKit
+/// modal sheet that would also block normal application termination.
 struct TelemetryConsentView: View {
     let onDecision: (Bool) -> Void
 
