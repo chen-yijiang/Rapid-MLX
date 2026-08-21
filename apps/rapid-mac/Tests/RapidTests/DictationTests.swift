@@ -273,12 +273,16 @@ struct DictationTests {
 
     // MARK: - Audio mode
 
-    /// Dictation is additive: neither existing file transcription nor speech
-    /// synthesis disappears when the global hotkey workflow is introduced.
+    /// The Audio surface is a two-lane product: Speech to Text (dictation)
+    /// and Text to Speech. The old file-transcription workbench was removed
+    /// deliberately — a third tab reappearing here is a regression, not a
+    /// feature. Speech to Text stays the landing mode.
     @MainActor
-    @Test("Audio opens on Dictation without removing either workbench")
+    @Test("Audio opens on Speech to Text and offers exactly the two lanes")
     func audioModeDefault() {
-        #expect(AudioViewModel.Mode.allCases == [.dictation, .speech, .transcription])
+        #expect(AudioViewModel.Mode.allCases == [.dictation, .speech])
+        #expect(AudioViewModel.Mode.dictation.label == "Speech to Text")
+        #expect(AudioViewModel.Mode.speech.label == "Text to Speech")
         let viewModel = AudioViewModel(server: ServerManager(testingState: .idle))
         #expect(viewModel.mode == .dictation)
     }
@@ -296,7 +300,6 @@ struct DictationTests {
         }
         #expect(AudioViewModel.Mode.dictation.axName == "Dictation")
         #expect(AudioViewModel.Mode.speech.axName == "Speech")
-        #expect(AudioViewModel.Mode.transcription.axName == "Transcription")
     }
 
     // MARK: - Helpers
