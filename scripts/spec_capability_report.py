@@ -4,6 +4,5 @@
 
 from vllm_mlx.spec_decode.report import main
 
-
 if __name__ == "__main__":
     main()
