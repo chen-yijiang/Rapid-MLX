@@ -206,6 +206,11 @@ def test_conversation_search_overlay_order_inside_host_is_session_independent(
         {"role": "AXUnknown", "identifier": "ConversationSearch.Panel"}
     )
     panel_list = ax_baseline.Node({"role": "AXScrollArea"})
+    panel_list.children.append(
+        ax_baseline.Node(
+            {"role": "AXButton", "identifier": "ConversationSearch.NewChat"}
+        )
+    )
     split = ax_baseline.Node({"role": "AXSplitGroup", "identifier": "main"})
     host_a = ax_baseline.Node({"role": "AXGroup", "identifier": "host"})
     host_a.children = [panel, panel_list, split]
@@ -217,6 +222,29 @@ def test_conversation_search_overlay_order_inside_host_is_session_independent(
     window_b.children = [host_b]
 
     assert ax_baseline.render(window_a, ()) == ax_baseline.render(window_b, ())
+
+
+def test_unrelated_anonymous_scroll_area_after_search_panel_keeps_order_sensitive(
+    ax_baseline,
+):
+    panel = ax_baseline.Node(
+        {"role": "AXUnknown", "identifier": "ConversationSearch.Panel"}
+    )
+    unrelated = ax_baseline.Node({"role": "AXScrollArea"})
+    unrelated.children.append(
+        ax_baseline.Node({"role": "AXButton", "identifier": "Sidebar.Unrelated"})
+    )
+    split = ax_baseline.Node({"role": "AXSplitGroup", "identifier": "main"})
+    host_a = ax_baseline.Node({"role": "AXGroup", "identifier": "host"})
+    host_a.children = [panel, unrelated, split]
+    host_b = ax_baseline.Node({"role": "AXGroup", "identifier": "host"})
+    host_b.children = [split, panel, unrelated]
+    window_a = ax_baseline.Node({"role": "AXWindow"})
+    window_a.children = [host_a]
+    window_b = ax_baseline.Node({"role": "AXWindow"})
+    window_b.children = [host_b]
+
+    assert ax_baseline.render(window_a, ()) != ax_baseline.render(window_b, ())
 
 
 def test_scrollbar_subtree_is_ignored_but_scroll_area_remains(ax_baseline):

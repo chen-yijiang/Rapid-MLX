@@ -260,10 +260,12 @@ def normalize_transient_overlay_children(children: list[Node]) -> list[Node]:
     # companion with the panel so normalization does not tear the overlay in
     # half.
     overlay_end = panel_index + 1
+    panel_list = children[overlay_end] if overlay_end < len(children) else None
     if (
-        overlay_end < len(children)
-        and children[overlay_end].record.get("role") == "AXScrollArea"
-        and not children[overlay_end].record.get("identifier")
+        panel_list is not None
+        and panel_list.record.get("role") == "AXScrollArea"
+        and not panel_list.record.get("identifier")
+        and _subtree_has_identifier(panel_list, "ConversationSearch.NewChat")
     ):
         overlay_end += 1
     overlay = children[panel_index:overlay_end]
@@ -274,6 +276,12 @@ def normalize_transient_overlay_children(children: list[Node]) -> list[Node]:
         if child.record.get("role") == "AXSplitGroup"
     )
     return remaining[:split_index] + overlay + remaining[split_index:]
+
+
+def _subtree_has_identifier(node: Node, identifier: str) -> bool:
+    return node.record.get("identifier") == identifier or any(
+        _subtree_has_identifier(child, identifier) for child in node.children
+    )
 
 
 def is_optional_system_subtree(node: Node) -> bool:
