@@ -25,8 +25,18 @@ final class DictationController {
         var microphone: Bool
         var accessibility: Bool
         var modelSelected: Bool
+        /// The selected model's weights are actually in the cache. Without
+        /// this bit the green "Ready" light could be lit while the first
+        /// hotkey press still owed a multi-hundred-MB download.
+        var modelOnDisk: Bool
 
-        var isReady: Bool { microphone && accessibility && modelSelected }
+        var isReady: Bool { microphone && accessibility && modelSelected && modelOnDisk }
+
+        /// What ``revalidate()`` is allowed to police. Cache state arrives
+        /// asynchronously (a catalog subprocess), so a synchronous check that
+        /// treated "not fetched yet" as "not on disk" would disable dictation
+        /// on every app activation.
+        var permissionsAndSelection: Bool { microphone && accessibility && modelSelected }
     }
 
     private(set) var phase: Phase = .off
@@ -72,7 +82,10 @@ final class DictationController {
             // Replacing, not joining: a prewarm still in flight here is
             // warming the PREVIOUS model, and joining it would return with
             // the new selection never warmed.
-            Task { await prewarmModel(replacingCurrent: true) }
+            Task {
+                await refreshModelCacheState()
+                await prewarmModel(replacingCurrent: true)
+            }
         }
     }
 
@@ -105,10 +118,17 @@ final class DictationController {
     /// can cancel it and so concurrent triggers join it (single-flight)
     /// instead of stacking probes in the engine's serial STT lane.
     private var prewarmTask: Task<Void, Never>?
-    /// alias → HuggingFace repo. `ensureServing` needs the repo to fetch a
-    /// model that is not on disk yet; passing nil silently limits it to models
-    /// already cached.
-    private var repoByAlias: [String: String] = [:]
+    /// alias → catalog facts. ``ensureServing`` needs the repo; readiness
+    /// needs ``cached``. One `audioEntries` fetch fills both. The repo is
+    /// only ever passed to the server for models already on disk — passing
+    /// nil limits `ensureServing` to cached models, which is exactly the
+    /// contract here: downloading is the Download button's job, with
+    /// progress the user can see.
+    private struct CatalogFacts {
+        let repo: String?
+        let cached: Bool
+    }
+    private var catalogByAlias: [String: CatalogFacts] = [:]
 
     init(
         server: ServerManager,
@@ -149,7 +169,8 @@ final class DictationController {
         Readiness(
             microphone: DictationRecorder.microphoneAuthorization == .authorized,
             accessibility: DictationHotkey.hasAccessibilityPermission,
-            modelSelected: !modelAlias.isEmpty
+            modelSelected: !modelAlias.isEmpty,
+            modelOnDisk: catalogByAlias[modelAlias]?.cached == true
         )
     }
 
@@ -158,7 +179,8 @@ final class DictationController {
     private(set) var readinessSnapshot = Readiness(
         microphone: false,
         accessibility: false,
-        modelSelected: false
+        modelSelected: false,
+        modelOnDisk: false
     )
 
     func refreshReadiness() {
@@ -193,6 +215,10 @@ final class DictationController {
 
     func enable() async {
         guard isEnabled else { return }
+        // The on-disk bit comes from a catalog subprocess; fetch it before
+        // judging readiness so a fresh launch doesn't refuse to arm a model
+        // that is sitting right there in the cache.
+        await refreshModelCacheState()
         refreshReadiness()
         guard readinessSnapshot.microphone else {
             lastError = "Dictation needs Microphone access before it can be enabled."
@@ -202,6 +228,12 @@ final class DictationController {
         }
         guard readinessSnapshot.modelSelected else {
             lastError = "Choose a transcription model before enabling dictation."
+            phase = .off
+            isEnabled = false
+            return
+        }
+        guard readinessSnapshot.modelOnDisk else {
+            lastError = "\(modelAlias) isn't downloaded yet. Download it in the Model row, then turn dictation on."
             phase = .off
             isEnabled = false
             return
@@ -255,7 +287,10 @@ final class DictationController {
     func revalidate() {
         guard isEnabled else { return }
         refreshReadiness()
-        guard readinessSnapshot.isReady else {
+        // Deliberately NOT the full `isReady`: `modelOnDisk` may simply not
+        // have been fetched yet in this synchronous path, and a model deleted
+        // mid-session is caught at the next hotkey press instead.
+        guard readinessSnapshot.permissionsAndSelection else {
             lastError = "Dictation is no longer ready. Check its model and permissions."
             isEnabled = false
             return
@@ -281,28 +316,47 @@ final class DictationController {
     @discardableResult
     private func ensureModelServing() async -> Bool {
         guard !modelAlias.isEmpty else { return false }
-        let repo = await resolveRepo(for: modelAlias)
+        // Only models already on disk get through. This is the choke point
+        // that kills every silent-download path dictation used to have: the
+        // server is never handed a repo to fetch, so the worst it can do is
+        // fail fast on a missing model.
+        guard let facts = await catalogFacts(for: modelAlias), facts.cached else {
+            return false
+        }
         return await server.ensureServing(
             alias: modelAlias,
-            hfPath: repo,
+            hfPath: facts.repo,
             residencyEligible: false
         )
     }
 
-    private func resolveRepo(for alias: String) async -> String? {
-        if let cached = repoByAlias[alias] { return cached }
-        guard let binary = server.binaryPath else { return nil }
+    private func catalogFacts(for alias: String) async -> CatalogFacts? {
+        if let facts = catalogByAlias[alias] { return facts }
+        await refreshModelCacheState()
+        return catalogByAlias[alias]
+    }
+
+    /// Re-reads the audio catalog so ``Readiness/modelOnDisk`` reflects what
+    /// is actually in the cache. Called when the pane opens, when the alias
+    /// changes, and when a download finishes.
+    func refreshModelCacheState() async {
+        guard let binary = server.binaryPath else { return }
         let entries = await ModelCatalog.audioEntries(binary: binary)
-        for entry in entries { repoByAlias[entry.alias] = entry.hfRepo }
-        return repoByAlias[alias]
+        var next: [String: CatalogFacts] = [:]
+        for entry in entries {
+            next[entry.alias] = CatalogFacts(repo: entry.hfRepo, cached: entry.cached)
+        }
+        catalogByAlias = next
+        refreshReadiness()
     }
 
     /// Loads the model ahead of the first hotkey press. Without this the first
-    /// dictation of a session pays for a process swap *and* a possible download
-    /// while the user is already talking.
+    /// dictation of a session pays for a process swap while the user is
+    /// already talking. Never a download: ``ensureModelServing`` refuses
+    /// models that aren't on disk.
     ///
     /// Three costs move off the hotkey path here, in order:
-    /// 1. The alias→repo catalog lookup. On a cache miss ``resolveRepo``
+    /// 1. The alias→repo catalog lookup. On a cache miss ``catalogFacts``
     ///    spawns `rapid-mlx` CLI subprocesses — one to three SECONDS of cold
     ///    interpreter — and the old early-return below skipped it exactly when
     ///    the sidecar was already serving this model, so the most common warm
@@ -348,7 +402,7 @@ final class DictationController {
     private func performPrewarm() async {
         guard isEnabled, !modelAlias.isEmpty else { return }
         let alias = modelAlias
-        _ = await resolveRepo(for: alias)
+        _ = await catalogFacts(for: alias)
         // Actor reentrancy: every await above and below is a window for
         // disable() or a model change to land. Re-check before each step
         // that mutates the sidecar or touches the wire.
@@ -406,6 +460,21 @@ final class DictationController {
         return wav
     }()
 
+    // MARK: - Model download
+
+    /// Downloads themselves live in the app-wide ``DownloadManager`` — the
+    /// Dictation pane drives them through the shared ``ReadinessBanner``,
+    /// exactly like the sibling Audio tabs. The controller only needs to
+    /// hear that a pull landed.
+    ///
+    /// Called by the view when the pull reaches `.completed`.
+    func modelDownloadDidFinish() async {
+        await refreshModelCacheState()
+        // The flight that matters is the one seeded with post-download
+        // catalog state; a stale no-op flight must not absorb this call.
+        await prewarmModel(replacingCurrent: true)
+    }
+
     // MARK: - Hotkey
 
     private func handleHotkey() {
@@ -430,6 +499,19 @@ final class DictationController {
         // benefits the transcription that follows either way.
         prewarmTask?.cancel()
         prewarmTask = nil
+        // A model deleted mid-session (Settings → Model Management) would
+        // otherwise be discovered only after the user finished talking.
+        // Refuse before recording, and say so where the user is looking —
+        // the HUD — not just in a window that may be closed.
+        if catalogByAlias[modelAlias]?.cached == false {
+            lastError = "\(modelAlias) isn't on disk anymore. Open Rapid → Audio to download it."
+            hud.update(.failed(message: "Model not downloaded"))
+            Task {
+                try? await Task.sleep(nanoseconds: 1_600_000_000)
+                if phase == .idle { hud.hide() }
+            }
+            return
+        }
         do {
             try recorder.startCapture()
         } catch {
@@ -493,9 +575,19 @@ final class DictationController {
         // or inference. The split is surfaced in the Dictation tab.
         let ensureStarted = Date()
         guard await ensureModelServing() else {
-            lastError = repoByAlias[modelAlias] == nil
-                ? "\(modelAlias) isn't in the audio model catalog. Pick another model."
-                : "\(modelAlias) couldn't start. It may still be downloading, or there may not be enough memory to swap models."
+            let facts = catalogByAlias[modelAlias]
+            if facts == nil {
+                lastError = "\(modelAlias) isn't in the audio model catalog. Pick another model."
+            } else if facts?.cached != true {
+                lastError = "\(modelAlias) isn't downloaded. Open Rapid → Audio to download it."
+            } else {
+                lastError = "\(modelAlias) couldn't start. There may not be enough memory to swap models."
+            }
+            // The user is mid-flow in another app with only the HUD visible.
+            // Leaving "Transcribing…" up while silently failing reads as a
+            // hang; name the problem there before the capsule goes away.
+            hud.update(.failed(message: facts?.cached != true ? "Model not downloaded" : "Couldn't start the model"))
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
             return
         }
         guard !Task.isCancelled else { return }

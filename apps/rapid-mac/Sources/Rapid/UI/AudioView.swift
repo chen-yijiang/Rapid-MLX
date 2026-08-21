@@ -637,28 +637,7 @@ struct AudioView: View {
     }
 
     private func popupControlLabel(_ value: String) -> some View {
-        HStack(spacing: RapidTheme.Space.sm) {
-            Text(value)
-                .font(RapidFont.body)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: RapidTheme.Space.sm)
-            Image(systemName: "chevron.up.chevron.down")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-        }
-        .padding(.horizontal, RapidTheme.Space.md)
-        .frame(width: controlFieldWidth, height: RapidTheme.ControlHeight.small)
-        .background(
-            RoundedRectangle(cornerRadius: RapidTheme.Radius.row, style: .continuous)
-                .fill(RapidTheme.surfaceCode)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: RapidTheme.Radius.row, style: .continuous)
-                .strokeBorder(RapidTheme.hairlineStrong, lineWidth: 1)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: RapidTheme.Radius.row, style: .continuous))
+        PopupControlChrome(title: value, width: controlFieldWidth)
     }
 
     private func controlLabel(_ title: String) -> some View {
