@@ -675,8 +675,7 @@ struct ContentView: View {
     private func restartModel(_ target: String) {
         let hfPath = catalogEntries.first(where: { $0.alias == target })?.hfRepo
         Task {
-            await server.stop()
-            _ = await server.ensureServing(alias: target, hfPath: hfPath)
+            _ = await server.restartServingOutcome(alias: target, hfPath: hfPath)
         }
     }
 

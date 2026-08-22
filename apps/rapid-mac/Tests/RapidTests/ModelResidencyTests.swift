@@ -113,6 +113,13 @@ struct ModelResidencyTests {
         #expect(snapshot.activeRequestCount == 3)
     }
 
+    @Test("Assistant replacement counts only text and VLM requests")
+    func assistantReplacementRequestCount() {
+        let snapshot = requestSnapshot(textRequests: 2, imageRequests: 5)
+        #expect(snapshot.activeRequestCount == 7)
+        #expect(snapshot.activeRequestCount(replacingGroup: .assistant) == 2)
+    }
+
     @Test("Active-request switch confirmations resolve in FIFO order")
     func activeRequestSwitchConfirmationFIFO() {
         var queue = ActiveRequestSwitchConfirmationQueue()
@@ -165,6 +172,55 @@ struct ModelResidencyTests {
 
         server.cancelActiveRequestSwitch(warning)
         #expect(await switchTask.value == .cancelled)
+        #expect(server.state == .ready(alias: "current"))
+    }
+
+    @Test("A current active request can be confirmed before process replacement")
+    func activeRequestConfirmationContinuesSwitch() async throws {
+        let server = makeSwitchServer(protocolClass: ActiveResidencyProtocol.self)
+        let switchTask = Task { @MainActor in
+            await server.ensureServingOutcome(
+                alias: "target", hfPath: nil, estimatedMemoryGB: nil,
+                residencyEligible: false
+            )
+        }
+        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let warning = try #require(server.pendingActiveRequestSwitch)
+        #expect(warning.activeRequests == 2)
+        server.confirmActiveRequestSwitch(warning)
+
+        // There is intentionally no binary in this harness, so reaching a
+        // normal startup failure proves confirmation continued past the gate.
+        #expect(await switchTask.value == .failed)
+        #expect(server.pendingActiveRequestSwitch == nil)
+    }
+
+    @Test("A current zero-request snapshot does not prompt")
+    func zeroActiveRequestsDoNotPrompt() async {
+        let server = makeSwitchServer(protocolClass: IdleResidencyProtocol.self)
+        let outcome = await server.ensureServingOutcome(
+            alias: "target", hfPath: nil, estimatedMemoryGB: nil,
+            residencyEligible: false
+        )
+        #expect(outcome == .failed)
+        #expect(server.pendingActiveRequestSwitch == nil)
+    }
+
+    @Test("Restart confirms before stopping an active server")
+    func restartCancellationPreservesServer() async throws {
+        let server = makeSwitchServer(protocolClass: ActiveResidencyProtocol.self)
+        let restartTask = Task { @MainActor in
+            await server.restartServingOutcome(alias: "current", hfPath: nil)
+        }
+        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let warning = try #require(server.pendingActiveRequestSwitch)
+        server.cancelActiveRequestSwitch(warning)
+
+        #expect(await restartTask.value == .cancelled)
         #expect(server.state == .ready(alias: "current"))
     }
 
@@ -332,6 +388,36 @@ struct ModelResidencyTests {
             memoryBandwidthGBs: 150
         )
     }
+
+    private func makeSwitchServer(protocolClass: AnyClass) -> ServerManager {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [protocolClass]
+        var client = ServerResidencyClient()
+        client.session = URLSession(configuration: configuration)
+        let server = ServerManager(testingState: .ready(alias: "current"))
+        server._testSetResidencyClient(client)
+        server._testInstallChild(ProcessGroupChild.testStub())
+        return server
+    }
+
+    private func requestSnapshot(textRequests: Int, imageRequests: Int) -> ModelResidencySnapshot {
+        func status(_ id: String, modality: String, requests: Int) -> ResidentModelStatus {
+            ResidentModelStatus(
+                id: id, modelPath: id, aliases: [], modality: modality,
+                state: "resident", pinned: false, primary: modality == "text",
+                activeRequests: requests, estimatedBytes: 1,
+                measuredBytes: nil, idleSeconds: 0
+            )
+        }
+        return ModelResidencySnapshot(
+            memoryLimitBytes: 1, memoryUsedBytes: 1, memoryAvailableBytes: 0,
+            idleTTLSeconds: 1, loadsTotal: 1, evictionsTotal: 0,
+            models: [
+                status("text", modality: "text", requests: textRequests),
+                status("image", modality: "image-gen", requests: imageRequests),
+            ]
+        )
+    }
 }
 
 private final class ResidencyFetchFailureProtocol: URLProtocol, @unchecked Sendable {
@@ -344,6 +430,30 @@ private final class ResidencyFetchFailureProtocol: URLProtocol, @unchecked Senda
 
     override func stopLoading() {}
 }
+
+private class ResidencySnapshotProtocol: URLProtocol, @unchecked Sendable {
+    class var activeRequests: Int { 0 }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let payload = #"{"memory_limit_bytes":1,"memory_used_bytes":1,"memory_available_bytes":0,"idle_ttl_seconds":1,"loads_total":1,"evictions_total":0,"models":[{"id":"current","model_path":"current","aliases":[],"modality":"text","state":"resident","pinned":true,"primary":true,"active_requests":\#(Self.activeRequests),"estimated_bytes":1,"measured_bytes":null,"idle_seconds":0}]}"#.data(using: .utf8)!
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: payload)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class ActiveResidencyProtocol: ResidencySnapshotProtocol, @unchecked Sendable {
+    override class var activeRequests: Int { 2 }
+}
+
+private final class IdleResidencyProtocol: ResidencySnapshotProtocol, @unchecked Sendable {}
 
 private final class ResidencyLoadCaptureProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var capturedBody: Data?

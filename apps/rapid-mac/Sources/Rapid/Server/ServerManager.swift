@@ -1035,25 +1035,6 @@ final class ServerManager {
             return .ready
         }
 
-        // Switching a live serve process can terminate in-flight API streams.
-        // The residency endpoint already reports this count; refresh it at the
-        // decision point rather than relying on the last UI polling snapshot.
-        let residencyIsCurrent = await refreshResidency()
-        let activeRequests = residencyIsCurrent ? residency.activeRequestCount : nil
-        if activeRequests == nil || activeRequests! > 0 {
-            let requestID = UUID()
-            let warning = ActiveRequestSwitchWarning(
-                id: UUID(),
-                currentAlias: servingAlias ?? residency.models.first(where: { $0.primary })?.displayName() ?? "the current model",
-                targetAlias: trimmed,
-                activeRequests: activeRequests
-            )
-            activeRequestSwitchConfirmations.enqueue(warning, requestID: requestID)
-            guard await awaitActiveRequestSwitchDecision(for: requestID) == true else {
-                return .cancelled
-            }
-        }
-
         // Any fresh load attempt — resident, cold start, or the legacy
         // stop/start fallback — supersedes a stale rejection for THIS alias so
         // the surface stops showing last round's result while this load is in
@@ -1084,6 +1065,16 @@ final class ServerManager {
                 && !speculativeSettingChanged && !requiresImageLaneRestart,
             readyWithChild: readyWithChild
         ) {
+            // An explicit assistant replacement evicts only text/VLM engines.
+            // A bare resident admission does not evict siblings and therefore
+            // must not warn merely because an unrelated engine is busy.
+            if let replacementGroup,
+               await confirmActiveRequestSwitch(
+                   to: trimmed,
+                   activeRequests: { $0.activeRequestCount(replacingGroup: replacementGroup) }
+               ) == false {
+                return .cancelled
+            }
             // Publish before crossing the network await so SwiftUI replaces
             // the still-pressable CTA with an honest working state in the
             // same run-loop turn. Count rather than coalescing here: callers
@@ -1164,6 +1155,15 @@ final class ServerManager {
             await awaitStartupSettled(alias: trimmed)
             return isServing(trimmed) ? .ready : .failed
         }
+        // Cold/modal starts and the legacy residency fallback replace the
+        // process, so every resident engine is in the affected set.
+        if child != nil,
+           await confirmActiveRequestSwitch(
+               to: trimmed,
+               activeRequests: { $0.activeRequestCount }
+           ) == false {
+            return .cancelled
+        }
         // Tear down whatever's there (a DIFFERENT alias, ready or
         // mid-``.starting``). ``stop()`` is a noop if child is nil, so
         // the idle/stopped/missing cases just fall through to
@@ -1199,6 +1199,53 @@ final class ServerManager {
             await awaitStartupSettled(alias: trimmed)
         }
         return isServing(trimmed) ? .ready : .failed
+    }
+
+    /// Restart a model without exposing a stop-before-confirm race to views.
+    func restartServingOutcome(
+        alias: String,
+        hfPath: String?,
+        estimatedMemoryGB: Double? = nil,
+        imageMode: ResidentImageMode? = nil,
+        residencyEligible: Bool = true
+    ) async -> EnsureServingOutcome {
+        let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failed }
+        if child != nil,
+           await confirmActiveRequestSwitch(
+               to: trimmed,
+               activeRequests: { $0.activeRequestCount }
+           ) == false {
+            return .cancelled
+        }
+        await stop()
+        return await ensureServingOutcome(
+            alias: trimmed,
+            hfPath: hfPath,
+            estimatedMemoryGB: estimatedMemoryGB,
+            imageMode: imageMode,
+            residencyEligible: residencyEligible
+        )
+    }
+
+    private func confirmActiveRequestSwitch(
+        to targetAlias: String,
+        activeRequests count: (ModelResidencySnapshot) -> Int
+    ) async -> Bool {
+        let residencyIsCurrent = await refreshResidency()
+        let activeRequests = residencyIsCurrent ? count(residency) : nil
+        if activeRequests == 0 { return true }
+        let requestID = UUID()
+        let warning = ActiveRequestSwitchWarning(
+            id: UUID(),
+            currentAlias: servingAlias
+                ?? residency.models.first(where: { $0.primary })?.displayName()
+                ?? "the current model",
+            targetAlias: targetAlias,
+            activeRequests: activeRequests
+        )
+        activeRequestSwitchConfirmations.enqueue(warning, requestID: requestID)
+        return await awaitActiveRequestSwitchDecision(for: requestID) == true
     }
 
     /// Rebuild only the named resident engine with its current performance

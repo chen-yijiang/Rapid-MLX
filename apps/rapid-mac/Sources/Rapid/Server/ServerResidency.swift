@@ -129,6 +129,18 @@ struct ModelResidencySnapshot: Codable, Sendable, Equatable {
             .reduce(0) { $0 + max(0, $1.activeRequests) }
     }
 
+    func activeRequestCount(replacingGroup group: ResidentModelReplacementGroup) -> Int {
+        models.lazy
+            .filter { model in
+                guard model.state != "evicting" else { return false }
+                switch group {
+                case .assistant:
+                    return model.modality == "text" || model.modality == "mllm"
+                }
+            }
+            .reduce(0) { $0 + max(0, $1.activeRequests) }
+    }
+
     /// Pick the resident text model that can host chat-only subsystems such
     /// as MCP. The process-owning alias may be an audio model after a user
     /// visits Speech, even while a text engine is resident in that process.

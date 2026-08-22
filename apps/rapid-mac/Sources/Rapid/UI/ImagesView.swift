@@ -281,8 +281,18 @@ struct ImagesView: View {
         case .restart(let target):
             let hf = viewModel.imageModels.first { $0.alias == target }?.hfRepo
             Task {
-                await server.stop()
-                await loadImageModel(target, hfPath: hf)
+                let entry = viewModel.imageModels.first { $0.alias == target }
+                _ = await server.restartServingOutcome(
+                    alias: target,
+                    hfPath: hf,
+                    estimatedMemoryGB: ModelSizing.residentEstimateGB(
+                        alias: target,
+                        sizeText: entry?.sizeOnDisk
+                    ),
+                    imageMode: viewModel.isEditing ? .editing : .generation,
+                    residencyEligible: false
+                )
+                await viewModel.refreshCatalog()
             }
         case .openModelManagement:
             settingsRouter.route(.openModelManagement) {
