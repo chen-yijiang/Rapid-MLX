@@ -328,6 +328,10 @@ class ResidentModelManager:
         self._index: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._ttl_task: asyncio.Task | None = None
+        # Engines retired from routing whose best-effort stop raised. The new
+        # primary remains serviceable; shutdown retries these handles instead
+        # of turning a cleanup failure into loss of the serving model.
+        self._retired_engines: list[object] = []
         self.evictions_total = 0
         self.loads_total = 0
         self.registry.on_engine_access = self.touch
@@ -425,6 +429,16 @@ class ResidentModelManager:
             ]
             for record in dynamic:
                 await self._evict_locked(record, reason="shutdown", count=False)
+            retired, self._retired_engines = self._retired_engines, []
+            for engine in retired:
+                stop = getattr(engine, "stop", None)
+                if callable(stop):
+                    try:
+                        result = stop()
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception:
+                        logger.exception("Failed to stop a retired model engine")
 
     async def _ttl_loop(self) -> None:
         interval = min(60.0, max(1.0, self.idle_ttl_seconds / 4.0))
@@ -736,7 +750,13 @@ class ResidentModelManager:
         group: str,
         candidates: list[ResidencyRecord],
     ) -> None:
-        """Publish target as primary, then stop already-quiesced engines."""
+        """Publish target, then retire already-quiesced engines.
+
+        Teardown is deliberately post-commit. Once the replacement weights are
+        loaded, a failing old-engine ``stop`` is a cleanup failure, not a model
+        load failure: rolling the target back could otherwise leave no serving
+        primary after an earlier candidate was already stopped.
+        """
 
         old_primary = next((record for record in candidates if record.primary), None)
         if old_primary is not None:
@@ -749,7 +769,26 @@ class ResidentModelManager:
                 self._on_primary_changed(target.entry)
 
         for record in candidates:
-            await self._evict_locked(record, reason=f"replace_{group}")
+            record.state = "evicting"
+            self.registry.remove(record.model_id)
+            self._drop_record(record.model_id)
+            stop = getattr(record.entry.engine, "stop", None)
+            if callable(stop):
+                try:
+                    result = stop()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    self._retired_engines.append(record.entry.engine)
+                    logger.exception(
+                        "Failed to stop retired model %r after replacing %s; "
+                        "the replacement remains active and cleanup will retry "
+                        "during shutdown",
+                        record.model_id,
+                        group,
+                    )
+            self.evictions_total += 1
+        _release_allocator_cache()
 
     async def set_pinned(self, model_name: str, pinned: bool) -> ResidencyRecord:
         async with self._lock:
@@ -864,5 +903,6 @@ class ResidentModelManager:
             "idle_ttl_seconds": self.idle_ttl_seconds,
             "loads_total": self.loads_total,
             "evictions_total": self.evictions_total,
+            "retired_cleanup_pending": len(self._retired_engines),
             "models": models,
         }

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from vllm_mlx.runtime.model_registry import ModelEntry, ModelRegistry
 from vllm_mlx.runtime.resident_models import (
+    ResidencyRecord,
     ResidentModelBusyError,
     ResidentModelCapacityError,
     ResidentModelManager,
@@ -84,6 +85,11 @@ class FakeLifecycleEngine(FakeEngine):
             "running_requests": self.running,
             "queued_requests": 0,
         }
+
+
+class FailingStopLifecycleEngine(FakeLifecycleEngine):
+    async def stop(self) -> None:
+        raise RuntimeError("stop failed")
 
 
 class Clock:
@@ -478,6 +484,52 @@ def test_residency_status_uses_engine_owned_request_counts():
 
     assert model["active_requests"] == 2
     assert model["lifecycle"]["running_requests"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_index", [0, 1])
+async def test_replacement_keeps_new_primary_when_retired_engine_stop_fails(
+    failing_index,
+):
+    registry = ModelRegistry()
+    engines = [FakeLifecycleEngine(), FakeLifecycleEngine()]
+    engines[failing_index] = FailingStopLifecycleEngine()
+    old_primary = entry("chat-old", engines[0])
+    old_secondary = entry("chat-secondary", engines[1])
+    registry.add(old_primary, is_default=True)
+    registry.add(old_secondary)
+    promoted = []
+
+    async def loader(name: str, path: str | None, performance=None):
+        return entry(name)
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_reader=lambda: 0,
+        on_primary_changed=lambda value: promoted.append(value.model_name),
+    )
+    manager.register_primary(old_primary, estimated_bytes=4 * GIB)
+    manager._index_record(  # noqa: SLF001 - construct a second group candidate
+        ResidencyRecord(
+            entry=old_secondary,
+            estimated_bytes=4 * GIB,
+            loaded_at=0,
+            last_used_at=0,
+        )
+    )
+
+    replacement = await manager.load(
+        "chat-new", replace_group="assistant", replace_mode="wait"
+    )
+
+    assert replacement.primary is True
+    assert registry.default_name == "chat-new"
+    assert promoted == ["chat-new"]
+    assert "chat-old" not in registry
+    assert "chat-secondary" not in registry
+    assert "chat-new" in registry
+    assert manager.snapshot()["retired_cleanup_pending"] == 1
 
 
 @pytest.mark.asyncio
