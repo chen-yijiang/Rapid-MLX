@@ -140,6 +140,8 @@ def test_real_profile_recommendations_reach_runtime_resolver():
         )
         == 1024
     )
+
+
 def test_prefill_help_describes_profile_scoped_recommendation():
     serve_parser = next(
         action.choices["serve"]
