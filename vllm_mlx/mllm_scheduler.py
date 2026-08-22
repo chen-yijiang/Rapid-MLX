@@ -631,8 +631,17 @@ class MLLMScheduler:
     def request_ids_snapshot(self) -> tuple[str, ...]:
         """Return an atomic snapshot of all queued/running request ids."""
 
-        with self._cancel_counter_lock:
+        with self._request_state_lock():
             return tuple(self.requests)
+
+    def _request_state_lock(self):
+        """Return the request lock, lazily supporting ``__new__`` test stubs."""
+
+        lock = getattr(self, "_cancel_counter_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._cancel_counter_lock = lock
+        return lock
 
     def abort_request(self, request_id: str) -> bool:
         """
@@ -764,7 +773,7 @@ class MLLMScheduler:
         # ``via_disconnect_total <= cancelled_total`` and the
         # "exactly one tick per abort" contract that three personas
         # independently observed broken on PyPI 0.8.2.
-        with self._cancel_counter_lock:
+        with self._request_state_lock():
             self.requests.pop(request_id, None)
             self._detokenizer_pool.pop(request_id, None)
 
@@ -1162,7 +1171,7 @@ class MLLMScheduler:
 
             # Track as finished
             self.finished_req_ids.add(request_id)
-            with self._cancel_counter_lock:
+            with self._request_state_lock():
                 self.requests.pop(request_id, None)
 
     def _step_no_queue(self) -> MLLMSchedulerOutput:
@@ -1377,7 +1386,7 @@ class MLLMScheduler:
             self.batch_generator = None
         self.waiting.clear()
         self.running.clear()
-        with self._cancel_counter_lock:
+        with self._request_state_lock():
             self.requests.clear()
         self.request_id_to_uid.clear()
         self.uid_to_request_id.clear()
@@ -1410,7 +1419,7 @@ class MLLMScheduler:
 
     def remove_finished_request(self, request_id: str) -> MLLMRequest | None:
         """Remove a finished request from tracking."""
-        with self._cancel_counter_lock:
+        with self._request_state_lock():
             return self.requests.pop(request_id, None)
 
     # ========== Async API (for streaming) ==========
@@ -1932,7 +1941,7 @@ class MLLMScheduler:
             )
 
         # Cleanup
-        with self._cancel_counter_lock:
+        with self._request_state_lock():
             self.requests.pop(request_id, None)
 
         return final_output
@@ -1988,7 +1997,7 @@ class MLLMScheduler:
 
         self.waiting.clear()
         self.running.clear()
-        with self._cancel_counter_lock:
+        with self._request_state_lock():
             self.requests.clear()
         self.finished_req_ids.clear()
         self.request_id_to_uid.clear()
