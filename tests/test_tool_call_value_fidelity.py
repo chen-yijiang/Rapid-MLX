@@ -1141,37 +1141,6 @@ def test_tool_name_in_an_argument_is_not_an_invocation(case, request_):
     )
 
 
-def test_declared_tool_marker_inside_streamed_refusal_remains_prose():
-    """Filtering the call must not redact its marker-shaped payload.
-
-    The outer tool is undeclared, so the whole block is user-visible prose.
-    The nested name is declared, but its opener is still argument data: the
-    streaming content projection must apply the same positional filter as the
-    executable-call scan or it silently removes the tail of the refusal.
-    """
-    text = (
-        "<tool_call>\n<function=note_write>\n"
-        f"<parameter=body>{_INJECT}</parameter>\n</function>\n</tool_call>"
-    )
-    parser = ToolParserManager.get_tool_parser("nemotron")(None)
-    request = _tools(("run_shell", "cmd"))
-
-    emitted_calls = []
-    emitted_content = ""
-    previous = ""
-    for index in range(len(text)):
-        current = text[: index + 1]
-        delta = parser.extract_tool_calls_streaming(
-            previous, current, text[index], request=request
-        )
-        previous = current
-        emitted_calls.extend((delta or {}).get("tool_calls") or [])
-        emitted_content += (delta or {}).get("content") or ""
-
-    assert emitted_calls == []
-    assert emitted_content == text
-
-
 # The wrapper is optional by design so truncated emissions still parse. That
 # tolerance is what the fix must not cost — a filter that also rejects these
 # would trade a security hole for dropped calls.

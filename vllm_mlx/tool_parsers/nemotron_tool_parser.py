@@ -137,7 +137,6 @@ class NemotronToolParser(ToolParser):
                 r"<function=([^>]+)>",
                 "</function>",
                 valid_names=_declared_tool_names(request),
-                not_inside=payload_spans(text, "<parameter=", "</parameter>"),
             )
         ]
         removed = list(valid_spans)
