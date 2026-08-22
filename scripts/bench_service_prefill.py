@@ -217,11 +217,28 @@ def wait_for_running_request(
     )
 
 
+def require_idle_service(client: httpx.Client, root_url: str) -> dict[str, Any]:
+    """Require an isolated service before starting a contention trial."""
+    status = get_status(client, root_url)
+    running = int(status.get("num_running") or 0)
+    waiting = int(status.get("num_waiting") or 0)
+    if running or waiting:
+        raise RuntimeError(
+            "contention benchmark requires an idle service "
+            f"(observed num_running={running}, num_waiting={waiting})"
+        )
+    return status
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--model")
-    parser.add_argument("--tokenizer")
+    parser.add_argument(
+        "--tokenizer",
+        required=True,
+        help="Hugging Face tokenizer repo/path (required; served aliases are not repos)",
+    )
     parser.add_argument("--label", required=True)
     parser.add_argument("--lengths", nargs="+", type=int, default=[2048, 8192, 16384])
     parser.add_argument("--repeat", type=int, default=3)
@@ -238,7 +255,7 @@ def main() -> int:
     timeout = httpx.Timeout(900.0, connect=30.0)
     with httpx.Client(timeout=timeout) as client:
         model = args.model or client.get(f"{api_url}/models").json()["data"][0]["id"]
-        tokenizer_id = args.tokenizer or model
+        tokenizer_id = args.tokenizer
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=True)
         client.get(f"{root_url}/health").raise_for_status()
 
@@ -278,6 +295,7 @@ def main() -> int:
         contention_runs = []
         for repeat in range(args.contention_repeat):
             clear_prefix_cache(client, root_url)
+            require_idle_service(client, root_url)
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 long_future = executor.submit(
                     stream_request,

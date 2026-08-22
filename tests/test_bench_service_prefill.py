@@ -49,6 +49,24 @@ def test_wait_for_running_request_polls_server_state(monkeypatch):
     assert observed["num_running"] == 1
 
 
+def test_contention_requires_idle_service(monkeypatch):
+    monkeypatch.setattr(
+        bench,
+        "get_status",
+        lambda _client, _url: {"num_running": 1, "num_waiting": 0},
+    )
+
+    with pytest.raises(RuntimeError, match="requires an idle service"):
+        bench.require_idle_service(MagicMock(), "http://rapid")
+
+
+def test_idle_service_baseline_is_returned(monkeypatch):
+    status = {"num_running": 0, "num_waiting": 0, "total_requests_processed": 4}
+    monkeypatch.setattr(bench, "get_status", lambda _client, _url: status)
+
+    assert bench.require_idle_service(MagicMock(), "http://rapid") is status
+
+
 def test_stream_request_rejects_stream_without_visible_delta(monkeypatch):
     response = MagicMock()
     response.__enter__.return_value = response
