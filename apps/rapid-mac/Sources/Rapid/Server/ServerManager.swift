@@ -1034,7 +1034,7 @@ final class ServerManager {
             ).first {
                 $0.alias.caseInsensitiveCompare(trimmed) == .orderedSame
             }
-            if Task.isCancelled || didSignalShutdown { return false }
+            if Task.isCancelled || didSignalShutdown { return .cancelled }
             requestedCatalogSupportsImageInput = ModelBrandStyle.supportsImageInput(
                 forAlias: trimmed,
                 isBuiltinProfile: entry?.isBuiltinProfile,
