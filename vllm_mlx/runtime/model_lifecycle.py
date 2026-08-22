@@ -65,13 +65,20 @@ class ModelLifecycleManager:
     external supervisor an operation id it can confirm/cancel/complete.
     """
 
-    def __init__(self, *, clock=time.time, operation_timeout_seconds: float = 300) -> None:
+    def __init__(
+        self,
+        *,
+        clock=time.time,
+        operation_timeout_seconds: float = 300,
+        max_history: int = 256,
+    ) -> None:
         self._clock = clock
         self._lock = asyncio.Lock()
         self._active_requests = 0
         self._current: LifecycleOperation | None = None
         self._history: dict[str, LifecycleOperation] = {}
         self._operation_timeout_seconds = max(1.0, operation_timeout_seconds)
+        self._max_history = max(1, int(max_history))
 
     @asynccontextmanager
     async def admit(self):
@@ -114,6 +121,7 @@ class ModelLifecycleManager:
             )
             self._current = operation
             self._history[operation.id] = operation
+            self._trim_history_locked()
             return operation
 
     async def confirm(self, operation_id: str) -> LifecycleOperation:
@@ -170,6 +178,13 @@ class ModelLifecycleManager:
             return
         self._current.phase = LifecyclePhase.EXPIRED
         self._current = None
+
+    def _trim_history_locked(self) -> None:
+        while len(self._history) > self._max_history:
+            oldest_id = next(iter(self._history))
+            if self._current is not None and oldest_id == self._current.id:
+                break
+            self._history.pop(oldest_id, None)
 
     def _lookup_current(self, operation_id: str) -> LifecycleOperation:
         operation = self._history.get(operation_id)

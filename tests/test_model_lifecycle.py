@@ -12,6 +12,7 @@ from vllm_mlx.middleware.model_lifecycle import ModelLifecycleMiddleware
 from vllm_mlx.runtime.model_lifecycle import (
     LifecycleAdmissionClosedError,
     LifecycleOperationConflictError,
+    LifecycleOperationNotFoundError,
     LifecyclePhase,
     ModelLifecycleManager,
 )
@@ -110,6 +111,21 @@ async def test_abandoned_operation_expires_and_reopens_admission():
     assert operation.phase is LifecyclePhase.EXPIRED
     async with manager.admit():
         pass
+
+
+@pytest.mark.asyncio
+async def test_operation_history_is_bounded_without_evicting_current():
+    manager = ModelLifecycleManager(max_history=3)
+    operations = []
+    for index in range(10):
+        operations.append(
+            await manager.begin(target_model=str(index), reason="model_switch")
+        )
+
+    assert len(manager._history) == 3
+    assert operations[-1].id in manager._history
+    with pytest.raises(LifecycleOperationNotFoundError):
+        await manager.confirm(operations[0].id)
 
 
 @pytest.mark.asyncio
