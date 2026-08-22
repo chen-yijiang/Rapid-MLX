@@ -163,7 +163,13 @@ func string(_ element: AXUIElement, _ name: CFString) -> String? {
 func jsonValue(_ value: AnyObject?) -> Any? {
     switch value {
     case let text as String: return text
-    case let number as NSNumber: return number
+    case let number as NSNumber:
+        // AX occasionally publishes ±infinity for transient progress/range
+        // values. Foundation raises an Objective-C exception when such an
+        // NSNumber reaches JSONSerialization, taking down the whole driver.
+        // The value carries no stable assertion signal, so omit only the
+        // non-finite representation and keep ordinary integers/bools/floats.
+        return number.doubleValue.isFinite ? number : nil
     default: return nil
     }
 }
@@ -231,7 +237,9 @@ func walk(_ element: AXUIElement, depth: Int) {
     if let help = string(element, kAXHelpAttribute as CFString), !help.isEmpty { record["help"] = help }
     if let value = jsonValue(attribute(element, kAXValueAttribute as CFString)) { record["value"] = value }
     if let origin = point(element, kAXPositionAttribute as CFString),
-       let extent = size(element, kAXSizeAttribute as CFString) {
+       let extent = size(element, kAXSizeAttribute as CFString),
+       origin.x.isFinite, origin.y.isFinite,
+       extent.width.isFinite, extent.height.isFinite {
         record["bounds"] = [
             "x": origin.x, "y": origin.y,
             "width": extent.width, "height": extent.height

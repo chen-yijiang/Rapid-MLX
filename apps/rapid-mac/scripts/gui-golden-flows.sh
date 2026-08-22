@@ -3621,18 +3621,21 @@ flow_image_generation() {
 
     # The in-flight card. Asserted BEFORE the result so a render that returns
     # instantly (or a card that never appears) is a failure rather than a frame
-    # nobody looked at.
+    # nobody looked at.  SwiftUI mounts Cancel one layout pass before the
+    # indeterminate indicator the baseline owns; require both so the snapshot
+    # cannot race that valid intermediate tree.
     local inflight=0
     for ((i=0; i<80; i++)); do
         see_main "$OUT/ig-inflight.json"
-        if jq -e '.data.ui_elements[]? | select(.identifier == "Images.Cancel")' \
+        if jq -e 'any(.data.ui_elements[]?; .identifier == "Images.Cancel")
+                  and any(.data.ui_elements[]?; .role == "AXBusyIndicator")' \
                "$OUT/ig-inflight.json" >/dev/null; then
             inflight=1; break
         fi
         sleep 0.1
     done
     [[ "$inflight" == 1 ]] \
-        || die "no in-flight progress card: Images.Cancel never appeared during a render"
+        || die "no settled in-flight progress card with Cancel and busy indicator"
     baseline image-generation.inflight "$OUT/ig-inflight.json"
 
     # Sampling completion is followed by VAE decode / encoding. That tail must

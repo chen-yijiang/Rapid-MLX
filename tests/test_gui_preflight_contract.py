@@ -54,6 +54,16 @@ def test_trust_success_requires_all_three_signals():
     assert "screenLocked" in line
 
 
+def test_ax_dump_omits_non_finite_numbers_before_json_serialization():
+    source = DRIVER.read_text()
+    json_value = source.split("func jsonValue", 1)[1].split("\n}", 1)[0]
+    assert "number.doubleValue.isFinite ? number : nil" in json_value
+    bounds = source.split('record["bounds"]', 1)[0].rsplit("if let origin = point", 1)[
+        1
+    ]
+    assert "origin.x.isFinite" in bounds and "extent.height.isFinite" in bounds
+
+
 def test_each_fault_fails_with_its_own_message():
     source = DRIVER.read_text()
     assert source.count("fail(") >= 4
