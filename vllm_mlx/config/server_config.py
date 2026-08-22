@@ -45,6 +45,7 @@ class ServerConfig:
     # legacy ``engine`` fields remain the protected startup/default model;
     # request routes consult this manager for residency, eviction, and status.
     residency_manager: Any = None
+    lifecycle_manager: Any = None
     # True only after lifespan has finished engine.start(), warmup,
     # prefix-cache load_from_disk, and MCP init. Used by /health/ready
     # so callers (e.g. validation pipelines) can wait for a real

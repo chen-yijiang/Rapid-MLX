@@ -906,6 +906,12 @@ from .routes.images import install_image_body_limit_middleware  # noqa: E402
 
 install_image_body_limit_middleware(app)
 
+# Lifecycle admission wraps the complete ASGI response, including streaming
+# bodies, so active request counts do not drop when headers are first emitted.
+from .middleware.model_lifecycle import install_model_lifecycle_middleware  # noqa: E402
+
+install_model_lifecycle_middleware(app)
+
 # SECURITY: blanket request-body size cap across all /v1/* routes.
 # Defends against the DoS pattern documented in rapid-desktop#273 / #463
 # where a 10–100 MB JSON body silently runs full prefill (~60–90 s on a
@@ -2540,6 +2546,7 @@ from .routes.images import router as _images_router
 from .routes.mcp_routes import admin_router as _mcp_admin_router
 from .routes.mcp_routes import router as _mcp_router
 from .routes.metrics import router as _metrics_router
+from .routes.model_lifecycle import router as _model_lifecycle_router
 from .routes.models import router as _models_router
 from .routes.residency import router as _residency_router
 from .routes.responses import router as _responses_router
@@ -2551,6 +2558,7 @@ app.include_router(_health_router)
 # ``X-Rapid-MLX-Internal: true`` gate ALSO applies when ``--api-key`` is unset.
 app.include_router(_health_admin_router)
 app.include_router(_metrics_router)
+app.include_router(_model_lifecycle_router)
 # Keep literal residency paths ahead of ``/v1/models/{model_id:path}`` so the
 # latter cannot consume ``residency`` as an ordinary model id.
 app.include_router(_residency_router)
