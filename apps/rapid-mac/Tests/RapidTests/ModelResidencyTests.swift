@@ -139,6 +139,35 @@ struct ModelResidencyTests {
         #expect(queue.currentWarning == nil)
     }
 
+    @Test("A failed decision-point refresh fails safe and cancellation is distinct")
+    func failedRefreshPromptsAndReturnsCancellation() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ResidencyFetchFailureProtocol.self]
+        var client = ServerResidencyClient()
+        client.session = URLSession(configuration: configuration)
+        let server = ServerManager(testingState: .ready(alias: "current"))
+        server._testSetResidencyClient(client)
+        server._testInstallChild(ProcessGroupChild.testStub())
+
+        let switchTask = Task { @MainActor in
+            await server.ensureServingOutcome(
+                alias: "target",
+                hfPath: nil,
+                estimatedMemoryGB: nil,
+                residencyEligible: false
+            )
+        }
+        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let warning = try #require(server.pendingActiveRequestSwitch)
+        #expect(warning.activeRequests == nil)
+
+        server.cancelActiveRequestSwitch(warning)
+        #expect(await switchTask.value == .cancelled)
+        #expect(server.state == .ready(alias: "current"))
+    }
+
     @Test("Connector restart prefers a resident text model over the process-owning audio alias")
     func connectorRestartTextAlias() {
         let text = ResidentModelStatus(
@@ -303,6 +332,17 @@ struct ModelResidencyTests {
             memoryBandwidthGBs: 150
         )
     }
+}
+
+private final class ResidencyFetchFailureProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+    }
+
+    override func stopLoading() {}
 }
 
 private final class ResidencyLoadCaptureProtocol: URLProtocol, @unchecked Sendable {

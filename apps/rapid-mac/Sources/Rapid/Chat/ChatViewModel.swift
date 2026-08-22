@@ -833,7 +833,7 @@ final class ChatViewModel {
             // `ensureServing` short-circuits when we are already serving
             // this alias, so the warm path pays only a state read.
             if let server {
-                let ready = await server.ensureServing(
+                let servingOutcome = await server.ensureServingOutcome(
                     alias: alias,
                     hfPath: startupHFPath,
                     estimatedMemoryGB: nil,
@@ -851,7 +851,11 @@ final class ChatViewModel {
                     finishStartupCancellation(placeholderIndex: placeholderIndex, epoch: epoch)
                     return
                 }
-                guard ready else {
+                if servingOutcome == .cancelled {
+                    finishStartupCancellation(placeholderIndex: placeholderIndex, epoch: epoch)
+                    return
+                }
+                guard servingOutcome == .ready else {
                     finishWithStartupFailure(
                         placeholderIndex: placeholderIndex,
                         alias: alias,
@@ -1844,13 +1848,14 @@ final class ChatViewModel {
         let trimmed = newAlias.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         if let server {
-            let ok = await server.ensureServing(
+            let servingOutcome = await server.ensureServingOutcome(
                 alias: trimmed,
                 hfPath: nil,
                 estimatedMemoryGB: nil,
                 replacementGroup: .assistant
             )
-            guard ok else {
+            guard servingOutcome != .cancelled else { return }
+            guard servingOutcome == .ready else {
                 lastFailureKind = .modelLoadFailed
                 lastError = FailureDiagnoser.diagnosis(
                     for: .modelLoadFailed,

@@ -6,7 +6,17 @@ struct ActiveRequestSwitchWarning: Identifiable, Sendable, Equatable {
     let id: UUID
     let currentAlias: String
     let targetAlias: String
-    let activeRequests: Int
+    /// Nil when the decision-point status request failed. In that case the
+    /// switch still requires confirmation because an active stream may exist.
+    let activeRequests: Int?
+}
+
+enum EnsureServingOutcome: Equatable {
+    case ready
+    case cancelled
+    case failed
+
+    var isReady: Bool { self == .ready }
 }
 
 struct ActiveRequestSwitchConfirmationQueue {
@@ -249,16 +259,18 @@ final class ServerManager {
         isModelResident(alias) ? .ready(alias: alias) : state
     }
 
-    func refreshResidency() async {
+    @discardableResult
+    func refreshResidency() async -> Bool {
         guard case .ready = state else {
             residency = .empty
-            return
+            return true
         }
         guard let snapshot = await residencyClient.fetch(
             port: activePort,
             bearer: activeBearer
-        ) else { return }
+        ) else { return false }
         residency = snapshot
+        return true
     }
 
     /// Alias of the child that currently owns the runtime — for BOTH
@@ -961,8 +973,26 @@ final class ServerManager {
         imageMode: ResidentImageMode? = nil,
         residencyEligible: Bool = true
     ) async -> Bool {
+        await ensureServingOutcome(
+            alias: alias,
+            hfPath: hfPath,
+            estimatedMemoryGB: estimatedMemoryGB,
+            replacementGroup: replacementGroup,
+            imageMode: imageMode,
+            residencyEligible: residencyEligible
+        ).isReady
+    }
+
+    func ensureServingOutcome(
+        alias: String,
+        hfPath: String?,
+        estimatedMemoryGB: Double?,
+        replacementGroup: ResidentModelReplacementGroup? = nil,
+        imageMode: ResidentImageMode? = nil,
+        residencyEligible: Bool = true
+    ) async -> EnsureServingOutcome {
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
+        guard !trimmed.isEmpty else { return .failed }
         let requestedPerformanceFlags = perfLaunchFlagsProvider?(trimmed) ?? []
         var requestedCatalogSupportsImageInput = false
         // Cold start delegates to `start`, which resolves the same metadata
@@ -998,19 +1028,19 @@ final class ServerManager {
         // chat send before the request can leave the app.
         if case .ready(let current) = state, current == trimmed,
            !speculativeSettingChanged, !requiresImageLaneRestart {
-            return true
+            return .ready
         }
         if replacementGroup == nil, isModelResident(trimmed),
            !speculativeSettingChanged, !requiresImageLaneRestart {
-            return true
+            return .ready
         }
 
         // Switching a live serve process can terminate in-flight API streams.
         // The residency endpoint already reports this count; refresh it at the
         // decision point rather than relying on the last UI polling snapshot.
-        await refreshResidency()
-        let activeRequests = residency.activeRequestCount
-        if activeRequests > 0 {
+        let residencyIsCurrent = await refreshResidency()
+        let activeRequests = residencyIsCurrent ? residency.activeRequestCount : nil
+        if activeRequests == nil || activeRequests! > 0 {
             let requestID = UUID()
             let warning = ActiveRequestSwitchWarning(
                 id: UUID(),
@@ -1020,7 +1050,7 @@ final class ServerManager {
             )
             activeRequestSwitchConfirmations.enqueue(warning, requestID: requestID)
             guard await awaitActiveRequestSwitchDecision(for: requestID) == true else {
-                return false
+                return .cancelled
             }
         }
 
@@ -1104,7 +1134,7 @@ final class ServerManager {
                 if residentLoadAttemptTokens[trimmed] == attemptToken {
                     residentLoadFailures[trimmed] = nil
                 }
-                return true
+                return .ready
             case .unsupported:
                 break
             case .rejected(let message):
@@ -1122,7 +1152,7 @@ final class ServerManager {
                         message: LogScrubber.scrub(message)
                     )
                 }
-                return false
+                return .failed
             }
         }
         // Someone else — the picker's Start CTA, auto-start on launch,
@@ -1132,7 +1162,7 @@ final class ServerManager {
         // would re-enter a multi-gigabyte download. Wait for it.
         if case .starting(let current) = state, current == trimmed {
             await awaitStartupSettled(alias: trimmed)
-            return isServing(trimmed)
+            return isServing(trimmed) ? .ready : .failed
         }
         // Tear down whatever's there (a DIFFERENT alias, ready or
         // mid-``.starting``). ``stop()`` is a noop if child is nil, so
@@ -1168,7 +1198,7 @@ final class ServerManager {
         if case .starting(let current) = state, current == trimmed {
             await awaitStartupSettled(alias: trimmed)
         }
-        return isServing(trimmed)
+        return isServing(trimmed) ? .ready : .failed
     }
 
     /// Rebuild only the named resident engine with its current performance

@@ -266,13 +266,15 @@ final class ImageGenViewModel {
         let size = outputSize
         guard !trimmed.isEmpty else { return }
         await withRequest {
-            guard await self.server.ensureServing(
+            let servingOutcome = await self.server.ensureServingOutcome(
                 alias: target.alias,
                 hfPath: target.hfPath,
                 estimatedMemoryGB: target.estimatedMemoryGB,
                 imageMode: .generation,
                 residencyEligible: false
-            ) else {
+            )
+            guard servingOutcome != .cancelled else { throw CancellationError() }
+            guard servingOutcome == .ready else {
                 throw ImageClientError.notReady
             }
             guard !self.cancelling else { throw CancellationError() }
@@ -300,13 +302,15 @@ final class ImageGenViewModel {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         await withRequest {
-            guard await self.server.ensureServing(
+            let servingOutcome = await self.server.ensureServingOutcome(
                 alias: target.alias,
                 hfPath: target.hfPath,
                 estimatedMemoryGB: target.estimatedMemoryGB,
                 imageMode: .editing,
                 residencyEligible: false
-            ) else {
+            )
+            guard servingOutcome != .cancelled else { throw CancellationError() }
+            guard servingOutcome == .ready else {
                 throw ImageClientError.notReady
             }
             guard !self.cancelling else { throw CancellationError() }

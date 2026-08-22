@@ -219,7 +219,11 @@ struct ContentView: View {
             }
             .accessibilityIdentifier("ActiveRequestSwitch.Confirm")
         } message: { warning in
-            Text("\(warning.activeRequests) active request\(warning.activeRequests == 1 ? " is" : "s are") using \(warning.currentAlias). Switching to \(warning.targetAlias) will interrupt \(warning.activeRequests == 1 ? "it" : "them").")
+            if let count = warning.activeRequests {
+                Text("\(count) active request\(count == 1 ? " is" : "s are") using \(warning.currentAlias). Switching to \(warning.targetAlias) will interrupt \(count == 1 ? "it" : "them").")
+            } else {
+                Text("Rapid couldn't verify whether requests are active. Switching from \(warning.currentAlias) to \(warning.targetAlias) may interrupt clients using the server.")
+            }
         }
         .onChange(of: settingsRouter.quickstartReturnGeneration) { _, _ in
             quickstartDismissedThisSession = false
