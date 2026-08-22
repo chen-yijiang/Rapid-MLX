@@ -1056,8 +1056,24 @@ def test_vision_admission_budget_is_independent_from_prefill_chunk():
 def test_vision_budget_keeps_safe_floor_and_larger_operator_value():
     from vllm_mlx.engine.batched import _resolve_mllm_vision_prefill_token_budget
 
-    assert _resolve_mllm_vision_prefill_token_budget(512, mllm_default=8192) == 8192
-    assert _resolve_mllm_vision_prefill_token_budget(16384, mllm_default=8192) == 16384
+    assert (
+        _resolve_mllm_vision_prefill_token_budget(
+            512, configured=None, mllm_default=8192
+        )
+        == 8192
+    )
+    assert (
+        _resolve_mllm_vision_prefill_token_budget(
+            16384, configured=None, mllm_default=8192
+        )
+        == 16384
+    )
+    assert (
+        _resolve_mllm_vision_prefill_token_budget(
+            512, configured=256, mllm_default=8192
+        )
+        == 256
+    )
 
 
 def test_resolve_mllm_prefill_step_size_bumps_text_default_to_mllm_default():

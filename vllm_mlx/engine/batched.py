@@ -668,9 +668,14 @@ def _resolve_mllm_prefill_step_size(
 
 
 def _resolve_mllm_vision_prefill_token_budget(
-    prefill_step_size: int, *, mllm_default: int
+    prefill_step_size: int,
+    *,
+    configured: int | None,
+    mllm_default: int,
 ) -> int:
     """Keep vision admission safe without limiting larger operator budgets."""
+    if configured is not None:
+        return configured
     return max(prefill_step_size, mllm_default)
 
 
@@ -1233,6 +1238,9 @@ class BatchedEngine(BaseEngine):
             prefill_step_size=prefill_step_size,
             vision_prefill_token_budget=_resolve_mllm_vision_prefill_token_budget(
                 prefill_step_size,
+                configured=getattr(
+                    self._scheduler_config, "vision_prefill_token_budget", None
+                ),
                 mllm_default=_MLLM_DEFAULT_PREFILL_STEP_SIZE,
             ),
             enable_vision_cache=True,

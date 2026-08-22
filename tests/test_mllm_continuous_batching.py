@@ -270,7 +270,7 @@ class TestMLLMSchedulerConfig:
         )
         assert (
             MLLMSchedulerConfig(prefill_step_size=512).vision_prefill_token_budget
-            == 8192
+            == 512
         )
         assert (
             MLLMSchedulerConfig(

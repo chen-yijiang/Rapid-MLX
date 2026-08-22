@@ -152,6 +152,33 @@ def test_real_profile_recommendations_reach_runtime_resolver():
     )
 
 
+def test_vision_budget_distinguishes_gui_profile_from_explicit_prefill():
+    assert (
+        cli._resolve_vision_prefill_token_budget(
+            configured=None,
+            prefill_step_size=512,
+            prefill_user_set_explicit=False,
+        )
+        == 8192
+    )
+    assert (
+        cli._resolve_vision_prefill_token_budget(
+            configured=None,
+            prefill_step_size=512,
+            prefill_user_set_explicit=True,
+        )
+        == 512
+    )
+    assert (
+        cli._resolve_vision_prefill_token_budget(
+            configured=4096,
+            prefill_step_size=512,
+            prefill_user_set_explicit=False,
+        )
+        == 4096
+    )
+
+
 def test_prefill_help_describes_profile_scoped_recommendation():
     serve_parser = next(
         action.choices["serve"]
@@ -165,3 +192,10 @@ def test_prefill_help_describes_profile_scoped_recommendation():
     )
     assert "bench-verified model profiles" in action.help
     assert "recurrent/linear-attention models auto-tune" not in action.help
+
+    vision_action = next(
+        action
+        for action in serve_parser._actions
+        if "--vision-prefill-token-budget" in action.option_strings
+    )
+    assert vision_action.default is None

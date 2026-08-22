@@ -160,6 +160,12 @@ the safe 8,192-token budget. This matters especially to Desktop users, because
 the GUI launches the alias without performance flags and receives both defaults
 automatically.
 
+Operator compatibility is source-aware. An explicit
+`--vision-prefill-token-budget` always wins; an explicit
+`--prefill-step-size` without that new flag preserves the historical shared
+limit for memory-constrained deployments. Only the zero-flag/profile path
+separates Gemma's 512 computation chunk from the 8,192 vision budget.
+
 A zero-flag service spot check used the same Desktop launch shape on the M2 Pro:
 `rapid-mlx serve gemma-4-12b-4bit`. Startup selected the profile's 512 chunk,
 and a 64×64 red PNG sent through `/v1/chat/completions` completed normally with

@@ -101,7 +101,7 @@ class MLLMSchedulerConfig:
 
     def __post_init__(self) -> None:
         if self.vision_prefill_token_budget is None:
-            self.vision_prefill_token_budget = max(self.prefill_step_size, 8192)
+            self.vision_prefill_token_budget = self.prefill_step_size
         elif self.vision_prefill_token_budget <= 0:
             raise ValueError("vision_prefill_token_budget must be positive")
         if self.vision_min_pixels < 0 or self.vision_max_pixels < 0:
