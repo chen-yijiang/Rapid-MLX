@@ -75,7 +75,6 @@ struct ContentView: View {
         // callback must not cancel a newer warning that has reached the queue
         // head in the meantime (#1463).
         let displayedMemoryWarning = server.pendingMemoryWarning
-        let displayedActiveRequestSwitch = server.pendingActiveRequestSwitch
         // Ollama-style layout: a left sidebar (New Chat / Launch / — later —
         // history) + a detail pane. No top model-control bar; the model
         // picker lives inline in the compose box (see ChatView) and the
@@ -197,35 +196,6 @@ struct ContentView: View {
             .accessibilityIdentifier("MemoryWarning.Confirm")
         } message: { warning in
             Text(warning.message)
-        }
-        .alert(
-            "Switch models?",
-            isPresented: Binding(
-                get: { server.pendingActiveRequestSwitch != nil },
-                set: {
-                    if !$0, let warning = displayedActiveRequestSwitch {
-                        server.cancelActiveRequestSwitch(warning)
-                    }
-                }
-            ),
-            presenting: displayedActiveRequestSwitch
-        ) { warning in
-            Button("Cancel", role: .cancel) {
-                server.cancelActiveRequestSwitch(warning)
-            }
-            .accessibilityIdentifier("ActiveRequestSwitch.Cancel")
-            Button("Switch model", role: .destructive) {
-                server.confirmActiveRequestSwitch(warning)
-            }
-            .accessibilityIdentifier("ActiveRequestSwitch.Confirm")
-        } message: { warning in
-            if warning.activeRequests == 0 {
-                Text("Switching from \(warning.currentAlias) to \(warning.targetAlias) briefly stops the current server. New requests may be interrupted during the handoff.")
-            } else if let count = warning.activeRequests {
-                Text("\(count) active request\(count == 1 ? " is" : "s are") using \(warning.currentAlias). Switching to \(warning.targetAlias) will interrupt \(count == 1 ? "it" : "them").")
-            } else {
-                Text("Rapid couldn't verify whether requests are active. Switching from \(warning.currentAlias) to \(warning.targetAlias) may interrupt clients using the server.")
-            }
         }
         .onChange(of: settingsRouter.quickstartReturnGeneration) { _, _ in
             quickstartDismissedThisSession = false

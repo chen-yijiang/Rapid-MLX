@@ -360,6 +360,7 @@ struct RapidApp: App {
                 .environment(mcpApproval)
                 .environment(mcpTools)
                 .environment(perfConfig)
+                .activeRequestSwitchAlert()
                 .task {
                     // Dictation is a background service: arm it at launch so
                     // the hotkey works without ever opening the Audio tab.
@@ -517,6 +518,7 @@ struct RapidApp: App {
                 .environment(mcpApproval)
                 .environment(mcpTools)
                 .environment(perfConfig)
+                .activeRequestSwitchAlert()
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 900, height: 720)

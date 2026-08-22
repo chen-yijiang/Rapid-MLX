@@ -329,6 +329,19 @@ struct ModelResidencyTests {
         }
     }
 
+    @Test("Main and Settings windows both host switch confirmation")
+    func appWindowsHostSwitchConfirmation() throws {
+        let rapidMacRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: rapidMacRoot.appendingPathComponent("Sources/Rapid/RapidApp.swift"),
+            encoding: .utf8
+        )
+        #expect(source.components(separatedBy: ".activeRequestSwitchAlert()").count - 1 == 2)
+    }
+
     @Test("Connector restart prefers a resident text model over the process-owning audio alias")
     func connectorRestartTextAlias() {
         let text = ResidentModelStatus(
