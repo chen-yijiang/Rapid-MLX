@@ -110,5 +110,11 @@ struct MacHardwareTests {
         // A non-parserable or non-positive value also falls back to sysctl.
         let bad = MacHardware.physicalRAMBytes(environment: ["RAPID_HARDWARE_RAM_GB": "not-a-number"])
         #expect(bad > 0)
+        let nonFinite = MacHardware.physicalRAMBytes(environment: ["RAPID_HARDWARE_RAM_GB": "inf"])
+        #expect(nonFinite > 0)
+        let implausiblyLarge = MacHardware.physicalRAMBytes(
+            environment: ["RAPID_HARDWARE_RAM_GB": "1e100"]
+        )
+        #expect(implausiblyLarge > 0)
     }
 }

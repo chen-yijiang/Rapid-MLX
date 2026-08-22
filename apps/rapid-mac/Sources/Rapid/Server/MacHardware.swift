@@ -82,7 +82,7 @@ struct MacHardware: Sendable, Equatable {
     /// the test process's global environment.
     static func physicalRAMBytes(environment: [String: String]) -> UInt64 {
         if let override = environment["RAPID_HARDWARE_RAM_GB"],
-           let gb = Double(override), gb > 0 {
+           let gb = Double(override), gb.isFinite, gb > 0, gb <= 1024 {
             return UInt64((gb * Double(1 << 30)).rounded())
         }
         return sysctlUInt64("hw.memsize") ?? 0
