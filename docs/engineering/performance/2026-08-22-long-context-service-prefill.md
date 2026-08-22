@@ -2,9 +2,9 @@
 
 ## Outcome
 
-Bench-verified model profiles should select their own prefill chunk in
-`rapid-mlx serve`: Qwen3.5 4B/9B 4-bit and Gemma 4 12B 4-bit use 512;
-Qwen3.5 4B/9B 6/8-bit and 27B 4-bit use 1,024. Against the previous universal
+Bench-verified text-model profiles should select their own prefill chunk in
+`rapid-mlx serve`: Qwen3.5 4B/9B 4-bit use 512; Qwen3.5 4B/9B 6/8-bit and
+27B 4-bit use 1,024. Against the previous universal
 2,048-token default, the original Qwen3.5 4B 4-bit result:
 
 - reduced a short request's TTFT under a concurrent long prefill by 51.1%;
@@ -144,18 +144,20 @@ agentic multi-prefix workloads rather than increasing the entry count blindly.
 ## Dense/sliding spot check
 
 Gemma 4 12B (`mlx-community/gemma-4-12B-it-4bit`) must use the mlx-vlm/Gemma
-loader; mlx-lm 0.31.3 rejects its `gemma4_unified` model type. A single-repeat
-scout through mlx-vlm 0.6.15 found that 512 was promising but not yet sufficient
-evidence for a global default:
+loader; mlx-lm 0.31.3 rejects its `gemma4_unified` model type. An initial
+single-repeat scout through mlx-vlm 0.6.15 found that 512 was promising:
 
 | Prompt | 2,048 tok/s | 512 tok/s | Delta | Peak-memory delta |
 | ---: | ---: | ---: | ---: | ---: |
 | 4K | 131.79 | 136.48 | +3.6% | -7.8% |
 | 16K | 125.38 | 130.12 | +3.8% | -13.3% |
 
-Follow up with repeated Rapid service concurrency runs before changing the
-dense/sliding default. The current implementation deliberately does not use the
-broader "needs bounded prefix reuse" classifier, so Gemma is unaffected.
+The later repeat-three direct-prefill matrix reproduced this result. It still
+does not justify a service default: on the multimodal path, the same setting is
+also the per-image admission budget. A 512 value can reject a token-dense image
+before generation. Gemma therefore remains at the MLLM default until the text
+chunk and image admission budget are separated, or repeated image-service tests
+prove a safe policy.
 
 ## Recurrent cross-model regression matrix
 
@@ -193,20 +195,21 @@ Gemma ran on the M2 Pro 32 GB mini with MLX 0.32.1 and mlx-vlm 0.6.15. The
 decision rule remained: reject any candidate with a median throughput regression
 greater than 3% at either 4K or 16K, then prefer the smallest remaining chunk.
 
-| Model | Selected | 4K throughput vs 2,048 | 16K throughput vs 2,048 | 4K memory | 16K memory |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.5 4B 6-bit | 1,024 | -1.2% | -2.3% | -10.7% | -7.8% |
-| Qwen3.5 4B 8-bit | 1,024 | -1.9% | -2.5% | -9.0% | -6.7% |
-| Qwen3.5 9B 6-bit | 1,024 | -0.8% | -1.2% | -7.0% | -10.1% |
-| Qwen3.5 9B 8-bit | 1,024 | -1.2% | -1.6% | -5.1% | -7.8% |
-| Qwen3.5 27B 4-bit | 1,024 | -0.6% | -0.5% | -6.6% | -8.9% |
-| Gemma 4 12B 4-bit | 512 | +3.3% | +3.8% | -7.8% | -13.3% |
+| Model | Direct winner | Deployed default | 4K throughput vs 2,048 | 16K throughput vs 2,048 | 4K memory | 16K memory |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.5 4B 6-bit | 1,024 | 1,024 | -1.2% | -2.3% | -10.7% | -7.8% |
+| Qwen3.5 4B 8-bit | 1,024 | 1,024 | -1.9% | -2.5% | -9.0% | -6.7% |
+| Qwen3.5 9B 6-bit | 1,024 | 1,024 | -0.8% | -1.2% | -7.0% | -10.1% |
+| Qwen3.5 9B 8-bit | 1,024 | 1,024 | -1.2% | -1.6% | -5.1% | -7.8% |
+| Qwen3.5 27B 4-bit | 1,024 | 1,024 | -0.6% | -0.5% | -6.6% | -8.9% |
+| Gemma 4 12B 4-bit | 512 | MLLM default | +3.3% | +3.8% | -7.8% | -13.3% |
 
 For the four 6/8-bit Qwen aliases, 512 regressed throughput by 3.9--7.5%, so
 1,024 is not merely a midpoint: it is the smallest candidate that stays within
 the regression budget. Qwen3.5 27B at 512 was acceptable at 4K (-2.5%) but
 missed at 16K (-3.3%), so it also uses 1,024. Gemma's repeat-three result
-confirmed the earlier scout and selects 512.
+confirmed the earlier scout, but is not deployed because the MLLM admission
+budget currently shares this setting.
 
 ### Desktop/GUI consumption audit
 
