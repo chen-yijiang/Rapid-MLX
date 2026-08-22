@@ -1,10 +1,10 @@
 # Vector handoff
 
-- Status: in progress; MLX 0.32.1 dependency PR candidate under validation
+- Status: in progress; MLX 0.32.1 dependency candidate published as PR #2199
 - Active task: benchmark the 16--64 GB Mac model matrix against mlx-vlm,
   oMLX, and applicable MLXFast/MTPLX implementations; optimize material
   Rapid-MLX deficits and re-run the controlled matrix.
-- Branch or PR: `raullenchai/vector-desk`; no PR yet.
+- Branch or PR: `raullenchai/vector-desk`; https://github.com/raullenchai/Rapid-MLX/pull/2199
 - Host: final 16--32 GB claims must run on the M2 Pro 32 GB Mac mini at SSH
   alias `mini`; large-model preflight and 48--64 GB-class experiments can run
   on the M3 Ultra 256 GB Studio but must be labelled as Studio results.
@@ -80,8 +80,8 @@
   preflight data must not be published. Only about 137 GiB was available on
   the Studio system volume, so uncached checkpoints need staged downloads or
   explicit cache cleanup.
-- Next action: publish the dependency PR with the `Coherence-Sweep` attestation
-  (prefill gains now cover Qwen3.5-4B +22%, Qwen3.8-27B +24%, and
-  Gemma4-26B-A4B +31--34%, all at unchanged peak memory) and hand Atlas the
+- Next action: take PR #2199 through review and CI with its `Coherence-Sweep`
+  attestation (prefill gains cover Qwen3.5-4B +22%, Qwen3.8-27B +24%, and
+  Gemma4-26B-A4B +31--34%, all at unchanged peak memory), then hand Atlas the
   Ultra-only Hy3 row plus upstream issue #1197's exact VLM-MTP layout as explicit
   pre-merge/release follow-ups. Continue the remaining model matrix independently.

@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 import tomllib
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
 # Load the script directly (scripts/ is not an importable package).
@@ -280,3 +281,59 @@ class TestAttestation:
 
     def test_label_match_is_case_insensitive_and_trimmed(self):
         assert guard._attestation_ok("", "  MLX-Coherence-Swept  ", False)
+
+
+class TestDesktopManifestSynced:
+    """The shipped Desktop third-party manifest must track the core runtime.
+
+    ``apps/rapid-mac/THIRD_PARTY.md`` lists the bundled engine dependencies that
+    a Mac build presents to users and license/security auditors. A dependency
+    bound change in ``pyproject.toml`` (gated by this file's guard) must not
+    leave that manifest stale: the installed Mac build would then bundle a
+    different MLX than the manifest advertises.
+    """
+
+    @staticmethod
+    def _third_party_mlx_table() -> dict[str, str]:
+        """Return {component: declared range} for the Desktop manifest table."""
+        text = (_REPO_ROOT / "apps" / "rapid-mac" / "THIRD_PARTY.md").read_text()
+        out: dict[str, str] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) < 2:
+                continue
+            name = cells[0]
+            declared = cells[1]
+            if name in ("mlx", "mlx-lm"):
+                out[name] = declared.strip("`")
+        return out
+
+    def test_desktop_mlx_ranges_match_core_manifest(self):
+        pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
+        core = {
+            Requirement(spec).name: str(Requirement(spec).specifier)
+            for spec in pyproject["project"]["dependencies"]
+            if Requirement(spec).name in ("mlx", "mlx-lm")
+        }
+        third = self._third_party_mlx_table()
+
+        # The manifest must list the same guarded runtime packages as core.
+        assert set(core) == set(third), f"manifest missing/extra: {third}"
+        for pkg, ranges in core.items():
+            # Backticks around the manifest cell are tolerated; compare the
+            # version set semantically so formatting changes do not trip this.
+            declared = third[pkg]
+            assert SpecifierSet(declared) == SpecifierSet(ranges), (
+                f"{pkg} manifest {declared!r} != core {ranges!r}"
+            )
+
+    def test_manifest_mlx_advertises_the_0321_floor(self):
+        """Regression anchor: the shipped bundle claims MLX >=0.32.1,<0.33."""
+        table = self._third_party_mlx_table()
+        spec = SpecifierSet(table["mlx"])
+        assert Version("0.31.2") not in spec
+        assert Version("0.32.1") in spec
+        assert Version("0.33.0") not in spec
