@@ -1,6 +1,7 @@
 # Vector handoff
 
-- Status: in progress; MLX 0.32.1 dependency candidate published as PR #2199
+- Status: in progress; PR #2199 is technically complete and awaiting Atlas or
+  human review after the automated review loop reached its three-round cap
 - Active task: benchmark the 16--64 GB Mac model matrix against mlx-vlm,
   oMLX, and applicable MLXFast/MTPLX implementations; optimize material
   Rapid-MLX deficits and re-run the controlled matrix.
@@ -93,7 +94,9 @@
   preflight data must not be published. Only about 137 GiB was available on
   the Studio system volume, so uncached checkpoints need staged downloads or
   explicit cache cleanup.
-- Next action: land PR #2199 after its final CI run. The complete toolchain
+- Next action: Atlas or a human reviewer should verify the round-3 AR-only
+  reproduction fix in `c7984227` and land PR #2199 after final CI. The automated
+  review loop stopped at its hard cap of three rounds without a post-fix LGTM;
+  its round-3 finding is addressed in the branch. The complete toolchain
   coherence fleet, Hy3 Ultra, exact Qwen3.6 VLM+MTP layout, and extra mini spot
-  checks are now complete. Continue the remaining performance matrix
-  independently.
+  checks are complete. Continue the remaining performance matrix independently.
