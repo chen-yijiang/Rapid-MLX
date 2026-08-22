@@ -67,15 +67,19 @@ def assess_method(profile: ModelProfile, method: str) -> SpecCapability:
             else ("runtime validates lossless rollback support",),
         )
     if method == "dflash":
-        if profile.is_moe:
-            return SpecCapability(
-                method, False, "incompatible", False, ("MoE verifier unsupported",)
-            )
+        # MoE is admitted only for a *verified* curated bf16 pair (e.g.
+        # LFM2.5-8B-A1B bf16 + bundled DSpark) where DSpark is lossless.
+        # Every other MoE shape — un-curated, 4-bit, drafter-mismatched —
+        # keeps the ~1.5-tokens/round acceptance floor and stays rejected.
         verified = (
             profile.supports_dflash
             and bool(profile.dflash_draft_model)
             and not _is_experimental_quantization(profile)
         )
+        if profile.is_moe and not verified:
+            return SpecCapability(
+                method, False, "incompatible", False, ("MoE verifier unsupported",)
+            )
         return SpecCapability(
             method,
             True if verified else None,

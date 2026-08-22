@@ -489,18 +489,27 @@ def test_dflash_requires_drafter(alias: str) -> None:
 
 @pytest.mark.parametrize("alias", _alias_ids())
 def test_dflash_excludes_moe_architectures(alias: str) -> None:
-    """``is_moe=True`` MUST NOT pair with ``supports_dflash=True``. PoC on
-    Qwen3.6-35B-A3B (MoE hybrid) measured 0.76-0.82× regression
-    regardless of precision — DFlash drafters' hidden-state fusion
-    misfires on expert-routing churn (accept_len floors at ~1.5).
-    Re-enabling this combination would ship the regression to users."""
+    """A MoE alias MAY pair ``is_moe=True`` with ``supports_dflash=True``
+    **only** as a curated bf16 pair (non-4-bit + declared drafter) —
+    e.g. LFM2.5-8B-A1B bf16 + its bundled DSpark, probe-verified
+    lossless at 1.38×. Every other MoE shape (un-curated, 4-bit) remains
+    banned: PoC on Qwen3.6-35B-A3B measured 0.76-0.82× regression
+    regardless of precision, because DFlash drafters' hidden-state
+    fusion misfires on expert-routing churn (accept_len floors at ~1.5)."""
+    from vllm_mlx.spec_decode.capability import looks_like_4bit
+
     profile = list_profiles()[alias]
-    if profile.is_moe:
-        assert not profile.supports_dflash, (
-            f"{alias}: is_moe=True but supports_dflash=True — DFlash "
-            f"acceptance collapses on MoE due to expert-routing churn. "
-            f"Confirmed regression on Qwen3.6-35B-A3B; do not enable on "
-            f"MoE aliases."
+    if profile.is_moe and profile.supports_dflash:
+        hf = profile.hf_path
+        assert not looks_like_4bit(hf), (
+            f"{alias}: is_moe=True, supports_dflash=True but hf_path={hf!r} "
+            f"looks 4-bit — DFlash acceptance collapses on 4-bit MoE due to "
+            f"expert-routing churn. Confirmed regression on Qwen3.6-35B-A3B; "
+            f"only curated bf16 MoE pairs may enable DFlash."
+        )
+        assert profile.dflash_draft_model, (
+            f"{alias}: is_moe=True with supports_dflash=True must declare "
+            f"a curated dflash_draft_model (non-4-bit reference pair)."
         )
 
 
@@ -528,20 +537,21 @@ def test_dflash_excludes_4bit_precision(alias: str) -> None:
     )
 
 
-def test_dflash_eligible_aliases_have_qwen35_36_drafter() -> None:
+def test_dflash_eligible_aliases_have_known_drafter() -> None:
     """DFlash drafters today are published by ``z-lab/`` for Qwen3,
-    Qwen3.5, Qwen3.6, Gemma-4 and LLaMA-3.1 families. Any eligible
-    alias must point at one of these prefixes and bear the ``DFlash``
-    marker (the ``-b16`` / ``-UltraChat`` / etc. suffix is permitted —
-    z-lab uses it for training-data and precision tags). Catches an
-    accidental copy-paste that swaps the drafter to an incompatible
-    model."""
+    Qwen3.5, Qwen3.6, Gemma-4 and LLaMA-3.1 families, and by ``LiquidAI/``
+    (``-DSpark``) for LFM2.5. Any eligible alias must point at one of
+    these prefixes and bear the ``DFlash`` or ``DSpark`` marker (the
+    ``-b16`` / ``-UltraChat`` / etc. suffix is permitted — z-lab uses it
+    for training-data and precision tags). Catches an accidental
+    copy-paste that swaps the drafter to an incompatible model."""
     valid_drafter_prefixes = (
         "z-lab/Qwen3-",
         "z-lab/Qwen3.5-",
         "z-lab/Qwen3.6-",
         "z-lab/gemma-4-",
         "z-lab/LLaMA3.1-",
+        "LiquidAI/LFM2.5-",
     )
     for alias, profile in list_profiles().items():
         if not profile.supports_dflash:
@@ -552,32 +562,37 @@ def test_dflash_eligible_aliases_have_qwen35_36_drafter() -> None:
         # suffix (``-b16``, ``-UltraChat``, etc.). Anchored on ``-`` /
         # end-of-string so we don't accept ``-notDFlash-utils`` or
         # other strings where ``DFlash`` is just a substring of an
-        # unrelated word.
-        has_marker = bool(re.search(r"(?:^|-)DFlash(?:$|-)", d))
+        # unrelated word. LFM2.5 DSpark drafters use the ``-DSpark``
+        # suffix instead.
+        has_marker = bool(
+            re.search(r"(?:^|-)DSpark(?:$|-)", d)
+            or re.search(r"(?:^|-)DFlash(?:$|-)", d)
+        )
         assert has_marker and ok, (
             f"{alias}: dflash_draft_model={d!r} doesn't match the "
             f"expected ``z-lab/{{Qwen3,Qwen3.5,Qwen3.6,gemma-4,LLaMA3.1}}-*"
-            f"DFlash*`` shape. If you've validated a new drafter family, "
-            f"update this allow-list."
+            f"DFlash*`` or ``LiquidAI/LFM2.5-*-DSpark`` shape. If you've "
+            f"validated a new drafter family, update this allow-list."
         )
 
 
-def test_negative_control_dflash_on_moe_is_caught() -> None:
-    """A future PR adding ``is_moe=true`` + ``supports_dflash=true`` must
-    be rejected by the eligibility gate. Exercises the actual gate path
-    (not just the data structure) so a regression that quietly removes
-    the MoE check in ``eligibility.check`` fails this test."""
+def test_negative_control_dflash_on_4bit_moe_is_caught() -> None:
+    """A *4-bit* MoE alias paired with supports_dflash=true must still be
+    rejected by the eligibility gate (only curated bf16 MoE pairs are
+    licensed). Exercises the actual gate path (not just the data
+    structure) so a regression that quietly removes the MoE check in
+    ``eligibility.check`` fails this test."""
     from vllm_mlx.model_aliases import AliasProfile
     from vllm_mlx.speculative.dflash import DFlashUnavailable, check
 
     bad = AliasProfile(
-        hf_path="fake/MoE-Model",
+        hf_path="mlx-community/LFM2.5-8B-A1B-MLX-4bit",
         is_moe=True,
         supports_dflash=True,
-        dflash_draft_model="z-lab/Qwen3.6-35B-A3B-DFlash",
+        dflash_draft_model="LiquidAI/LFM2.5-8B-A1B-DSpark",
     )
     with pytest.raises(DFlashUnavailable, match="MoE"):
-        check(bad, alias="fake-moe-alias")
+        check(bad, alias="lfm2.5-8b-a1b-4bit-neg")
 
 
 def test_negative_control_dflash_missing_drafter_is_caught() -> None:

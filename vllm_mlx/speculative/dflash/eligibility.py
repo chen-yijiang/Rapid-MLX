@@ -8,7 +8,11 @@ messages at server-start, never as silent regressions at request time.
 
 Gates derived from PoC bench data (see issue #264):
   - Alias must declare ``supports_dflash=True`` (explicit opt-in)
-  - Alias must NOT be ``is_moe=True`` (MoE acceptance floors at ~1.5)
+  - ``is_moe=True`` is rejected UNLESS the alias is a curated bf16 pair —
+    ``supports_dflash=True`` plus a declared, non-4-bit drafter (e.g.
+    LFM2.5-8B-A1B bf16 + its bundled DSpark; probe-verified lossless at
+    1.38×). Other MoE shapes (un-curated, 4-bit, drafter-mismatched) keep
+    the ~1.5-tokens/round acceptance floor and stay rejected.
   - Main model must be 8-bit or higher; detected from the HF path
     naming convention (``-4bit``/``mxfp4``/``nvfp4`` suffixes used by
     mlx-community). A custom-named 4-bit repo would slip through this
@@ -75,13 +79,26 @@ def report(
             "alias is not DFlash-enabled (set supports_dflash=true in "
             "aliases.json after benching to validate ≥1.3× speedup)"
         )
-    if profile.is_moe:
+    is_4bit = _looks_like_4bit(profile.hf_path)
+    # MoE is licensed for DFlash only on *curated* bf16 reference pairs:
+    # a lib-published bf16 checkpoint (supports_dflash=true, non-4-bit)
+    # paired with its bundled DSpark drafter, where DSpark is probe-verified
+    # lossless (e.g. LFM2.5-8B-A1B bf16, 1.38×, zero drift). The ~1.5
+    # tokens/round acceptance floor that historically rejected all MoE
+    # (measured on Qwen3.6-35B-A3B) still applies to every other MoE shape —
+    # un-curated, 4-bit, or drafter-mismatched — so those stay rejected.
+    curated_moe = (
+        profile.is_moe
+        and profile.supports_dflash
+        and bool(profile.dflash_draft_model)
+        and not is_4bit
+    )
+    if profile.is_moe and not curated_moe:
         reasons.append(
             "alias is MoE (is_moe=true) — DFlash acceptance floors at "
             "~1.5 tokens/round on expert-routing churn; regression "
             "measured on Qwen3.6-35B-A3B"
         )
-    is_4bit = _looks_like_4bit(profile.hf_path)
     if is_4bit:
         warnings.append(
             f"main model hf_path={profile.hf_path!r} is 4-bit quantized; "
@@ -117,7 +134,7 @@ def report(
         has_drafter=has_drafter,
         recommendation=(
             "incompatible"
-            if profile.is_moe
+            if (profile.is_moe and not curated_moe)
             else ("verified" if curated_pair else "experimental")
         ),
         warnings=tuple(warnings),

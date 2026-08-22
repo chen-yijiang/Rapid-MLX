@@ -82,18 +82,47 @@ def test_check_rejects_alias_without_supports_dflash() -> None:
         check(p, alias="qwen3.5-27b-not-validated")
 
 
-def test_check_rejects_moe_alias() -> None:
-    """MoE → reject even if supports_dflash=True (contradiction caught
-    here as a defense-in-depth; alias-contract test rejects this at
-    schema-load time too)."""
+def test_check_accepts_curated_bf16_moe_alias() -> None:
+    """A *curated* bf16 MoE pair (supports_dflash=True + declared
+    non-4-bit drafter) is licensed for DFlash — e.g. LFM2.5-8B-A1B bf16
+    + its bundled DSpark, probe-verified lossless at 1.38×."""
+    p = AliasProfile(
+        hf_path="LiquidAI/LFM2.5-8B-A1B",
+        is_moe=True,
+        supports_dflash=True,
+        dflash_draft_model="LiquidAI/LFM2.5-8B-A1B-DSpark",
+    )
+    check(p, alias="lfm2.5-8b-a1b")
+    r = report(p, alias="lfm2.5-8b-a1b")
+    assert r.reasons == ()
+    assert r.recommendation == "verified"
+
+
+def test_check_rejects_moe_alias_without_drafter() -> None:
+    """MoE without a curated drafter (supports_dflash=True but no
+    dflash_draft_model) → reject. Not a real alias; schema-level
+    contract rejects drafter-less support too."""
     p = AliasProfile(
         hf_path="mlx-community/Qwen3.6-35B-A3B-8bit",
         is_moe=True,
         supports_dflash=True,
-        dflash_draft_model="z-lab/Qwen3.6-35B-A3B-DFlash",
     )
     with pytest.raises(DFlashUnavailable, match="MoE"):
         check(p, alias="qwen3.6-35b-8bit")
+
+
+def test_check_rejects_4bit_moe_alias() -> None:
+    """A 4-bit MoE pair is NOT curated-eligible → reject regardless of
+    drafter presence. This preserves default-off for e.g. the
+    LFM2.5-8B-A1B 4-bit alias."""
+    p = AliasProfile(
+        hf_path="mlx-community/LFM2.5-8B-A1B-MLX-4bit",
+        is_moe=True,
+        supports_dflash=True,
+        dflash_draft_model="LiquidAI/LFM2.5-8B-A1B-DSpark",
+    )
+    with pytest.raises(DFlashUnavailable, match="MoE"):
+        check(p, alias="lfm2.5-8b-a1b-4bit")
 
 
 def test_explicit_4bit_main_model_is_experimental() -> None:

@@ -19,8 +19,9 @@ The ground truth is the checkpoint's own ``config.json``:
   layers. It is the 0.4B speculative drafter, not a copy of the target.
 
 ``is_moe`` is not cosmetic: :mod:`vllm_mlx.speculative.dflash.eligibility`
-rejects MoE aliases outright (drafter hidden-state fusion misfires on
-expert-routing churn) and :mod:`vllm_mlx._mxfp4_moe_guardrail` keys off it,
+rejects MoE aliases unless they are a curated bf16 pair (drafter
+hidden-state fusion misfires on expert-routing churn) and
+:mod:`vllm_mlx._mxfp4_moe_guardrail` keys off it,
 so a dense-tagged MoE alias can pass a gate that exists to stop it. Today
 the 4-bit entries are also blocked by the ``precision >= 8-bit`` criterion,
 which is exactly why the mis-tag survived review — the wrong answer was

@@ -1974,6 +1974,26 @@
     "is_hybrid": false,
     "supports_spec_decode": false
   },
+  "lfm2.5-2.6b": {
+    "hf_path": "LiquidAI/LFM2.5-2.6B",
+    "tool_call_parser": "lfm",
+    "reasoning_parser": "qwen3",
+    "is_hybrid": true,
+    "supports_spec_decode": false,
+    "is_moe": false,
+    "supports_dflash": true,
+    "dflash_draft_model": "LiquidAI/LFM2.5-2.6B-DSpark"
+  },
+  "lfm2.5-8b-a1b": {
+    "hf_path": "LiquidAI/LFM2.5-8B-A1B",
+    "tool_call_parser": "lfm",
+    "reasoning_parser": "qwen3",
+    "is_hybrid": false,
+    "supports_spec_decode": false,
+    "is_moe": true,
+    "supports_dflash": true,
+    "dflash_draft_model": "LiquidAI/LFM2.5-8B-A1B-DSpark"
+  },
   "minicpm5-1b-4bit": {
     "hf_path": "openbmb/MiniCPM5-1B-MLX",
     "tool_call_parser": "minicpm",
