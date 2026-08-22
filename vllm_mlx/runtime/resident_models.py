@@ -572,18 +572,26 @@ class ResidentModelManager:
                 # Once the loader returns, this manager owns the engine.  A
                 # later admission/replacement failure must not leave a model
                 # resident even though the control-plane request was rejected.
-                if record.model_id in self._records:
-                    await self._evict_locked(
-                        record, reason="load_rollback", count=False
+                try:
+                    if record.model_id in self._records:
+                        await self._evict_locked(
+                            record, reason="load_rollback", count=False
+                        )
+                    else:
+                        stop = getattr(record.entry.engine, "stop", None)
+                        if callable(stop):
+                            result = stop()
+                            if asyncio.iscoroutine(result):
+                                await result
+                        _release_allocator_cache()
+                except BaseException:  # cleanup must not strand old engines
+                    self._retired_engines.append(record.entry.engine)
+                    logger.exception(
+                        "Failed to stop a rejected replacement model; "
+                        "old-engine admission will still be resumed"
                     )
-                else:
-                    stop = getattr(record.entry.engine, "stop", None)
-                    if callable(stop):
-                        result = stop()
-                        if asyncio.iscoroutine(result):
-                            await result
-                    _release_allocator_cache()
-                await self._resume_engines(paused_engines)
+                finally:
+                    await self._resume_engines(paused_engines)
                 raise
             return record
 
@@ -717,9 +725,11 @@ class ResidentModelManager:
         paused_engines: list[object] = []
         try:
             for record in candidates:
-                if record.active_requests:
-                    raise ResidentModelBusyError("model is serving an active request")
                 pause = getattr(record.entry.engine, "pause_generation", None)
+                if record.active_requests and (
+                    replace_mode == "reject" or not callable(pause)
+                ):
+                    raise ResidentModelBusyError("model is serving an active request")
                 if callable(pause):
                     paused_engines.append(record.entry.engine)
                     try:
@@ -742,7 +752,12 @@ class ResidentModelManager:
         for engine in reversed(engines):
             resume = getattr(engine, "resume_generation", None)
             if callable(resume):
-                await resume()
+                try:
+                    await resume()
+                except BaseException:
+                    logger.exception(
+                        "Failed to resume one model engine after replacement rollback"
+                    )
 
     async def _commit_group_replacement_locked(
         self,

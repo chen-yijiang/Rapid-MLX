@@ -92,6 +92,11 @@ class FailingStopLifecycleEngine(FakeLifecycleEngine):
         raise RuntimeError("stop failed")
 
 
+class FailingResumeLifecycleEngine(FakeLifecycleEngine):
+    async def resume_generation(self):
+        raise RuntimeError("resume failed")
+
+
 class Clock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -530,6 +535,77 @@ async def test_replacement_keeps_new_primary_when_retired_engine_stop_fails(
     assert "chat-secondary" not in registry
     assert "chat-new" in registry
     assert manager.snapshot()["retired_cleanup_pending"] == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_mode_does_not_reject_legacy_active_counter_before_engine_drain():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+
+    async def loader(name: str, path: str | None, performance=None):
+        return entry(name)
+
+    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
+    old_record = manager.register_primary(primary, estimated_bytes=4 * GIB)
+    old_record.active_requests = 1
+
+    await manager.load("chat-new", replace_group="assistant", replace_mode="wait")
+
+    assert old_engine.pauses == [("wait", None)]
+    assert registry.default_name == "chat-new"
+
+
+@pytest.mark.asyncio
+async def test_rollback_stop_failure_still_resumes_old_engine(monkeypatch):
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    old_engine.running = 1
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+
+    async def loader(name: str, path: str | None, performance=None):
+        return entry(name, FailingStopLifecycleEngine())
+
+    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+    calls = 0
+    original = manager._evict_for_locked  # noqa: SLF001
+
+    async def fail_after_load(incoming_bytes, exclude):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("post-load failure")
+        return await original(incoming_bytes, exclude)
+
+    monkeypatch.setattr(manager, "_evict_for_locked", fail_after_load)
+
+    with pytest.raises(RuntimeError, match="post-load failure"):
+        await manager.load("chat-new", replace_group="assistant", replace_mode="wait")
+
+    assert old_engine.paused is False
+    assert old_engine.stopped is False
+    assert registry.default_name == "chat-old"
+    assert manager.snapshot()["retired_cleanup_pending"] == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_attempts_every_engine_after_one_resume_fails():
+    manager, _, _, _ = manager_fixture()
+    engines = [
+        FakeLifecycleEngine(),
+        FailingResumeLifecycleEngine(),
+        FakeLifecycleEngine(),
+    ]
+    for engine in engines:
+        engine.paused = True
+
+    await manager._resume_engines(engines)  # noqa: SLF001
+
+    assert engines[0].paused is False
+    assert engines[2].paused is False
 
 
 @pytest.mark.asyncio
