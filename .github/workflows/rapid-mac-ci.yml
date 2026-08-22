@@ -556,7 +556,15 @@ jobs:
           SCRATCH: ${{ runner.temp }}/os-baselines
         run: |
           set -uo pipefail
-          if ! find "$GOLDEN_ROOT" -name '*.observed.txt' -print -quit | grep -q .; then
+          structural_failure=0
+          for result in "$GOLDEN_ROOT"/*/result.json; do
+            if jq -e '.status != "pass"' "$result" >/dev/null \
+              && find "$(dirname "$result")" -name '*.observed.txt' -print -quit | grep -q .; then
+              structural_failure=1
+              break
+            fi
+          done
+          if [[ "$structural_failure" != 1 ]]; then
             echo "No structural baseline mismatch; skipping baseline regeneration."
             exit 0
           fi

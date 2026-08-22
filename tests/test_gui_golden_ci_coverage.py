@@ -80,7 +80,8 @@ def test_failure_diagnostic_skips_regeneration_for_semantic_failures():
         if step.get("name") == "Regenerate baselines on this runner (diagnostic)"
     ]
     run = str(diagnostic.get("run", ""))
-    assert "find \"$GOLDEN_ROOT\" -name '*.observed.txt'" in run
+    assert 'for result in "$GOLDEN_ROOT"/*/result.json' in run
+    assert 'find "$(dirname "$result")" -name \'*.observed.txt\'' in run
     assert "No structural baseline mismatch" in run
 
 

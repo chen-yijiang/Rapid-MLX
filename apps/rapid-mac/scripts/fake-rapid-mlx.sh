@@ -1058,7 +1058,11 @@ def _emit_catalog(subcommand, alias):
         print("---------------------  ---------------------  ------")
         if _setting("FAKE_SETTINGS_MTP") != "1":
             if _setting("FAKE_VISION_CHAT") == "1":
-                print(f"{FAKE_VISION_ALIAS}      {FAKE_VISION_REPO}  1.8 GB")
+                # This is a behavioural fixture, not a real checkpoint.  Keep
+                # its footprint below the hosted runner's live-memory warning
+                # threshold so an unrelated confirmation sheet cannot turn an
+                # attachment journey into a memory-admission test.
+                print(f"{FAKE_VISION_ALIAS}      {FAKE_VISION_REPO}  256 MB")
             else:
                 print(f"fake-alias             {FAKE_REPO}        1.2 GB")
             print("(external)             fake-external-alias     2.4 GB")
