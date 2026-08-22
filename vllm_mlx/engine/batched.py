@@ -1045,10 +1045,17 @@ class BatchedEngine(BaseEngine):
         with self._admission_lock:
             self._generation_paused = True
             self._generation_pause_mode = mode
+            admitted_at_pause = self._admission_reservations
         scheduler = self._lifecycle_scheduler()
         set_paused = getattr(scheduler, "set_generation_paused", None)
         if callable(set_paused):
-            set_paused(True)
+            scheduler_owned = len(self._lifecycle_request_ids())
+            set_paused(
+                True,
+                add_allowance=(
+                    max(0, admitted_at_pause - scheduler_owned) if mode == "wait" else 0
+                ),
+            )
 
         async def _drain() -> dict[str, object]:
             while True:

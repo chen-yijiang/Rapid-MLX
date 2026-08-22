@@ -403,6 +403,45 @@ async def test_replacement_does_not_publish_target_until_old_engine_drains():
 
 
 @pytest.mark.asyncio
+async def test_cancelled_replacement_resumes_old_engine_and_discards_target():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    old_engine.running = 1
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    draining = asyncio.Event()
+
+    async def pause_generation(mode="wait", *, timeout=None):
+        old_engine.paused = True
+        draining.set()
+        await asyncio.Event().wait()
+
+    old_engine.pause_generation = pause_generation
+    loaded = None
+
+    async def loader(name: str, path: str | None, performance=None):
+        nonlocal loaded
+        loaded = entry(name)
+        return loaded
+
+    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    replacement = asyncio.create_task(
+        manager.load("chat-new", replace_group="assistant", replace_mode="wait")
+    )
+    await draining.wait()
+    replacement.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await replacement
+
+    assert old_engine.paused is False
+    assert old_engine.stopped is False
+    assert "chat-new" not in registry
+    assert loaded is not None and loaded.engine.stopped is True
+
+
+@pytest.mark.asyncio
 async def test_rejected_busy_replacement_reopens_engine_admission():
     registry = ModelRegistry()
     old_engine = FakeLifecycleEngine()

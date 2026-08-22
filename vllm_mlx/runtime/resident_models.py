@@ -707,19 +707,16 @@ class ResidentModelManager:
                     raise ResidentModelBusyError("model is serving an active request")
                 pause = getattr(record.entry.engine, "pause_generation", None)
                 if callable(pause):
+                    paused_engines.append(record.entry.engine)
                     try:
                         await pause(
                             "wait" if replace_mode == "reject" else replace_mode,
                             timeout=0 if replace_mode == "reject" else None,
                         )
                     except TimeoutError as exc:
-                        resume = getattr(record.entry.engine, "resume_generation", None)
-                        if callable(resume):
-                            await resume()
                         raise ResidentModelBusyError(
                             "model is serving an active request"
                         ) from exc
-                    paused_engines.append(record.entry.engine)
                 elif not _engine_is_idle(record.entry.engine):
                     raise ResidentModelBusyError("model is serving an active request")
         except BaseException:

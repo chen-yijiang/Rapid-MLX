@@ -25,6 +25,12 @@ def _engine(*, reservations: int = 0, running: dict | None = None):
         waiting=[],
         config=SimpleNamespace(max_concurrent_requests=8),
     )
+
+    def set_generation_paused(paused, *, add_allowance=0):
+        scheduler.generation_paused = paused
+        scheduler.add_allowance = add_allowance if paused else 0
+
+    scheduler.set_generation_paused = set_generation_paused
     engine._engine = SimpleNamespace(engine=SimpleNamespace(scheduler=scheduler))
     engine.get_stats = lambda: {
         "num_running": len(scheduler.running),
@@ -80,6 +86,30 @@ async def test_abort_pause_rechecks_requests_that_arrive_after_pause_edge():
     assert aborted == ["late"]
     assert status["running_requests"] == 0
     assert status["active_requests"] == 0
+
+
+@pytest.mark.asyncio
+async def test_wait_pause_allows_request_reserved_before_pause_to_enter_scheduler():
+    engine, scheduler = _engine(reservations=1)
+
+    pause = asyncio.create_task(engine.pause_generation("wait"))
+    await asyncio.sleep(0)
+
+    assert scheduler.generation_paused is True
+    assert scheduler.add_allowance == 1
+
+    # This request owns the one reservation captured at the pause edge.
+    scheduler.add_allowance -= 1
+    request = SimpleNamespace(request_id="reserved-before-pause")
+    scheduler.requests[request.request_id] = request
+    scheduler.running[request.request_id] = request
+    await asyncio.sleep(0)
+    assert not pause.done()
+
+    scheduler.requests.clear()
+    scheduler.running.clear()
+    engine.release_admission_reservation()
+    await asyncio.wait_for(pause, timeout=1)
 
 
 @pytest.mark.asyncio
