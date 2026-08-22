@@ -378,6 +378,13 @@ async def _deferred_load_prefix_cache() -> None:
     during-load regression fires. Failures are non-fatal — a cold cache only
     costs a few early prefix recomputes, never a wedged server.
     """
+    raw_autoload = os.environ.get("RAPID_MLX_PREFIX_CACHE_AUTOLOAD", "1")
+    if raw_autoload.strip().lower() in ("0", "false", "no", "off"):
+        logger.info(
+            "[lifespan] Prefix-cache auto-load disabled by "
+            "RAPID_MLX_PREFIX_CACHE_AUTOLOAD"
+        )
+        return
     if _engine is None or not hasattr(_engine, "load_cache_from_disk"):
         return
     try:
