@@ -552,9 +552,14 @@ jobs:
       - name: Regenerate baselines on this runner (diagnostic)
         if: failure()
         env:
+          GOLDEN_ROOT: ${{ runner.temp }}/golden
           SCRATCH: ${{ runner.temp }}/os-baselines
         run: |
           set -uo pipefail
+          if ! find "$GOLDEN_ROOT" -name '*.observed.txt' -print -quit | grep -q .; then
+            echo "No structural baseline mismatch; skipping baseline regeneration."
+            exit 0
+          fi
           mkdir -p "$SCRATCH/snapshots"
           cp Tests/GUIGoldenFlows/__Snapshots__/*.txt "$SCRATCH/snapshots/"
           for flow in fresh-install settings-persistence settings-mtp chat-restore slow-stream-stop model-crash-recovery update-state update-busy campaign-banner image-generation audio-readiness launch-integrations; do

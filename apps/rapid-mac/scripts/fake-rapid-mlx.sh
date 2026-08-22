@@ -943,6 +943,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 FAKE_REPO = "fake-org/fake-repo"
+FAKE_VISION_ALIAS = "qwen3-vl-2b-4bit"
+FAKE_VISION_REPO = "mlx-community/Qwen3-VL-2B-Instruct-4bit"
 
 
 def _emit_catalog(subcommand, alias):
@@ -968,7 +970,7 @@ def _emit_catalog(subcommand, alias):
                 aliases.append("qwen3.5-4b-4bit")
             if _setting("FAKE_CACHED_VARIANTS") == "1":
                 aliases.extend(["qwen3-0.6b-8bit", "qwen3-0.6b-4bit", "qwen3-4b-4bit"])
-            aliases.append("qwen3-vl-2b-4bit" if _setting("FAKE_VISION_CHAT") == "1" else "fake-alias")
+            aliases.append(FAKE_VISION_ALIAS if _setting("FAKE_VISION_CHAT") == "1" else "fake-alias")
             aliases.append("fake-external-alias")
             if _setting("FAKE_SETTINGS_MTP") == "1":
                 aliases.append("qwen3.8-27b-4bit")
@@ -977,7 +979,9 @@ def _emit_catalog(subcommand, alias):
                 is_builtin = item != "fake-external-alias"
                 text.append({
                     "alias": item,
-                    "hf_path": FAKE_REPO,
+                    "hf_path": (
+                        FAKE_VISION_REPO if item == FAKE_VISION_ALIAS else FAKE_REPO
+                    ),
                     "supports_spec_decode": False,
                     "mtp_draft_model": (
                         "rapid-mlx/Qwen3.8-27B-4bit-MTP-MLX"
@@ -1054,7 +1058,7 @@ def _emit_catalog(subcommand, alias):
         print("---------------------  ---------------------  ------")
         if _setting("FAKE_SETTINGS_MTP") != "1":
             if _setting("FAKE_VISION_CHAT") == "1":
-                print("qwen3-vl-2b-4bit      mlx-community/Qwen3-VL-2B-Instruct-4bit  1.8 GB")
+                print(f"{FAKE_VISION_ALIAS}      {FAKE_VISION_REPO}  1.8 GB")
             else:
                 print(f"fake-alias             {FAKE_REPO}        1.2 GB")
             print("(external)             fake-external-alias     2.4 GB")
@@ -1097,6 +1101,7 @@ def _emit_catalog(subcommand, alias):
             "fake-qwen3-tts": "fake/qwen3-tts",
             "fake-whisper-small": "fake/whisper-small",
             "qwen3.8-27b-4bit": "rapid-mlx/Qwen3.8-27B-4bit-MTP-MLX",
+            FAKE_VISION_ALIAS: FAKE_VISION_REPO,
         }.get(alias, FAKE_REPO)
         print(f"Alias: {alias} -> {repo}")
         return True
