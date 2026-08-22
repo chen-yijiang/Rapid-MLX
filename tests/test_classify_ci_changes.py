@@ -1,3 +1,5 @@
+import pytest
+
 from scripts.classify_ci_changes import Lanes, classify
 
 
@@ -19,10 +21,24 @@ def test_engine_only_does_not_select_desktop():
     )
 
 
-def test_desktop_support_test_stays_in_desktop_lane():
-    assert classify(
-        ["tests/test_gui_preflight_contract.py", "tests/fixtures/ax_baseline/macos.txt"]
-    ) == Lanes(engine=False, desktop=True, docs_only=False)
+@pytest.mark.parametrize(
+    "path",
+    [
+        "scripts/check_rapid_mac_ax_identifiers.py",
+        "tests/test_rapid_mac_ax_identifiers.py",
+        "tests/test_rapid_mac_xcui_target.py",
+        "tests/test_ax_baseline.py",
+        "tests/test_ax_baseline_os_variance.py",
+        "tests/test_gui_control_behavior_contract.py",
+        "tests/test_gui_preflight_contract.py",
+        "tests/test_gui_golden_ci_coverage.py",
+        "tests/test_gui_walk_completeness.py",
+        "tests/test_fake_sidecar_image_catalog.py",
+        "tests/fixtures/ax_baseline/macos.txt",
+    ],
+)
+def test_desktop_support_path_stays_in_desktop_lane(path):
+    assert classify([path]) == Lanes(engine=False, desktop=True, docs_only=False)
 
 
 def test_cross_cutting_change_selects_both_lanes():

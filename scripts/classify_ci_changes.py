@@ -48,9 +48,13 @@ _DESKTOP_SUPPORT_PREFIXES = ("tests/fixtures/ax_baseline/",)
 _DESKTOP_SUPPORT = {
     "scripts/check_rapid_mac_ax_identifiers.py",
     "tests/test_rapid_mac_ax_identifiers.py",
+    "tests/test_rapid_mac_xcui_target.py",
+    "tests/test_ax_baseline.py",
     "tests/test_ax_baseline_os_variance.py",
+    "tests/test_gui_control_behavior_contract.py",
     "tests/test_gui_preflight_contract.py",
     "tests/test_gui_golden_ci_coverage.py",
+    "tests/test_gui_walk_completeness.py",
     "tests/test_fake_sidecar_image_catalog.py",
 }
 _DOC_ROOTS = {"docs"}

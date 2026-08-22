@@ -190,6 +190,15 @@ jobs:
       - name: Fake sidecar catalog contract
         run: pytest tests/test_fake_sidecar_image_catalog.py -q
 
+      - name: GUI and XCUITest workflow contracts
+        run: |
+          pytest \
+            tests/test_ax_baseline.py \
+            tests/test_gui_control_behavior_contract.py \
+            tests/test_gui_walk_completeness.py \
+            tests/test_rapid_mac_xcui_target.py \
+            -q
+
   build:
     needs: changes
     if: needs.changes.outputs.desktop == 'true'
