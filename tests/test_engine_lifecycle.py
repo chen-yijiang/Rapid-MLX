@@ -146,3 +146,26 @@ def test_paused_engine_rejects_even_when_concurrency_cap_is_unlimited():
 
     with pytest.raises(BackpressureError, match="paused"):
         engine.check_admission()
+
+
+@pytest.mark.parametrize("scheduler_type", [Scheduler, MLLMScheduler])
+def test_request_id_snapshot_is_safe_during_concurrent_mutation(scheduler_type):
+    scheduler = scheduler_type.__new__(scheduler_type)
+    scheduler._cancel_counter_lock = threading.Lock()
+    scheduler.requests = {}
+    start = threading.Event()
+
+    def mutate():
+        start.wait()
+        for index in range(2_000):
+            with scheduler._cancel_counter_lock:
+                scheduler.requests[str(index)] = index
+                if index:
+                    scheduler.requests.pop(str(index - 1), None)
+
+    writer = threading.Thread(target=mutate)
+    writer.start()
+    start.set()
+    for _ in range(2_000):
+        assert isinstance(scheduler.request_ids_snapshot(), tuple)
+    writer.join()

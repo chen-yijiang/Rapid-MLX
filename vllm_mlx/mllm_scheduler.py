@@ -628,6 +628,12 @@ class MLLMScheduler:
         self._generation_paused = bool(paused)
         self._paused_add_allowance = max(0, int(add_allowance)) if paused else 0
 
+    def request_ids_snapshot(self) -> tuple[str, ...]:
+        """Return an atomic snapshot of all queued/running request ids."""
+
+        with self._cancel_counter_lock:
+            return tuple(self.requests)
+
     def abort_request(self, request_id: str) -> bool:
         """
         Queue request for abort.  Thread-safe (called from event loop).
@@ -1156,7 +1162,8 @@ class MLLMScheduler:
 
             # Track as finished
             self.finished_req_ids.add(request_id)
-            self.requests.pop(request_id, None)
+            with self._cancel_counter_lock:
+                self.requests.pop(request_id, None)
 
     def _step_no_queue(self) -> MLLMSchedulerOutput:
         """Execute one scheduling step WITHOUT queue distribution.
@@ -1370,7 +1377,8 @@ class MLLMScheduler:
             self.batch_generator = None
         self.waiting.clear()
         self.running.clear()
-        self.requests.clear()
+        with self._cancel_counter_lock:
+            self.requests.clear()
         self.request_id_to_uid.clear()
         self.uid_to_request_id.clear()
         self._detokenizer_pool.clear()
@@ -1402,7 +1410,8 @@ class MLLMScheduler:
 
     def remove_finished_request(self, request_id: str) -> MLLMRequest | None:
         """Remove a finished request from tracking."""
-        return self.requests.pop(request_id, None)
+        with self._cancel_counter_lock:
+            return self.requests.pop(request_id, None)
 
     # ========== Async API (for streaming) ==========
 
@@ -1923,8 +1932,8 @@ class MLLMScheduler:
             )
 
         # Cleanup
-        if request_id in self.requests:
-            del self.requests[request_id]
+        with self._cancel_counter_lock:
+            self.requests.pop(request_id, None)
 
         return final_output
 
@@ -1979,7 +1988,8 @@ class MLLMScheduler:
 
         self.waiting.clear()
         self.running.clear()
-        self.requests.clear()
+        with self._cancel_counter_lock:
+            self.requests.clear()
         self.finished_req_ids.clear()
         self.request_id_to_uid.clear()
         self.uid_to_request_id.clear()

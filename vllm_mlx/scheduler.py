@@ -6095,6 +6095,12 @@ class Scheduler:
         self._generation_paused = bool(paused)
         self._paused_add_allowance = max(0, int(add_allowance)) if paused else 0
 
+    def request_ids_snapshot(self) -> tuple[str, ...]:
+        """Return an atomic snapshot of all queued/running request ids."""
+
+        with self._cancel_counter_lock:
+            return tuple(self.requests)
+
     def abort_request(self, request_id: str) -> bool:
         """
         Queue request for abort. Thread-safe, called from any thread.
@@ -8346,7 +8352,8 @@ class Scheduler:
 
         self.waiting.clear()
         self.running.clear()
-        self.requests.clear()
+        with self._cancel_counter_lock:
+            self.requests.clear()
         self.finished_req_ids.clear()
         self.request_id_to_uid.clear()
         self.uid_to_request_id.clear()

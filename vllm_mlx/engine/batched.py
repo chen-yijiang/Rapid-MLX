@@ -1013,14 +1013,12 @@ class BatchedEngine(BaseEngine):
         scheduler = self._lifecycle_scheduler()
         if scheduler is None:
             return set()
-        ids = set(getattr(scheduler, "requests", {}) or {})
-        ids.update(getattr(scheduler, "running", {}) or {})
-        ids.update(
-            str(request.request_id)
-            for request in (getattr(scheduler, "waiting", ()) or ())
-            if getattr(request, "request_id", None)
-        )
-        return {str(request_id) for request_id in ids}
+        snapshot = getattr(scheduler, "request_ids_snapshot", None)
+        if callable(snapshot):
+            return {str(request_id) for request_id in snapshot()}
+        # Compatibility path for lightweight test doubles. Production
+        # schedulers always expose the lock-protected snapshot above.
+        return {str(request_id) for request_id in (scheduler.requests or {})}
 
     def _lifecycle_scheduler(self):
         scheduler = self._mllm_scheduler
