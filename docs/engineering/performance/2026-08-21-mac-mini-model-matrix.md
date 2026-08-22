@@ -241,8 +241,11 @@ while the cold run and full cold-cache rerun both passed 6/6.
 
 The toolchain-only Hy3 representative was subsequently staged on a 1.8 TiB
 external SSD and run on the M3 Ultra 256 GB Studio with the same candidate and
-`--disable-prefix-cache`. `hy3-preview-4bit` passed all 6/6 blocking cases;
-swap usage after the run was only 13.69 MB. The captured sweep artifact is
+`--disable-prefix-cache`. The captured run used Rapid-MLX commit `51923343`,
+mlx 0.32.1, released mlx-lm 0.31.3, macOS 26.5.2, and Hy3 snapshot
+`8e4d56f18efd912b8c7581a8ccfa8b2a79ba3469`. `hy3-preview-4bit` passed all
+6/6 blocking cases; swap usage after the run was only 13.69 MB. The captured
+sweep artifact is
 `/Volumes/Extreme SSD/rapid-mlx-validation/hy3-mlx0321-coherence-r1.txt`, with
 SHA-256 `817969d4c78df19594d7c464990fa0b4e16beda3b8346e423161735ab8b9db72`.
 Together with the six ordinary release families, the dependency candidate has
@@ -317,6 +320,9 @@ Raw JSON remains outside Git under `~/mac-model-matrix/results` on the mini and
 | `qwen35-4b-prefill-mlxlm-main-mlx032-r2.json` | `42690fcfd1563aeb90023b395760961164c9a8ef3990f6022935884a5de4b481` |
 | `qwen36-35b-mlxlm0313-mlx032-coherence.json` | `ce47d11810815c0860f8b4db6c40720016a138544daeef7c3043693887ee24ac` |
 | `qwen36-35b-mlxlm-main-mlx032-coherence.json` | `908db76bb97967e2095f0493c2caebe58c23b9db5bdce09fd941cb2b6319f82a` |
+| `qwen36-vlm-mtp-8bit-coherence-r1.txt` | `58aa10fccb3d96de92d5fccb9b9ba084ff4b823211d43e6154977d39d8feaa68` |
+| `qwen36-vlm-mtp-8bit-server-r1.log` | `3d3df9d9dc726e8861f82ba59c65bee3b6655789894233f3d33092870937c801` |
+| `hy3-mlx0321-coherence-r1.txt` | `817969d4c78df19594d7c464990fa0b4e16beda3b8346e423161735ab8b9db72` |
 | `qwen35-4b-prefill-prod-long-r1.json` | `15295614ba2daacbd3f2fba2a748b83deea23489df91e610a6109eab66755321` |
 | `qwen35-4b-prefill-main-long-r1.json` | `0f28ac3d75537ecbd33057288f9eec21760446b7b8aa71cdb527df046ab5eb02` |
 | `qwen35-4b-prefill-main-16k-step2048.json` | `1eaa5ef167eaeabc2f7ea5ca7239c063c7aee3771823831c6304895c51731ff5` |

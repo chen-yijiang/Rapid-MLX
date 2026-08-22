@@ -33,8 +33,14 @@
     shift Qwen3.5/3.6 RMSNorm weights. On Studio with Qwen3.6-35B-A3B-8bit and
     MLX 0.32.1, main was exact on 8/8 64-token prompts versus 0.31.3, with
     300.1 vs 277.4 prompt tok/s and 2.79 vs 7.53 seconds cached load. Upstream
-    VLM-MTP issue #1197 is still open, so its exact checkpoint layout remains a
-    required coherence case.
+    VLM-MTP issue #1197 is still open, so its exact checkpoint layout was a
+    required coherence case for this dependency move.
+  - The exact #1197 layout subsequently passed 6/6 through Rapid's forced text
+    lane on MLX 0.32.1 + mlx-lm 0.31.3: Qwen3.6-35B-A3B-8bit snapshot
+    `e06a74e6236a60c8367e1a3214e83d8b61b637b0` contains a vision config, all
+    333 `vision_tower.*` tensors, `mtp_num_hidden_layers=1`, and
+    `model-mtp.safetensors`. Result SHA-256:
+    `58aa10fccb3d96de92d5fccb9b9ba084ff4b823211d43e6154977d39d8feaa68`.
   - Issue #2165 follow-up on Qwen3.5-4B: mlx-lm main + MLX 0.32.1 improves
     exact-token prefill over production by 21.8% at 8K (388.1 vs 318.6) and
     20.8% at 16K (369.5 vs 306.0), with essentially unchanged peak memory.
@@ -63,9 +69,10 @@
     Gemma4 12B, DeepSeek-R1-Distill 32B, and GPT-OSS 20B. The sweep now forces
     `--disable-prefix-cache`: persisted KV tensors are not keyed by MLX runtime
     and a stale DeepSeek cache initially caused a false failure; both its cold
-    rerun and the complete cold-cache release sweep passed. Hy3 was staged on
-    an external 1.8 TiB SSD and passed 6/6 on the M3 Ultra with only 13.69 MB
-    swap used. Artifact SHA-256:
+    rerun and the complete cold-cache release sweep passed. Hy3 snapshot
+    `8e4d56f18efd912b8c7581a8ccfa8b2a79ba3469` was staged on an external
+    1.8 TiB SSD and passed 6/6 on the M3 Ultra with only 13.69 MB swap used.
+    Artifact SHA-256:
     `817969d4c78df19594d7c464990fa0b4e16beda3b8346e423161735ab8b9db72`.
     The complete seven-family toolchain fleet therefore passed 42/42.
   - Extra M2 Pro spot checks under the PR wheel: Qwen3.5-9B passed 6/6. LFM2.5
