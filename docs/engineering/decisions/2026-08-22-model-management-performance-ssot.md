@@ -46,62 +46,13 @@ profile. The runtime resolver chooses **how that variant runs** for the current
 machine and workload. Explicit user runtime flags take precedence over profile
 recommendations, subject to hard compatibility and safety constraints.
 
-## Target relationship model
+## Living architecture
 
-The Mermaid source below is the durable, GitHub-rendered version of
-`ssot_diagram3`. It is intentionally a relationship view rather than a physical
-database schema.
-
-```mermaid
-flowchart LR
-  subgraph Facts[1. Stable model facts]
-    MF[ModelFamily] --> MR[ModelRelease]
-    MR --> MV[ModelVariant]
-    MV --> AR[Artifact<br/>immutable revision + manifest]
-    AR --> CAP[Capabilities]
-    AR --> COMP[RuntimeCompatibility]
-    AR --> QUAL[VariantQualification]
-  end
-
-  subgraph Evidence[2. Machine, workload, and evidence]
-    MFP[MachineFingerprint<br/>exact observed hardware/state] --> MC[MachineClass<br/>normalized profile target]
-    WP[WorkloadProfile<br/>modality/context/concurrency/objective]
-    SUB[CommunityBenchmarkSubmission] --> RUN[ValidatedBenchmarkRun]
-    RUN --> AGG[BenchmarkAggregate]
-    AGG --> PC[ProfileCandidate]
-    PC -->|review + promotion| PP[PerformanceProfile]
-  end
-
-  subgraph Product[3. Product recommendation]
-    RP[RecommendationPolicy] --> RRS[RankedRecommendationSet]
-    MSO[ModelSelectionOverride] --> SEL[Selection]
-    RRS --> SEL
-    SEL --> SMV[SelectedModelVariant]
-  end
-
-  subgraph Runtime[4. Runtime resolution and consumption]
-    RCO[RuntimeConfigOverride] --> RR[RuntimeResolver]
-    SMV --> RR
-    PP --> RR
-    RR --> ERC[EffectiveRuntimeConfig<br/>value + source + reason + evidence]
-    ERC --> GUI[Rapid Desktop GUI]
-    ERC --> SERVER[Rapid Server / CLI]
-  end
-
-  subgraph Learning[5. Safe learning loop]
-    GUI --> TEL[ActualRuntimeTelemetry]
-    SERVER --> TEL
-    TEL -->|consent + privacy filter| REG[Regression detection]
-    REG --> SUB
-  end
-
-  MC --> RP
-  QUAL --> RP
-  COMP --> SEL
-  MC --> RR
-  WP --> RR
-  COMP --> RR
-```
+The accepted relationships, current implementation status, migration work, and
+GitHub-rendered diagrams live in the
+[model-management architecture workspace](../architecture/model-management/README.md).
+Its YAML manifest is the machine-readable source of truth. This ADR deliberately
+does not duplicate that changing project state.
 
 ## Entity contracts
 
@@ -122,95 +73,12 @@ Physical RAM is used for model-fit classification. Available RAM is a runtime
 safety input and may force a fallback; it must not change the machine's stable
 class.
 
-## Current implementation status
+## Delivery model
 
-Legend:
-
-- ✅ **Implemented:** usable production behavior exists and is covered by tests.
-- 🟡 **Partial:** some semantics exist, but the target entity or provenance is
-  incomplete.
-- ⬜ **Planned:** target architecture only; no production implementation yet.
-
-| Area | Status | Evidence in the repository | Missing before target state |
-| --- | --- | --- | --- |
-| Unified sparse per-model profile | ✅ | `vllm_mlx/model_profile.py`; `vllm_mlx/model_aliases.py`; `vllm_mlx/aliases.json` | Split stable identity, capabilities, qualification, and performance concerns without breaking consumers |
-| Stable alias and HF-path lookup | ✅ | `resolve_profile()` and alias validation tests | Immutable artifact revision/manifest identity and first-class quantization identity |
-| Parser, modality, sampling, optimization and safety metadata | ✅ | `ModelProfile` fields and per-feature tests | Explicit capability versus qualification boundaries |
-| Bench-verified prefill defaults | ✅ | `recommended_prefill_step_size`; `_resolve_prefill_step_size()`; `tests/test_recurrent_prefill_auto_default.py` | Key recommendations by machine class, workload, runtime range, and evidence ID |
-| User prefill override precedence | ✅ | `_resolve_prefill_step_size(... user_set_explicit=True)` tests | Generalize precedence to a typed runtime override layer |
-| Separate language prefill and vision admission budgets | ✅ | `_resolve_vision_prefill_token_budget()` and MLLM regression tests | Represent both in one effective-config/provenance response |
-| Desktop receives no-flag profile performance gains | 🟡 | Desktop launches the CLI/server without a default prefill override; see linked prefill audit | GUI cannot explain resolved value, source, tradeoff, or evidence |
-| Central runtime resolution | 🟡 | Resolver helpers and `ModelProfile` consumers exist | One resolver API and one immutable `EffectiveRuntimeConfig` for every entry point |
-| Machine fingerprint/class | ⬜ | Benchmark reports record hardware manually | Typed normalization, fit/safety split, schema and tests |
-| Structured workload profile | ⬜ | Performance reports describe workload manually | Stable buckets and applicability matching |
-| Performance candidate/promotion lifecycle | ⬜ | Evidence is reviewed manually before editing aliases | Candidate status, confidence rule, approval, audit, rollback and expiry |
-| Versioned variant quality qualification | ⬜ | Individual safety/feature tiers exist in `ModelProfile` | Artifact/runtime/eval-bound qualification record and expiry |
-| Recommendation policy and ranked set | 🟡 | Shared RAM-tier catalog and profile gates provide pieces | Ordered candidate contract, reason codes, policy version and explicit quality gate |
-| Effective runtime config provenance | ⬜ | Startup logs expose some decisions | Field-level `value/source/source_id/reason_code/overrode`, fallback trace and API |
-| Community benchmark ingestion | ⬜ | Reproducible internal benchmark documents exist | Submission protocol, trust, validation, dedup, aggregation, privacy and promotion |
-| Actual-runtime learning loop | ⬜ | Runtime metrics exist independently | Consent, minimized schema, effective-config linkage and regression pipeline |
-
-The table is normative project status. A component moves to ✅ only when its
-contract, production path, proportional tests, and operational ownership exist.
-Documentation or a schema alone does not count as implementation.
-
-## Incremental delivery plan
-
-### Phase 0 — preserve and document the working baseline (current)
-
-- Keep explicit `ModelProfile` recommendations conservative and evidence-backed.
-- Preserve the precedence rule: explicit user flag > verified profile > global
-  default.
-- Record benchmark environment, commands, runtime versions, variance and
-  correctness in `docs/engineering/performance/`.
-
-**Exit condition:** current defaults and GUI no-flag behavior remain covered by
-regression tests. This phase is complete for prefill, but not for every profile
-field.
-
-### Phase 1 — make runtime decisions observable
-
-- Introduce an internal `EffectiveRuntimeConfig` with field-level provenance.
-- Route CLI and Server through the same resolver without changing defaults.
-- Expose a read-only resolved-config endpoint/DTO for Desktop.
-- Make Desktop show active optimizations, reasons, limitations, and user
-  overrides without duplicating policy in Swift.
-
-**Exit condition:** the same model launch yields the same resolved config through
-CLI, Server and Desktop, and each non-global value identifies its source.
-
-### Phase 2 — separate performance profiles from model facts
-
-- Add `MachineFingerprint`, normalized `MachineClass`, and `WorkloadProfile`.
-- Extract performance-only fields from the general profile behind a compatible
-  adapter.
-- Key `PerformanceProfile` by artifact/quantization, machine class, workload and
-  supported runtime range.
-- Migrate one narrow vertical slice first: prefill chunk and vision budget.
-
-**Exit condition:** existing aliases produce byte-for-byte equivalent effective
-values, while at least one profile varies safely by machine/workload.
-
-### Phase 3 — evidence promotion and quality qualification
-
-- Create `ProfileCandidate`, validation, confidence, promotion, rollback and
-  expiry contracts.
-- Create artifact- and runtime-bound `VariantQualification` records.
-- Require a promoted evidence ID for every new automatic performance default.
-
-**Exit condition:** changing a production default is an auditable promotion, not
-an unstructured edit to `aliases.json`.
-
-### Phase 4 — recommendations and community evidence
-
-- Produce an ordered `RankedRecommendationSet` with reason codes and tradeoffs.
-- Add consented benchmark submissions, protocol versions, contributor trust,
-  deduplication and anomaly detection.
-- Feed actual runtime regressions back as candidates/alerts only; never mutate a
-  profile directly.
-
-**Exit condition:** community evidence can improve recommendations while a bad or
-malicious submission cannot bypass validation, qualification, or promotion.
+Implementation is intentionally incremental. The living architecture owns phase,
+status, evidence, code/test links, tracking issues, and migration documents. A
+component is only `implemented` when its contract, production path, proportional
+tests, and operational ownership exist; a schema or document alone does not count.
 
 ## Invariants
 
@@ -265,14 +133,9 @@ phased approach gives each extracted entity an equivalence test and rollback pat
 - Community benchmarks become useful evidence rather than an unaudited source of
   truth.
 
-## Updating this ADR
+## Updating this decision
 
-Each implementation PR that advances this design must:
-
-1. update the status table row and phase exit condition it affects;
-2. link the code/tests or performance evidence;
-3. state whether the change preserves existing resolver precedence;
-4. add a new ADR only if it changes an invariant or reverses this decision.
-
-Do not mark the entire ADR complete. Progress is tracked per row and per phase so
-the architecture can land safely over multiple releases.
+Each implementation PR that advances this design must update the living manifest,
+regenerate its views, and link code/tests or evidence. Change this ADR only when
+clarifying the original decision. If an invariant changes or this design is
+reversed, create a superseding ADR rather than rewriting history.
