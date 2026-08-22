@@ -46,7 +46,9 @@ jobs:
               python scripts/classify_ci_changes.py --github-output "$GITHUB_OUTPUT"
               full_gate=true
             else
-              git diff --name-only "$PR_BASE_SHA" "$GITHUB_SHA" > /tmp/changed-paths
+              # Disable rename folding so both the removed source path and the
+              # new destination participate in classification.
+              git diff --no-renames --name-only "$PR_BASE_SHA" "$GITHUB_SHA" > /tmp/changed-paths
               python scripts/classify_ci_changes.py \
                 --paths-file /tmp/changed-paths \
                 --github-output "$GITHUB_OUTPUT"

@@ -32,8 +32,18 @@ def test_cross_cutting_change_selects_both_lanes():
 
 
 def test_unknown_product_area_fails_closed():
-    assert classify(["new-product/config.toml"]) == Lanes(
+    assert classify(["new-product/config.toml", "new-product/README.md"]) == Lanes(
         engine=True, desktop=True, docs_only=False
+    )
+
+
+def test_cross_lane_rename_selects_removed_product_lane():
+    # Workflows pass --no-renames, so a rename is represented by both paths.
+    assert classify(["vllm_mlx/server.py", "docs/server.md"]) == Lanes(
+        engine=True, desktop=False, docs_only=False
+    )
+    assert classify(["apps/rapid-mac/Sources/App.swift", "docs/App.swift.md"]) == Lanes(
+        engine=False, desktop=True, docs_only=False
     )
 
 

@@ -77,7 +77,7 @@ def classify(paths: Iterable[str]) -> Lanes:
     for path in normalized:
         pure = PurePosixPath(path)
         root = pure.parts[0] if pure.parts else ""
-        is_doc = root in _DOC_ROOTS or path in _DOC_FILES or path.endswith(".md")
+        is_doc = root in _DOC_ROOTS or path in _DOC_FILES
         docs_only &= is_doc
 
         if (
