@@ -84,6 +84,11 @@ token, three repeats, and a fresh prompt cache per sample.
 | 1,024 | 326.9 | 342.2 | **399.9** |
 | 4,096 | 324.6 | 395.1 | **397.1** |
 
+Replacing mlx-lm 0.31.3 with upstream main (`dfb5da1`, package version 0.32.0)
+on the same MLX 0.32.1 runtime measured 344.0/400.9/397.4 tok/s at
+128/1K/4K. That is effectively tied with the final column above: Qwen3.5-4B's
+material prefill gain comes from MLX/Metal 0.32.1, not an mlx-lm model change.
+
 Units are prompt tokens per second. The decisive cross-over keeps the same
 `mlx-lm` model implementation and changes only `mlx`/`mlx-metal` from 0.31.2 to
 0.32.1. It improves 1K and 4K prefill by 22.3%, completely closes the mlx-vlm
@@ -121,6 +126,38 @@ and materially faster to load. This is positive evidence for testing the next
 mlx-lm release as the upgrade target, not proof that every Qwen3.6 checkpoint is
 fixed: upstream issue #1197 targets VLM-MTP checkpoint weight layouts and
 remains open. The full-family sweep must include that exact failing layout.
+
+### Long-context follow-up for issue #2165
+
+Qwen3.5-4B was extended to 8K and 16K exact-token prompts with the default
+2,048-token prefill step:
+
+| Context | Production: mlx-lm 0.31.3 + MLX 0.31.2 | Candidate: mlx-lm main + MLX 0.32.1 | Gain |
+| --- | ---: | ---: | ---: |
+| 8,192 | 318.6 | **388.1** | +21.8% |
+| 16,384 | 306.0 | **369.5** | +20.8% |
+
+The runtime upgrade raises the long-context baseline without increasing peak
+MLX memory, but does not remove scaling loss: throughput falls 4.0% from 8K to
+16K on production and 4.8% on the candidate. This addresses one contributor to
+issue #2165, not its full 21K--97K scaling question.
+
+The issue's proposed larger-chunk experiment was also tested on the candidate
+stack at 16K:
+
+| `prefill_step_size` | Prompt tok/s | Peak MLX memory |
+| ---: | ---: | ---: |
+| 2,048 | **369.4** | **5.62 GB** |
+| 4,096 | 364.6 | 7.28 GB |
+| 8,192 | 355.9 | 11.02 GB |
+| 16,384 | 336.2 | 18.63 GB |
+
+For this hybrid/GDN model, larger chunks are both slower and substantially more
+memory-hungry. The default 2K step is the best tested choice. A generic policy
+of using the largest chunk that fits would regress throughput by up to 9.0% and
+raise peak MLX memory by 3.3x. Issue #2165's adaptive chunk policy therefore
+must be architecture-specific; dense full-attention models still require their
+own sweep and may behave differently.
 
 ## Versions and checkpoints
 
@@ -171,8 +208,15 @@ Raw JSON remains outside Git under `~/mac-model-matrix/results` on the mini and
 | `qwen35-4b-prefill-rapid-r1.json` | `8e3869a4eb3a2e78f2fb3ae471586d7923b3066d24a6dbf8ebd482d4d750bffa` |
 | `qwen35-4b-prefill-mlxvlm-r1.json` | `8dadbfc1350dbc4d91b326b4853784ffc2e17dc89bf2d3a5978309059f1f2d00` |
 | `qwen35-4b-prefill-mlxlm-mlx032-r1.json` | `6aab6f33389269dbda14839c72e6698831dc9c92c151213c4e38f14fd3eb8c6b` |
+| `qwen35-4b-prefill-mlxlm-main-mlx032-r2.json` | `42690fcfd1563aeb90023b395760961164c9a8ef3990f6022935884a5de4b481` |
 | `qwen36-35b-mlxlm0313-mlx032-coherence.json` | `ce47d11810815c0860f8b4db6c40720016a138544daeef7c3043693887ee24ac` |
 | `qwen36-35b-mlxlm-main-mlx032-coherence.json` | `908db76bb97967e2095f0493c2caebe58c23b9db5bdce09fd941cb2b6319f82a` |
+| `qwen35-4b-prefill-prod-long-r1.json` | `15295614ba2daacbd3f2fba2a748b83deea23489df91e610a6109eab66755321` |
+| `qwen35-4b-prefill-main-long-r1.json` | `0f28ac3d75537ecbd33057288f9eec21760446b7b8aa71cdb527df046ab5eb02` |
+| `qwen35-4b-prefill-main-16k-step2048.json` | `1eaa5ef167eaeabc2f7ea5ca7239c063c7aee3771823831c6304895c51731ff5` |
+| `qwen35-4b-prefill-main-16k-step4096.json` | `35579aabfd32b75d067f761d73d99b9275173b9b02b23c29122abe72fc3b9f13` |
+| `qwen35-4b-prefill-main-16k-step8192.json` | `01c1b812138d24b7f439bd4d2fcdf0062afd4bd37c519b69b78b451a2dbbbe06` |
+| `qwen35-4b-prefill-main-16k-step16384.json` | `bbbc65863cd192fd5d6174a183bed4b9bb3613a3f0fc0a8d6ff676aefc3b5a80` |
 
 ## Limitations
 

@@ -33,6 +33,14 @@
     300.1 vs 277.4 prompt tok/s and 2.79 vs 7.53 seconds cached load. Upstream
     VLM-MTP issue #1197 is still open, so its exact checkpoint layout remains a
     required coherence case.
+  - Issue #2165 follow-up on Qwen3.5-4B: mlx-lm main + MLX 0.32.1 improves
+    exact-token prefill over production by 21.8% at 8K (388.1 vs 318.6) and
+    20.8% at 16K (369.5 vs 306.0), with essentially unchanged peak memory.
+    The 8K-to-16K scaling loss remains. At 16K, increasing prefill step from
+    2K to 4K/8K/16K reduced throughput from 369.4 to 364.6/355.9/336.2 tok/s
+    and raised peak memory from 5.62 to 7.28/11.02/18.63 GB. Hybrid/GDN must
+    keep an architecture-specific smaller-step policy; do not promote a generic
+    largest-chunk-that-fits rule.
   - Existing unarchived Qwen3.6-35B experiments under `~/qwen38-perf` suggest
     Rapid AR around 91 tok/s, mlx-vlm AR around 83 tok/s, and Rapid MTP up to
     120.9 tok/s on one coding prompt. Re-run with the common harness before
