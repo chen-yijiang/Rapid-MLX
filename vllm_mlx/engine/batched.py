@@ -667,6 +667,13 @@ def _resolve_mllm_prefill_step_size(
     return user_value
 
 
+def _resolve_mllm_vision_prefill_token_budget(
+    prefill_step_size: int, *, mllm_default: int
+) -> int:
+    """Keep vision admission safe without limiting larger operator budgets."""
+    return max(prefill_step_size, mllm_default)
+
+
 def _compute_metal_cache_limit(soft_limit_bytes: int) -> int:
     """Pick a Metal free-cache size that scales with the device's working set.
 
@@ -1224,6 +1231,10 @@ class BatchedEngine(BaseEngine):
             prefill_batch_size=prefill_batch_size,
             completion_batch_size=completion_batch_size,
             prefill_step_size=prefill_step_size,
+            vision_prefill_token_budget=_resolve_mllm_vision_prefill_token_budget(
+                prefill_step_size,
+                mllm_default=_MLLM_DEFAULT_PREFILL_STEP_SIZE,
+            ),
             enable_vision_cache=True,
             vision_cache_size=100,
             max_concurrent_requests=max_concurrent_requests,
@@ -1245,7 +1256,10 @@ class BatchedEngine(BaseEngine):
         logger.info(
             f"MLLM Scheduler started with continuous batching: "
             f"max_num_seqs={max_num_seqs}, prefill_batch={prefill_batch_size}, "
-            f"completion_batch={completion_batch_size}, vision_min_pixels="
+            f"completion_batch={completion_batch_size}, "
+            f"prefill_step_size={prefill_step_size}, "
+            f"vision_prefill_token_budget="
+            f"{mllm_config.vision_prefill_token_budget}, vision_min_pixels="
             f"{vision_min_pixels or 'model-default'}, vision_max_pixels="
             f"{vision_max_pixels or 'model-default'}"
         )

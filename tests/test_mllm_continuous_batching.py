@@ -257,6 +257,7 @@ class TestMLLMSchedulerConfig:
         # prefill_batch_size set equal to max_num_seqs to avoid batch extend issues
         assert config.prefill_batch_size == 16
         assert config.completion_batch_size == 16
+        assert config.vision_prefill_token_budget == 8192
         assert config.enable_vision_cache is True
         assert config.vision_cache_size == 100
 

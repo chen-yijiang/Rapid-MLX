@@ -127,7 +127,9 @@ def test_only_bench_verified_profiles_opt_in():
     ):
         assert resolve_profile(alias).recommended_prefill_step_size == 1024
 
-    for alias in ("qwen3.5-35b-4bit", "gemma-4-12b-4bit"):
+    assert resolve_profile("gemma-4-12b-4bit").recommended_prefill_step_size == 512
+
+    for alias in ("qwen3.5-35b-4bit",):
         assert resolve_profile(alias).recommended_prefill_step_size is None
 
 
@@ -139,6 +141,14 @@ def test_real_profile_recommendations_reach_runtime_resolver():
             user_set_explicit=False,
         )
         == 1024
+    )
+    assert (
+        cli._resolve_prefill_step_size(
+            model_name="gemma-4-12b-4bit",
+            configured=2048,
+            user_set_explicit=False,
+        )
+        == 512
     )
 
 
