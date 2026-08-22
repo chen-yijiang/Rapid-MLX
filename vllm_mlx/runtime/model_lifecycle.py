@@ -97,7 +97,9 @@ class ModelLifecycleManager:
             async with self._lock:
                 self._active_requests = max(0, self._active_requests - 1)
 
-    async def begin(self, *, target_model: str | None, reason: str) -> LifecycleOperation:
+    async def begin(
+        self, *, target_model: str | None, reason: str
+    ) -> LifecycleOperation:
         async with self._lock:
             self._expire_locked()
             if self._current is not None and self._current.phase in {
