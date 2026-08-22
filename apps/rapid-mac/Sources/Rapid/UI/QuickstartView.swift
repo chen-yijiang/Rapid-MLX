@@ -3150,13 +3150,20 @@ struct QuickstartView: View {
         /// Every alias the user can currently see and click, in render order.
         /// This is the "visible" half of `selection ∩ visible rows`.
         func visibleAliases(includeCachedAlternates: Bool) -> [String] {
-            let aliases = cached.map(\.alias)
-                + (includeCachedAlternates ? cachedAlternates.map(\.alias) : [])
-                + starters.map(\.alias)
-                + recommended.map(\.alias)
-                + lowMemory.map(\.alias)
-                + tradeUps.map(\.alias)
-                + (yourPick.map { [$0.alias] } ?? [])
+            // Built via append(contentsOf:) rather than one chained `+` so each
+            // `map(\.keypath)` is type-checked in isolation — the single-chain
+            // form tipped the compiler's constraint-expression timeout once a
+            // sixth `map` (the RAM-aware recommended row) was added.
+            var aliases: [String] = []
+            aliases.append(contentsOf: cached.map(\.alias))
+            if includeCachedAlternates {
+                aliases.append(contentsOf: cachedAlternates.map(\.alias))
+            }
+            aliases.append(contentsOf: starters.map(\.alias))
+            aliases.append(contentsOf: recommended.map(\.alias))
+            aliases.append(contentsOf: lowMemory.map(\.alias))
+            aliases.append(contentsOf: tradeUps.map(\.alias))
+            if let yourPick { aliases.append(yourPick.alias) }
             return aliases.reduce(into: []) { result, alias in
                 guard !result.contains(alias) else { return }
                 result.append(alias)
