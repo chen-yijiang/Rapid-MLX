@@ -251,6 +251,34 @@ struct ModelResidencyTests {
         #expect(server.state == .stopped)
     }
 
+    @Test("Explicit stop preempts a confirmed resident load")
+    func stopPreemptsResidentLoad() async throws {
+        SlowResidentLoadProtocol.loadStarted = false
+        let server = makeSwitchServer(protocolClass: SlowResidentLoadProtocol.self)
+        let switchTask = Task { @MainActor in
+            await server.ensureServingOutcome(
+                alias: "target", hfPath: nil, estimatedMemoryGB: nil,
+                replacementGroup: .assistant
+            )
+        }
+        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let warning = try #require(server.pendingActiveRequestSwitch)
+        server.confirmActiveRequestSwitch(warning)
+        for _ in 0..<100 where !SlowResidentLoadProtocol.loadStarted {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(SlowResidentLoadProtocol.loadStarted)
+
+        let startedAt = Date()
+        await server.stop()
+        #expect(Date().timeIntervalSince(startedAt) < 0.5)
+        #expect(server.state == .stopped)
+        #expect(await switchTask.value == .cancelled)
+        #expect(server.state == .stopped)
+    }
+
     @Test("Speculative restart cancellation preserves the active server")
     func speculativeRestartCancellationPreservesServer() async throws {
         let server = makeSwitchServer(protocolClass: ActiveResidencyProtocol.self)
@@ -582,6 +610,28 @@ private final class OverlappingResidencyProtocol: ResidencySnapshotProtocol, @un
         Self.fetchCount += 1
         Self.lastTimeout = request.timeoutInterval
         super.startLoading()
+    }
+}
+
+private final class SlowResidentLoadProtocol: ResidencySnapshotProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var loadStarted = false
+    override class var activeRequests: Int { 1 }
+
+    override func startLoading() {
+        guard request.httpMethod == "POST" else {
+            super.startLoading()
+            return
+        }
+        Self.loadStarted = true
+        Thread.sleep(forTimeInterval: 0.7)
+        let payload = #"{"id":"target","model_path":"target","aliases":[],"modality":"text","state":"resident","pinned":true,"primary":true,"active_requests":0,"estimated_bytes":1,"measured_bytes":null,"idle_seconds":0}"#.data(using: .utf8)!
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200,
+            httpVersion: "HTTP/1.1", headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: payload)
+        client?.urlProtocolDidFinishLoading(self)
     }
 }
 

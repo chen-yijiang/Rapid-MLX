@@ -222,7 +222,7 @@ final class ServerManager {
     }
 
     private var activeRequestSwitchConfirmations = ActiveRequestSwitchConfirmationQueue()
-    private var modelSwitchOperationInProgress = false
+    private var modelSwitchOperationOwner: UUID?
 
     /// Live-memory source. Production uses the host probe; tests replace it so
     /// launch auto-start semantics can be verified without depending on the
@@ -1000,15 +1000,16 @@ final class ServerManager {
         imageMode: ResidentImageMode? = nil,
         residencyEligible: Bool = true
     ) async -> EnsureServingOutcome {
-        guard await acquireModelSwitchOperation() else { return .cancelled }
-        defer { modelSwitchOperationInProgress = false }
+        guard let operationID = await acquireModelSwitchOperation() else { return .cancelled }
+        defer { releaseModelSwitchOperation(operationID) }
         return await ensureServingOutcomeLocked(
             alias: alias,
             hfPath: hfPath,
             estimatedMemoryGB: estimatedMemoryGB,
             replacementGroup: replacementGroup,
             imageMode: imageMode,
-            residencyEligible: residencyEligible
+            residencyEligible: residencyEligible,
+            operationID: operationID
         )
     }
 
@@ -1018,7 +1019,8 @@ final class ServerManager {
         estimatedMemoryGB: Double?,
         replacementGroup: ResidentModelReplacementGroup? = nil,
         imageMode: ResidentImageMode? = nil,
-        residencyEligible: Bool = true
+        residencyEligible: Bool = true,
+        operationID: UUID
     ) async -> EnsureServingOutcome {
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed }
@@ -1034,7 +1036,8 @@ final class ServerManager {
             ).first {
                 $0.alias.caseInsensitiveCompare(trimmed) == .orderedSame
             }
-            if Task.isCancelled || didSignalShutdown { return .cancelled }
+            if Task.isCancelled || didSignalShutdown
+                || !ownsModelSwitchOperation(operationID) { return .cancelled }
             requestedCatalogSupportsImageInput = ModelBrandStyle.supportsImageInput(
                 forAlias: trimmed,
                 isBuiltinProfile: entry?.isBuiltinProfile,
@@ -1104,6 +1107,7 @@ final class ServerManager {
                ) == false {
                 return .cancelled
             }
+            guard ownsModelSwitchOperation(operationID) else { return .cancelled }
             // Publish before crossing the network await so SwiftUI replaces
             // the still-pressable CTA with an honest working state in the
             // same run-loop turn. Count rather than coalescing here: callers
@@ -1128,6 +1132,7 @@ final class ServerManager {
                 port: activePort,
                 bearer: activeBearer
             )
+            guard ownsModelSwitchOperation(operationID) else { return .cancelled }
             switch result {
             case .loaded(let status):
                 if !residency.contains(status.id) {
@@ -1142,6 +1147,7 @@ final class ServerManager {
                     )
                 }
                 await refreshResidency()
+                guard ownsModelSwitchOperation(operationID) else { return .cancelled }
                 if replacementGroup != nil {
                     state = .ready(alias: trimmed)
                 }
@@ -1182,6 +1188,7 @@ final class ServerManager {
         // would re-enter a multi-gigabyte download. Wait for it.
         if case .starting(let current) = state, current == trimmed {
             await awaitStartupSettled(alias: trimmed)
+            guard ownsModelSwitchOperation(operationID) else { return .cancelled }
             return isServing(trimmed) ? .ready : .failed
         }
         // Cold/modal starts and the legacy residency fallback replace the
@@ -1194,15 +1201,18 @@ final class ServerManager {
            ) == false {
             return .cancelled
         }
+        guard ownsModelSwitchOperation(operationID) else { return .cancelled }
         // Tear down whatever's there (a DIFFERENT alias, ready or
         // mid-``.starting``). ``stop()`` is a noop if child is nil, so
         // the idle/stopped/missing cases just fall through to
         // ``start(alias:)``.
         if child != nil {
             await stop(preservingLastServedAlias: true)
+            guard ownsModelSwitchOperation(operationID) else { return .cancelled }
         }
         let memoryRequestID = UUID()
         await start(alias: trimmed, hfPath: hfPath, memoryRequestID: memoryRequestID)
+        guard ownsModelSwitchOperation(operationID) else { return .cancelled }
         // ``start`` also returns without spawning when the pre-load
         // memory guard parks the load on a confirmation prompt. Reading
         // ``isServing`` now would report "couldn't start the model"
@@ -1211,12 +1221,14 @@ final class ServerManager {
         // be marked failed and then silently dropped the moment the user
         // picks "Load anyway". Wait for the answer instead.
         if let decision = await awaitMemoryDecision(for: memoryRequestID) {
+            guard ownsModelSwitchOperation(operationID) else { return .cancelled }
             if case .confirmed(let seq) = decision {
                 // Wait out the actual re-entered launch — no fixed bound,
                 // because it may legitimately sit on a background download.
                 // Bind to THIS confirmation so an unrelated later cancel
                 // cannot end the wait early.
                 await awaitConfirmedLaunch(seq)
+                guard ownsModelSwitchOperation(operationID) else { return .cancelled }
             }
         }
         // ``start`` returns silently when another caller already owns
@@ -1227,6 +1239,7 @@ final class ServerManager {
         // instead, exactly as in the short-circuit above.
         if case .starting(let current) = state, current == trimmed {
             await awaitStartupSettled(alias: trimmed)
+            guard ownsModelSwitchOperation(operationID) else { return .cancelled }
         }
         return isServing(trimmed) ? .ready : .failed
     }
@@ -1241,8 +1254,8 @@ final class ServerManager {
     ) async -> EnsureServingOutcome {
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed }
-        guard await acquireModelSwitchOperation() else { return .cancelled }
-        defer { modelSwitchOperationInProgress = false }
+        guard let operationID = await acquireModelSwitchOperation() else { return .cancelled }
+        defer { releaseModelSwitchOperation(operationID) }
         if child != nil,
            await confirmActiveRequestSwitch(
                to: trimmed,
@@ -1251,13 +1264,16 @@ final class ServerManager {
            ) == false {
             return .cancelled
         }
+        guard ownsModelSwitchOperation(operationID) else { return .cancelled }
         await stop(preservingLastServedAlias: false)
+        guard ownsModelSwitchOperation(operationID) else { return .cancelled }
         return await ensureServingOutcomeLocked(
             alias: trimmed,
             hfPath: hfPath,
             estimatedMemoryGB: estimatedMemoryGB,
             imageMode: imageMode,
-            residencyEligible: residencyEligible
+            residencyEligible: residencyEligible,
+            operationID: operationID
         )
     }
 
@@ -1285,14 +1301,25 @@ final class ServerManager {
     /// Serialize the full check → confirmation → replacement transaction.
     /// A later switch re-enters only after the earlier operation has settled,
     /// so its decision-point fetch observes the newly serving model.
-    private func acquireModelSwitchOperation() async -> Bool {
-        while modelSwitchOperationInProgress {
-            guard !Task.isCancelled else { return false }
+    private func acquireModelSwitchOperation() async -> UUID? {
+        while modelSwitchOperationOwner != nil {
+            guard !Task.isCancelled else { return nil }
             try? await Task.sleep(for: .milliseconds(10))
         }
-        guard !Task.isCancelled else { return false }
-        modelSwitchOperationInProgress = true
-        return true
+        guard !Task.isCancelled else { return nil }
+        let operationID = UUID()
+        modelSwitchOperationOwner = operationID
+        return operationID
+    }
+
+    private func ownsModelSwitchOperation(_ operationID: UUID) -> Bool {
+        modelSwitchOperationOwner == operationID
+    }
+
+    private func releaseModelSwitchOperation(_ operationID: UUID) {
+        if modelSwitchOperationOwner == operationID {
+            modelSwitchOperationOwner = nil
+        }
     }
 
     /// Rebuild only the named resident engine with its current performance
@@ -2279,8 +2306,9 @@ final class ServerManager {
     /// success.
     func stop() async {
         activeRequestSwitchConfirmations.cancelAll()
-        guard await acquireModelSwitchOperation() else { return }
-        defer { modelSwitchOperationInProgress = false }
+        let stopOperationID = UUID()
+        modelSwitchOperationOwner = stopOperationID
+        defer { releaseModelSwitchOperation(stopOperationID) }
         await stop(preservingLastServedAlias: false)
     }
 
