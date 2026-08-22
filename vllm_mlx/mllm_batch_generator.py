@@ -579,11 +579,11 @@ class MLLMBatchGenerator:
         completion_batch_size: int = 16,  # Can be larger for text generation
         allow_arrays_cache: bool = False,
         prefill_step_size: int = 1024,
-        vision_prefill_token_budget: int = 8192,
         enable_vision_cache: bool = True,
         vision_cache_size: int = 100,
         vision_min_pixels: int = 0,
         vision_max_pixels: int = 0,
+        vision_prefill_token_budget: int = 8192,
     ):
         """
         Initialize MLLM batch generator.
@@ -599,12 +599,13 @@ class MLLMBatchGenerator:
             completion_batch_size: Max requests for completion batching
             allow_arrays_cache: Permit mlx-lm ArraysCache in serialized mode
             prefill_step_size: Tokens to process per prefill step
-            vision_prefill_token_budget: Per-image-request admission budget;
-                independent from the language-model prefill chunk
             enable_vision_cache: Enable vision embedding caching
             vision_cache_size: Max entries in vision cache
             vision_min_pixels: Optional processor-side minimum image pixels
             vision_max_pixels: Optional processor-side maximum image pixels
+            vision_prefill_token_budget: Per-image-request admission budget;
+                independent from the language-model prefill chunk. Appended to
+                preserve positional compatibility with existing callers.
         """
         self.model = model
         self.processor = processor

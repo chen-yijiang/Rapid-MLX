@@ -983,7 +983,9 @@ def _make_cap_request(uid: int, token_count: int) -> MLLMBatchRequest:
     )
 
 
-def _gen_with_prefill_cap(prefill_step_size: int) -> MLLMBatchGenerator:
+def _gen_with_prefill_cap(
+    prefill_step_size: int, *, vision_prefill_token_budget: int | None = None
+) -> MLLMBatchGenerator:
     """Generator with a tunable cap, no real model/processor needed.
 
     ``_process_prompts`` only reads ``self.prefill_step_size`` /
@@ -992,7 +994,11 @@ def _gen_with_prefill_cap(prefill_step_size: int) -> MLLMBatchGenerator:
     """
     gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
     gen.prefill_step_size = prefill_step_size
-    gen.vision_prefill_token_budget = prefill_step_size
+    gen.vision_prefill_token_budget = (
+        prefill_step_size
+        if vision_prefill_token_budget is None
+        else vision_prefill_token_budget
+    )
     gen.vision_cache = None
     gen.model = object()
     gen.language_model = object()
@@ -1215,6 +1221,23 @@ def test_per_batch_cap_does_not_fail_at_default_on_typical_screenshot(
         f"with the production MLLM default (8192), a 2292-token "
         f"single-request batch must pass the cap; got: {err_msg}"
     )
+
+
+def test_profile_chunk_uses_independent_vision_budget_in_process_prompts(
+    monkeypatch,
+):
+    """Exercise the production admission call site for the Gemma profile."""
+    gen = _gen_with_prefill_cap(
+        prefill_step_size=512,
+        vision_prefill_token_budget=8192,
+    )
+    monkeypatch.setattr(gen, "_preprocess_request", lambda req: None)
+    request = _make_vision_cap_request(uid=0, token_count=2292)
+
+    with pytest.raises(Exception) as excinfo:  # noqa: BLE001 — bare model stub
+        MLLMBatchGenerator._process_prompts(gen, [request])
+
+    assert "exceeds the per-batch cap" not in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
