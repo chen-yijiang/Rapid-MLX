@@ -78,6 +78,67 @@ struct ModelResidencyTests {
         #expect(status.displayName(preferredAlias: "qwen3.5-4b-4bit") == "qwen3.5-4b-4bit")
     }
 
+    @Test("Active request count ignores evicting engines and invalid negative values")
+    func activeRequestCount() {
+        func status(_ id: String, state: String, active: Int) -> ResidentModelStatus {
+            ResidentModelStatus(
+                id: id,
+                modelPath: id,
+                aliases: [],
+                modality: "text",
+                state: state,
+                pinned: false,
+                primary: false,
+                activeRequests: active,
+                estimatedBytes: 1,
+                measuredBytes: nil,
+                idleSeconds: 0
+            )
+        }
+        let snapshot = ModelResidencySnapshot(
+            memoryLimitBytes: 1,
+            memoryUsedBytes: 1,
+            memoryAvailableBytes: 0,
+            idleTTLSeconds: 1,
+            loadsTotal: 1,
+            evictionsTotal: 0,
+            models: [
+                status("primary", state: "resident", active: 2),
+                status("secondary", state: "loading", active: 1),
+                status("leaving", state: "evicting", active: 9),
+                status("invalid", state: "resident", active: -4),
+            ]
+        )
+
+        #expect(snapshot.activeRequestCount == 3)
+    }
+
+    @Test("Active-request switch confirmations resolve in FIFO order")
+    func activeRequestSwitchConfirmationFIFO() {
+        var queue = ActiveRequestSwitchConfirmationQueue()
+        let firstRequest = UUID()
+        let secondRequest = UUID()
+        let first = ActiveRequestSwitchWarning(
+            id: UUID(), currentAlias: "a", targetAlias: "b", activeRequests: 1
+        )
+        let second = ActiveRequestSwitchWarning(
+            id: UUID(), currentAlias: "a", targetAlias: "c", activeRequests: 2
+        )
+
+        queue.enqueue(first, requestID: firstRequest)
+        queue.enqueue(second, requestID: secondRequest)
+        #expect(queue.currentWarning == first)
+
+        queue.resolveCurrent(second, confirmed: true)
+        #expect(queue.currentWarning == first)
+        queue.resolveCurrent(first, confirmed: false)
+        #expect(queue.takeDecision(for: firstRequest) == false)
+        #expect(queue.currentWarning == second)
+        queue.resolveCurrent(second, confirmed: true)
+        #expect(queue.takeDecision(for: secondRequest) == true)
+        #expect(queue.currentWarning == nil)
+    }
+
     @Test("Connector restart prefers a resident text model over the process-owning audio alias")
     func connectorRestartTextAlias() {
         let text = ResidentModelStatus(

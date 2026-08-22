@@ -122,6 +122,13 @@ struct ModelResidencySnapshot: Codable, Sendable, Equatable {
         models.contains { $0.matches(alias) && $0.state != "evicting" }
     }
 
+    /// Requests that would be interrupted by replacing the serving process.
+    var activeRequestCount: Int {
+        models.lazy
+            .filter { $0.state != "evicting" }
+            .reduce(0) { $0 + max(0, $1.activeRequests) }
+    }
+
     /// Pick the resident text model that can host chat-only subsystems such
     /// as MCP. The process-owning alias may be an audio model after a user
     /// visits Speech, even while a text engine is resident in that process.

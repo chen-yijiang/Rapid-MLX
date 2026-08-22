@@ -75,6 +75,7 @@ struct ContentView: View {
         // callback must not cancel a newer warning that has reached the queue
         // head in the meantime (#1463).
         let displayedMemoryWarning = server.pendingMemoryWarning
+        let displayedActiveRequestSwitch = server.pendingActiveRequestSwitch
         // Ollama-style layout: a left sidebar (New Chat / Launch / — later —
         // history) + a detail pane. No top model-control bar; the model
         // picker lives inline in the compose box (see ChatView) and the
@@ -196,6 +197,29 @@ struct ContentView: View {
             .accessibilityIdentifier("MemoryWarning.Confirm")
         } message: { warning in
             Text(warning.message)
+        }
+        .alert(
+            "Switch models while requests are active?",
+            isPresented: Binding(
+                get: { server.pendingActiveRequestSwitch != nil },
+                set: {
+                    if !$0, let warning = displayedActiveRequestSwitch {
+                        server.cancelActiveRequestSwitch(warning)
+                    }
+                }
+            ),
+            presenting: displayedActiveRequestSwitch
+        ) { warning in
+            Button("Cancel", role: .cancel) {
+                server.cancelActiveRequestSwitch(warning)
+            }
+            .accessibilityIdentifier("ActiveRequestSwitch.Cancel")
+            Button("Switch model", role: .destructive) {
+                server.confirmActiveRequestSwitch(warning)
+            }
+            .accessibilityIdentifier("ActiveRequestSwitch.Confirm")
+        } message: { warning in
+            Text("\(warning.activeRequests) active request\(warning.activeRequests == 1 ? " is" : "s are") using \(warning.currentAlias). Switching to \(warning.targetAlias) will interrupt \(warning.activeRequests == 1 ? "it" : "them").")
         }
         .onChange(of: settingsRouter.quickstartReturnGeneration) { _, _ in
             quickstartDismissedThisSession = false

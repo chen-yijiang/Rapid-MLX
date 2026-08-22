@@ -2,6 +2,48 @@ import Darwin
 import Foundation
 import Observation
 
+struct ActiveRequestSwitchWarning: Identifiable, Sendable, Equatable {
+    let id: UUID
+    let currentAlias: String
+    let targetAlias: String
+    let activeRequests: Int
+}
+
+struct ActiveRequestSwitchConfirmationQueue {
+    private struct Pending {
+        let warning: ActiveRequestSwitchWarning
+        let requestID: UUID
+    }
+
+    private var pending: [Pending] = []
+    private var decisions: [UUID: Bool] = [:]
+
+    var currentWarning: ActiveRequestSwitchWarning? { pending.first?.warning }
+
+    mutating func enqueue(_ warning: ActiveRequestSwitchWarning, requestID: UUID) {
+        pending.append(Pending(warning: warning, requestID: requestID))
+    }
+
+    func isPending(_ requestID: UUID) -> Bool {
+        pending.contains { $0.requestID == requestID }
+    }
+
+    mutating func resolveCurrent(_ warning: ActiveRequestSwitchWarning, confirmed: Bool) {
+        guard pending.first?.warning.id == warning.id else { return }
+        let item = pending.removeFirst()
+        decisions[item.requestID] = confirmed
+    }
+
+    mutating func takeDecision(for requestID: UUID) -> Bool? {
+        decisions.removeValue(forKey: requestID)
+    }
+
+    mutating func abandon(_ requestID: UUID) {
+        decisions.removeValue(forKey: requestID)
+        pending.removeAll { $0.requestID == requestID }
+    }
+}
+
 /// FIFO state machine for memory-risk confirmations. A request token is
 /// present for ``ensureServing`` callers that must await their own answer;
 /// direct ``start`` calls still queue a prompt but retain no result.
@@ -157,6 +199,12 @@ final class ServerManager {
     /// is answered. This prevents overlapping ``ensureServing`` calls from
     /// consuming one another's confirmation (#1463).
     private var memoryConfirmations = MemoryLoadConfirmationQueue()
+
+    var pendingActiveRequestSwitch: ActiveRequestSwitchWarning? {
+        activeRequestSwitchConfirmations.currentWarning
+    }
+
+    private var activeRequestSwitchConfirmations = ActiveRequestSwitchConfirmationQueue()
 
     /// Live-memory source. Production uses the host probe; tests replace it so
     /// launch auto-start semantics can be verified without depending on the
@@ -957,6 +1005,25 @@ final class ServerManager {
             return true
         }
 
+        // Switching a live serve process can terminate in-flight API streams.
+        // The residency endpoint already reports this count; refresh it at the
+        // decision point rather than relying on the last UI polling snapshot.
+        await refreshResidency()
+        let activeRequests = residency.activeRequestCount
+        if activeRequests > 0 {
+            let requestID = UUID()
+            let warning = ActiveRequestSwitchWarning(
+                id: UUID(),
+                currentAlias: servingAlias ?? residency.models.first(where: { $0.primary })?.displayName() ?? "the current model",
+                targetAlias: trimmed,
+                activeRequests: activeRequests
+            )
+            activeRequestSwitchConfirmations.enqueue(warning, requestID: requestID)
+            guard await awaitActiveRequestSwitchDecision(for: requestID) == true else {
+                return false
+            }
+        }
+
         // Any fresh load attempt — resident, cold start, or the legacy
         // stop/start fallback — supersedes a stale rejection for THIS alias so
         // the surface stops showing last round's result while this load is in
@@ -1172,6 +1239,26 @@ final class ServerManager {
             }
         }
         return memoryConfirmations.takeDecision(for: requestID)
+    }
+
+    private func awaitActiveRequestSwitchDecision(for requestID: UUID) async -> Bool? {
+        while activeRequestSwitchConfirmations.isPending(requestID) {
+            do {
+                try await Task.sleep(nanoseconds: 200_000_000)
+            } catch {
+                activeRequestSwitchConfirmations.abandon(requestID)
+                return false
+            }
+        }
+        return activeRequestSwitchConfirmations.takeDecision(for: requestID)
+    }
+
+    func confirmActiveRequestSwitch(_ warning: ActiveRequestSwitchWarning) {
+        activeRequestSwitchConfirmations.resolveCurrent(warning, confirmed: true)
+    }
+
+    func cancelActiveRequestSwitch(_ warning: ActiveRequestSwitchWarning) {
+        activeRequestSwitchConfirmations.resolveCurrent(warning, confirmed: false)
     }
 
 
