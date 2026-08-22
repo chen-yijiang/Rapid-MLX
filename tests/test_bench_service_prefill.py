@@ -16,6 +16,13 @@ def test_percentile_interpolates_small_samples():
     assert percentile([10.0, 20.0], 0.95) == 19.5
 
 
+def test_normalize_urls_accepts_conventional_trailing_slash():
+    assert bench.normalize_urls("http://127.0.0.1:8000/v1/") == (
+        "http://127.0.0.1:8000/v1",
+        "http://127.0.0.1:8000",
+    )
+
+
 def test_summary_reports_ttft_and_total_p50_p95():
     rows = [
         {"ttft_ms": 10, "total_ms": 20},

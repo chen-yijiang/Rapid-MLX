@@ -191,6 +191,12 @@ def get_status(client: httpx.Client, root_url: str) -> dict[str, Any]:
     return response.json()
 
 
+def normalize_urls(url: str) -> tuple[str, str]:
+    """Return redirect-free API and service-root URLs."""
+    api_url = url.rstrip("/")
+    return api_url, api_url.removesuffix("/v1")
+
+
 def wait_for_running_request(
     client: httpx.Client,
     root_url: str,
@@ -228,10 +234,10 @@ def main() -> int:
 
     from transformers import AutoTokenizer
 
-    root_url = args.url.removesuffix("/v1")
+    api_url, root_url = normalize_urls(args.url)
     timeout = httpx.Timeout(900.0, connect=30.0)
     with httpx.Client(timeout=timeout) as client:
-        model = args.model or client.get(f"{args.url}/models").json()["data"][0]["id"]
+        model = args.model or client.get(f"{api_url}/models").json()["data"][0]["id"]
         tokenizer_id = args.tokenizer or model
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=True)
         client.get(f"{root_url}/health").raise_for_status()
@@ -242,7 +248,7 @@ def main() -> int:
             rows = []
             for repeat in range(args.repeat):
                 clear_prefix_cache(client, root_url)
-                row = stream_request(client, args.url, model, messages, args.max_tokens)
+                row = stream_request(client, api_url, model, messages, args.max_tokens)
                 row.update(target_tokens=target, repeat=repeat)
                 rows.append(row)
             cold[str(target)] = rows
@@ -251,10 +257,10 @@ def main() -> int:
         base_messages = make_messages(tokenizer, cache_target)
         clear_prefix_cache(client, root_url)
         populate = stream_request(
-            client, args.url, model, base_messages, args.max_tokens
+            client, api_url, model, base_messages, args.max_tokens
         )
         exact = [
-            stream_request(client, args.url, model, base_messages, args.max_tokens)
+            stream_request(client, api_url, model, base_messages, args.max_tokens)
             for _ in range(args.repeat)
         ]
         partial_messages = [*base_messages]
@@ -263,7 +269,7 @@ def main() -> int:
             "content": base_messages[-1]["content"] + "\nReturn only the word done.",
         }
         partial = [
-            stream_request(client, args.url, model, partial_messages, args.max_tokens)
+            stream_request(client, api_url, model, partial_messages, args.max_tokens)
             for _ in range(args.repeat)
         ]
 
@@ -276,7 +282,7 @@ def main() -> int:
                 long_future = executor.submit(
                     stream_request,
                     client,
-                    args.url,
+                    api_url,
                     model,
                     long_messages,
                     args.max_tokens,
@@ -286,7 +292,7 @@ def main() -> int:
                 short_future = executor.submit(
                     stream_request,
                     client,
-                    args.url,
+                    api_url,
                     model,
                     short_messages,
                     args.max_tokens,
@@ -313,7 +319,7 @@ def main() -> int:
         "label": args.label,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "client_platform": platform.platform(),
-        "base_url": args.url,
+        "base_url": api_url,
         "model": model,
         "tokenizer": tokenizer_id,
         "repeat": args.repeat,
