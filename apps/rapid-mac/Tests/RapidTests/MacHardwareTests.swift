@@ -90,4 +90,25 @@ struct MacHardwareTests {
         let hw = MacHardware.detect()
         #expect(hw.physicalRAMBytes > 0)
     }
+
+    @Test("RAPID_HARDWARE_RAM_GB pins the golden-flow RAM tier")
+    func goldenRAMOverride() {
+        // The first-run golden flows pin a fixed tier so their structural
+        // AX baselines are deterministic across hosts — a 14 GB CI runner
+        // and a 256 GB release Mac must render the same recommended row.
+        let gb: UInt64 = 8
+        let pinned = MacHardware.physicalRAMBytes(environment: ["RAPID_HARDWARE_RAM_GB": "8"])
+        // 8 × 2^30 = 8589934592; allow a *bit* of rounding latitude.
+        #expect(abs(Int64(pinned) - Int64(gb * UInt64(1 << 30))) < 16)
+    }
+
+    @Test("RAM override is ignored when not set or invalid")
+    func goldenRAMOverrideIgnoredWhenAbsent() {
+        // No env pin → the real sysctl probe runs (non-zero on any Mac).
+        let absent = MacHardware.physicalRAMBytes(environment: [:])
+        #expect(absent > 0)
+        // A non-parserable or non-positive value also falls back to sysctl.
+        let bad = MacHardware.physicalRAMBytes(environment: ["RAPID_HARDWARE_RAM_GB": "not-a-number"])
+        #expect(bad > 0)
+    }
 }

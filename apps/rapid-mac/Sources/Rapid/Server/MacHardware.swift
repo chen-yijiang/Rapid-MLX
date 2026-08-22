@@ -54,9 +54,16 @@ struct MacHardware: Sendable, Equatable {
     /// can't be classified (older / forward-compatible chips fall
     /// through to ``.mUnknown / .unknown`` rather than crashing the
     /// picker).
+    ///
+    /// ``RAPID_HARDWARE_RAM_GB`` (a decimal GB of total physical RAM)
+    /// overrides ``hw.memsize`` when set and parseable. Production
+    /// launches never set it, so the picker still reflects the real
+    /// Mac; the golden flows set it to a fixed tier so their structural
+    /// AX baselines are deterministic across hosts of very different
+    /// RAM.
     static func detect() -> MacHardware {
         let brand = sysctlString("machdep.cpu.brand_string") ?? "Apple Silicon"
-        let mem = sysctlUInt64("hw.memsize") ?? 0
+        let mem = Self.physicalRAMBytes(environment: ProcessInfo.processInfo.environment)
         let (family, tier) = Self.classify(brand)
         let bw = Self.bandwidthGBs(family: family, tier: tier)
         return MacHardware(
@@ -66,6 +73,19 @@ struct MacHardware: Sendable, Equatable {
             physicalRAMBytes: mem,
             memoryBandwidthGBs: bw
         )
+    }
+
+    /// ``hw.memsize`` in bytes, unless ``RAPID_HARDWARE_RAM_GB`` pins
+    /// it. Only the RAM is overridable — the chip brand still comes
+    /// from this host, so the labelled chip family stays truthful.
+    /// Pure so the golden-flow pin is unit-testable without mutating
+    /// the test process's global environment.
+    static func physicalRAMBytes(environment: [String: String]) -> UInt64 {
+        if let override = environment["RAPID_HARDWARE_RAM_GB"],
+           let gb = Double(override), gb > 0 {
+            return UInt64((gb * Double(1 << 30)).rounded())
+        }
+        return sysctlUInt64("hw.memsize") ?? 0
     }
 
     // MARK: - Display helpers
