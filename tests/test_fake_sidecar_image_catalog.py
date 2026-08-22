@@ -103,7 +103,9 @@ def _split_on_multi_space(line: str) -> list[str]:
     return [field.strip() for field in result]
 
 
-def run_fake(subcommand: str, *args: str, settings: dict[str, str] | None = None) -> str:
+def run_fake(
+    subcommand: str, *args: str, settings: dict[str, str] | None = None
+) -> str:
     env = os.environ.copy()
     env.update(settings or {})
     return subprocess.run(
@@ -263,7 +265,9 @@ def test_vision_fixture_uses_one_repo_across_models_ls_and_info():
     """A repo mismatch makes the cached vision model render as Download."""
     settings = {"FAKE_VISION_CHAT": "1"}
     catalog = json.loads(run_fake("models", "--json", settings=settings))
-    vision = next(item for item in catalog["text"] if item["alias"] == "qwen3-vl-2b-4bit")
+    vision = next(
+        item for item in catalog["text"] if item["alias"] == "qwen3-vl-2b-4bit"
+    )
     alias, repo = vision["alias"], vision["hf_path"]
 
     cached_rows = [
