@@ -159,6 +159,38 @@ raise peak MLX memory by 3.3x. Issue #2165's adaptive chunk policy therefore
 must be architecture-specific; dense full-attention models still require their
 own sweep and may behave differently.
 
+### Crossover for Gemma 4 26B-A4B and Qwen3.8-27B
+
+The controlled MLX-version crossover was extended to the two other large
+hybrid/GDN models measured in this campaign. The method is identical to the
+Qwen3.5-4B crossover: the same `mlx_lm` 0.31.3 implementation and the same
+checkpoint, only `mlx`/`mlx-metal` changes from 0.31.2 to 0.32.1. Both
+environments pin mlx-lm 0.31.3, transformers 5.15.1, numpy 2.4.6, and
+tokenizers 0.22.2; the evaluated stacks differ only in the MLX runtime. Each
+cell is the median of three samples with a fresh prompt cache and the default
+2,048-token prefill step. Exact 1,024- and 4,096-token prompts.
+
+| Model | Context | MLX 0.31.2 | MLX 0.32.1 | Peak memory (both) | Gain |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Gemma4-26B-A4B | 1,024 | 294.4 | 394.9 | 15.05 GB | +34.1% |
+| Gemma4-26B-A4B | 4,096 | 288.3 | 379.3 | 15.96 GB | +31.6% |
+| Qwen3.8-27B | 1,024 | 49.9 | 61.8 | 17.02 GB | +23.8% |
+| Qwen3.8-27B | 4,096 | 49.8 | 61.6 | 18.55 GB | +23.7% |
+
+Units are prompt tokens per second. The runtime upgrade materially improves
+prefill on both models with essentially unchanged peak MLX memory. The Gemma row
+is the largest prefill gain measured so far in this campaign (+31--34%);
+Qwen3.8-27B's +24% gain is in line with the Qwen3.5-4B crossover (+22%). These
+results confirm that the MLX 0.32.1 prefill benefit is not specific to small
+Qwen checkpoints and broadens the controlled evidence across the lightweight
+activation (A4B) and MTP-carrying Qwen3.8 families.
+
+Qwen3.8-27B here is the MTP-carrying `rapid-mlx/Qwen3.8-27B-4bit-MTP-MLX`
+checkpoint; `bench_prefill.py` generates a single token, so this measures the
+prompt/cache path under the plain autoregressive mlx-lm implementation, not MTP
+draft acceptance. Its prefill peak memory of 18.55 GB at 4K stays within the
+32 GB Mac mini budget without swap.
+
 ## Shipping recommendation
 
 Ship the runtime improvement with `mlx>=0.32.1,<0.33` while retaining the
@@ -245,6 +277,10 @@ Raw JSON remains outside Git under `~/mac-model-matrix/results` on the mini and
 | `qwen35-4b-prefill-main-16k-step4096.json` | `35579aabfd32b75d067f761d73d99b9275173b9b02b23c29122abe72fc3b9f13` |
 | `qwen35-4b-prefill-main-16k-step8192.json` | `01c1b812138d24b7f439bd4d2fcdf0062afd4bd37c519b69b78b451a2dbbbe06` |
 | `qwen35-4b-prefill-main-16k-step16384.json` | `bbbc65863cd192fd5d6174a183bed4b9bb3613a3f0fc0a8d6ff676aefc3b5a80` |
+| `qwen38-27b-prefill-mlx0312-r1.json` | `8194339f25b82756cd1c7aa772d37e9aa59385c319cea8b030531a383703833e` |
+| `qwen38-27b-prefill-mlx032-r1.json` | `4e383bf60a797e6e1cb03531e3573782136f9ef11c58702caecce7e870e055b7` |
+| `gemma4-26b-prefill-mlx0312-r1.json` | `98e7bf7c80ee5ab8c1ab64e3ee4b6f7ec4542895849f8485226bc57cb8fda8b8` |
+| `gemma4-26b-prefill-mlx032-r1.json` | `943217db81e6cd89fa5c2880582b7693b423da3574b0bdf63a4dfeba1883fdb2` |
 
 ## Limitations
 
