@@ -101,6 +101,27 @@ An earlier short-prompt M3 Ultra A/B failed to expose the version effect; those
 14--33-token measurements were dominated by fixed overhead and are superseded
 by the controlled exact-length result above.
 
+### mlx-lm release versus upstream main
+
+`mlx-lm` 0.31.3 is the latest PyPI release, so the production stack was already
+using the newest released mlx-lm. A separate Studio coherence probe compared
+that release with official upstream main at commit
+`dfb5da1d61f87679b0bc060c0794551e8db0d243`, whose package version is the
+unreleased 0.32.0. Both used MLX/Metal 0.32.1 and the same cached
+`mlx-community/Qwen3.6-35B-A3B-8bit` checkpoint.
+
+| Stack | Decode median | Prompt median | Cached load | Exact versus 0.31.3 |
+| --- | ---: | ---: | ---: | ---: |
+| mlx-lm 0.31.3 + MLX 0.32.1 | 88.35 | 277.43 | 7.53 s | reference |
+| mlx-lm main (`dfb5da1`) + MLX 0.32.1 | **88.73** | **300.11** | **2.79 s** | 8/8 prompts |
+
+Each prompt generated 64 deterministic tokens. Main was token-identical on all
+eight prompts, essentially tied on decode, 8.2% faster on prompt processing,
+and materially faster to load. This is positive evidence for testing the next
+mlx-lm release as the upgrade target, not proof that every Qwen3.6 checkpoint is
+fixed: upstream issue #1197 targets VLM-MTP checkpoint weight layouts and
+remains open. The full-family sweep must include that exact failing layout.
+
 ## Versions and checkpoints
 
 | Engine | Version | MLX stack |
@@ -150,6 +171,8 @@ Raw JSON remains outside Git under `~/mac-model-matrix/results` on the mini and
 | `qwen35-4b-prefill-rapid-r1.json` | `8e3869a4eb3a2e78f2fb3ae471586d7923b3066d24a6dbf8ebd482d4d750bffa` |
 | `qwen35-4b-prefill-mlxvlm-r1.json` | `8dadbfc1350dbc4d91b326b4853784ffc2e17dc89bf2d3a5978309059f1f2d00` |
 | `qwen35-4b-prefill-mlxlm-mlx032-r1.json` | `6aab6f33389269dbda14839c72e6698831dc9c92c151213c4e38f14fd3eb8c6b` |
+| `qwen36-35b-mlxlm0313-mlx032-coherence.json` | `ce47d11810815c0860f8b4db6c40720016a138544daeef7c3043693887ee24ac` |
+| `qwen36-35b-mlxlm-main-mlx032-coherence.json` | `908db76bb97967e2095f0493c2caebe58c23b9db5bdce09fd941cb2b6319f82a` |
 
 ## Limitations
 

@@ -26,6 +26,13 @@
     improved 1K/4K prefill by 22.3% (326.9/324.6 to 399.9/397.1 tok/s), closing
     the mlx-vlm gap. Shipping this requires the #1248 full-family coherence gate
     and Atlas approval because the dependency ceiling is deliberate.
+  - PyPI's latest mlx-lm remains 0.31.3. Official upstream main at `dfb5da1`
+    reports version 0.32.0 and removes MTP-presence as a sufficient reason to
+    shift Qwen3.5/3.6 RMSNorm weights. On Studio with Qwen3.6-35B-A3B-8bit and
+    MLX 0.32.1, main was exact on 8/8 64-token prompts versus 0.31.3, with
+    300.1 vs 277.4 prompt tok/s and 2.79 vs 7.53 seconds cached load. Upstream
+    VLM-MTP issue #1197 is still open, so its exact checkpoint layout remains a
+    required coherence case.
   - Existing unarchived Qwen3.6-35B experiments under `~/qwen38-perf` suggest
     Rapid AR around 91 tok/s, mlx-vlm AR around 83 tok/s, and Rapid MTP up to
     120.9 tok/s on one coding prompt. Re-run with the common harness before
@@ -38,7 +45,8 @@
   preflight data must not be published. Only about 137 GiB was available on
   the Studio system volume, so uncached checkpoints need staged downloads or
   explicit cache cleanup.
-- Next action: preserve the exact-length prefill artifacts, ask Atlas to own the
-  compatibility-sensitive MLX 0.32 move, and run the full-family output-
-  coherence sweep required by #1248 before changing `pyproject.toml`. Continue
-  the remaining model matrix independently of that dependency event.
+- Next action: ask Atlas to own the compatibility-sensitive MLX 0.32 / mlx-lm
+  next-release move, reproduce upstream issue #1197 with its exact VLM-MTP
+  checkpoint layout, then run the full-family output-coherence sweep required
+  by #1248 before changing `pyproject.toml`. Continue the remaining model matrix
+  independently of that dependency event.
