@@ -73,3 +73,22 @@ def test_stream_request_rejects_missing_server_usage(monkeypatch):
 
     with pytest.raises(RuntimeError, match="server usage metadata"):
         bench.stream_request(client, "http://rapid/v1", "model", [], 1)
+
+
+def test_stream_request_accepts_omitted_zero_cache_details(monkeypatch):
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.iter_lines.return_value = [
+        'data: {"choices":[{"delta":{"content":"done"}}]}',
+        'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1}}',
+        "data: [DONE]",
+    ]
+    client = MagicMock()
+    client.stream.return_value = response
+    monkeypatch.setattr(
+        bench.time, "perf_counter", MagicMock(side_effect=[1.0, 1.5, 2.0])
+    )
+
+    result = bench.stream_request(client, "http://rapid/v1", "model", [], 1)
+
+    assert result["cached_tokens"] == 0

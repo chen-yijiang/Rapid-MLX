@@ -153,10 +153,11 @@ def stream_request(
         raise RuntimeError(
             "stream completed without a visible content, reasoning, or tool delta"
         )
-    details = usage.get("prompt_tokens_details") or {}
+    details = usage.get("prompt_tokens_details")
+    cached_tokens = 0 if details is None else details.get("cached_tokens")
     required_usage = {
         "prompt_tokens": usage.get("prompt_tokens"),
-        "cached_tokens": details.get("cached_tokens"),
+        "cached_tokens": cached_tokens,
         "completion_tokens": usage.get("completion_tokens"),
     }
     invalid_usage = [
