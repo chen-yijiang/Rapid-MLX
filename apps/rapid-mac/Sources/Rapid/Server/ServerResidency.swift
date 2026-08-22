@@ -158,6 +158,7 @@ struct ModelResidencySnapshot: Codable, Sendable, Equatable {
 enum ResidentModelLoadResult: Sendable, Equatable {
     case loaded(ResidentModelStatus)
     case unsupported
+    case busy(String)
     case rejected(String)
 }
 
@@ -270,6 +271,10 @@ struct ServerResidencyClient {
                 return .unsupported
             }
             let detail = (try? JSONDecoder().decode(ErrorEnvelope.self, from: data))?.detail
+            if http.statusCode == 409, let detail,
+               detail.localizedCaseInsensitiveContains("active request") {
+                return .busy(detail)
+            }
             return .rejected(detail ?? "The model could not be kept resident (HTTP \(http.statusCode)).")
         } catch {
             return .rejected("The model server could not load another resident model.")

@@ -251,7 +251,7 @@ struct ModelResidencyTests {
         #expect(server.state == .stopped)
     }
 
-    @Test("Explicit stop preempts a confirmed resident load")
+    @Test("Explicit stop preempts an in-flight resident load")
     func stopPreemptsResidentLoad() async throws {
         SlowResidentLoadProtocol.loadStarted = false
         let server = makeSwitchServer(protocolClass: SlowResidentLoadProtocol.self)
@@ -261,11 +261,6 @@ struct ModelResidencyTests {
                 replacementGroup: .assistant
             )
         }
-        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        let warning = try #require(server.pendingActiveRequestSwitch)
-        server.confirmActiveRequestSwitch(warning)
         for _ in 0..<100 where !SlowResidentLoadProtocol.loadStarted {
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -277,6 +272,31 @@ struct ModelResidencyTests {
         #expect(server.state == .stopped)
         #expect(await switchTask.value == .cancelled)
         #expect(server.state == .stopped)
+    }
+
+    @Test("Backend busy replacement falls back after explicit confirmation")
+    func backendBusyFallsBackAfterConfirmation() async throws {
+        BusyResidentLoadProtocol.fetchCount = 0
+        BusyResidentLoadProtocol.loadAttempted = false
+        let server = makeSwitchServer(protocolClass: BusyResidentLoadProtocol.self)
+        let switchTask = Task { @MainActor in
+            await server.ensureServingOutcome(
+                alias: "target", hfPath: nil, estimatedMemoryGB: nil,
+                replacementGroup: .assistant
+            )
+        }
+        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let warning = try #require(server.pendingActiveRequestSwitch)
+        #expect(BusyResidentLoadProtocol.loadAttempted)
+        #expect(warning.activeRequests == 1)
+        server.confirmActiveRequestSwitch(warning)
+
+        // No binary is installed in the harness, so process fallback reaches
+        // its normal cold-start failure after replacing the old child.
+        #expect(await switchTask.value == .failed)
+        #expect(server.pendingActiveRequestSwitch == nil)
     }
 
     @Test("Speculative restart cancellation preserves the active server")
@@ -615,7 +635,7 @@ private final class OverlappingResidencyProtocol: ResidencySnapshotProtocol, @un
 
 private final class SlowResidentLoadProtocol: ResidencySnapshotProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var loadStarted = false
-    override class var activeRequests: Int { 1 }
+    override class var activeRequests: Int { 0 }
 
     override func startLoading() {
         guard request.httpMethod == "POST" else {
@@ -627,6 +647,31 @@ private final class SlowResidentLoadProtocol: ResidencySnapshotProtocol, @unchec
         let payload = #"{"id":"target","model_path":"target","aliases":[],"modality":"text","state":"resident","pinned":true,"primary":true,"active_requests":0,"estimated_bytes":1,"measured_bytes":null,"idle_seconds":0}"#.data(using: .utf8)!
         let response = HTTPURLResponse(
             url: request.url!, statusCode: 200,
+            httpVersion: "HTTP/1.1", headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: payload)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+private final class BusyResidentLoadProtocol: ResidencySnapshotProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var fetchCount = 0
+    nonisolated(unsafe) static var loadAttempted = false
+    override class var activeRequests: Int {
+        BusyResidentLoadProtocol.fetchCount == 1 ? 0 : 1
+    }
+
+    override func startLoading() {
+        guard request.httpMethod == "POST" else {
+            Self.fetchCount += 1
+            super.startLoading()
+            return
+        }
+        Self.loadAttempted = true
+        let payload = #"{"detail":"model is serving an active request"}"#.data(using: .utf8)!
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 409,
             httpVersion: "HTTP/1.1", headerFields: nil
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

@@ -19,6 +19,12 @@ enum EnsureServingOutcome: Equatable {
     var isReady: Bool { self == .ready }
 }
 
+private enum ActiveRequestSwitchDecision {
+    case proceed
+    case confirmed
+    case cancelled
+}
+
 struct ActiveRequestSwitchConfirmationQueue {
     private struct Pending {
         let warning: ActiveRequestSwitchWarning
@@ -1092,22 +1098,30 @@ final class ServerManager {
         // surface as a hard failure instead of the process swap they actually
         // need — audio runs as its own ``serve <alias>`` (audio-mode) process.
         let readyWithChild: Bool = { if case .ready = state, child != nil { return true }; return false }()
-        if Self.residencyLoadApplies(
+        let residencyApplies = Self.residencyLoadApplies(
             residencyEligible: residencyEligible && !speculativeRequested
                 && !speculativeSettingChanged && !requiresImageLaneRestart,
             readyWithChild: readyWithChild
-        ) {
+        )
+        var processReplacementWasConfirmed = false
+        if residencyApplies, let replacementGroup {
             // An explicit assistant replacement evicts only text/VLM engines.
             // A bare resident admission does not evict siblings and therefore
             // must not warn merely because an unrelated engine is busy.
-            if let replacementGroup,
-               await confirmActiveRequestSwitch(
-                   to: trimmed,
-                   activeRequests: { $0.activeRequestCount(replacingGroup: replacementGroup) }
-               ) == false {
+            switch await confirmActiveRequestSwitch(
+                to: trimmed,
+                activeRequests: { $0.activeRequestCount(replacingGroup: replacementGroup) }
+            ) {
+            case .proceed:
+                break
+            case .confirmed:
+                processReplacementWasConfirmed = true
+            case .cancelled:
                 return .cancelled
             }
             guard ownsModelSwitchOperation(operationID) else { return .cancelled }
+        }
+        if residencyApplies, !processReplacementWasConfirmed {
             // Publish before crossing the network await so SwiftUI replaces
             // the still-pressable CTA with an honest working state in the
             // same run-loop turn. Count rather than coalescing here: callers
@@ -1163,6 +1177,22 @@ final class ServerManager {
                 return .ready
             case .unsupported:
                 break
+            case .busy:
+                // A request acquired a backend lease after our zero snapshot.
+                // The atomic resident replacement correctly refused to evict
+                // it; ask for interruption consent, then use process fallback.
+                switch await confirmActiveRequestSwitch(
+                    to: trimmed,
+                    confirmWhenIdle: true,
+                    activeRequests: { $0.activeRequestCount }
+                ) {
+                case .confirmed:
+                    processReplacementWasConfirmed = true
+                case .cancelled:
+                    return .cancelled
+                case .proceed:
+                    break
+                }
             case .rejected(let message):
                 appendLogLines(["Resident model load declined: \(message)"])
                 // Mirror the same redaction the log pane applies so a
@@ -1193,13 +1223,17 @@ final class ServerManager {
         }
         // Cold/modal starts and the legacy residency fallback replace the
         // process, so every resident engine is in the affected set.
-        if child != nil,
-           await confirmActiveRequestSwitch(
-               to: trimmed,
-               confirmWhenIdle: true,
-               activeRequests: { $0.activeRequestCount }
-           ) == false {
-            return .cancelled
+        if child != nil, !processReplacementWasConfirmed {
+            switch await confirmActiveRequestSwitch(
+                to: trimmed,
+                confirmWhenIdle: true,
+                activeRequests: { $0.activeRequestCount }
+            ) {
+            case .confirmed, .proceed:
+                break
+            case .cancelled:
+                return .cancelled
+            }
         }
         guard ownsModelSwitchOperation(operationID) else { return .cancelled }
         // Tear down whatever's there (a DIFFERENT alias, ready or
@@ -1256,13 +1290,17 @@ final class ServerManager {
         guard !trimmed.isEmpty else { return .failed }
         guard let operationID = await acquireModelSwitchOperation() else { return .cancelled }
         defer { releaseModelSwitchOperation(operationID) }
-        if child != nil,
-           await confirmActiveRequestSwitch(
+        if child != nil {
+            switch await confirmActiveRequestSwitch(
                to: trimmed,
                confirmWhenIdle: true,
                activeRequests: { $0.activeRequestCount }
-           ) == false {
-            return .cancelled
+            ) {
+            case .confirmed, .proceed:
+                break
+            case .cancelled:
+                return .cancelled
+            }
         }
         guard ownsModelSwitchOperation(operationID) else { return .cancelled }
         await stop(preservingLastServedAlias: false)
@@ -1281,10 +1319,10 @@ final class ServerManager {
         to targetAlias: String,
         confirmWhenIdle: Bool = false,
         activeRequests count: (ModelResidencySnapshot) -> Int
-    ) async -> Bool {
+    ) async -> ActiveRequestSwitchDecision {
         let residencyIsCurrent = await refreshResidency(timeoutInterval: 2)
         let activeRequests = residencyIsCurrent ? count(residency) : nil
-        if activeRequests == 0, !confirmWhenIdle { return true }
+        if activeRequests == 0, !confirmWhenIdle { return .proceed }
         let requestID = UUID()
         let warning = ActiveRequestSwitchWarning(
             id: UUID(),
@@ -1296,6 +1334,8 @@ final class ServerManager {
         )
         activeRequestSwitchConfirmations.enqueue(warning, requestID: requestID)
         return await awaitActiveRequestSwitchDecision(for: requestID) == true
+            ? .confirmed
+            : .cancelled
     }
 
     /// Serialize the full check → confirmation → replacement transaction.
