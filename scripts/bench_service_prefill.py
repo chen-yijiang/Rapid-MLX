@@ -154,12 +154,25 @@ def stream_request(
             "stream completed without a visible content, reasoning, or tool delta"
         )
     details = usage.get("prompt_tokens_details") or {}
+    required_usage = {
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "cached_tokens": details.get("cached_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+    }
+    invalid_usage = [
+        name for name, value in required_usage.items() if not isinstance(value, int)
+    ]
+    if invalid_usage:
+        raise RuntimeError(
+            "stream completed without valid server usage metadata: "
+            + ", ".join(invalid_usage)
+        )
     return {
         "ttft_ms": round((first_visible - started) * 1000, 2),
         "total_ms": round((finished - started) * 1000, 2),
-        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-        "cached_tokens": int(details.get("cached_tokens") or 0),
-        "completion_tokens": int(usage.get("completion_tokens") or 0),
+        "prompt_tokens": required_usage["prompt_tokens"],
+        "cached_tokens": required_usage["cached_tokens"],
+        "completion_tokens": required_usage["completion_tokens"],
         "visible_chunks": visible_chunks,
         "finish_reason": finish_reason,
     }

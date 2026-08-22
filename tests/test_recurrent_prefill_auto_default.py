@@ -31,6 +31,16 @@ def test_dense_and_sliding_attention_are_not_recurrent():
     assert not cli._config_declares_linear_attention(None)
 
 
+def test_mamba_and_recurrent_checkpoint_markers_are_detected():
+    assert cli._config_declares_linear_attention(
+        {"layer_types": ["mamba", "full_attention"]}
+    )
+    assert cli._config_declares_linear_attention(
+        {"text_config": {"model_type": "recurrent_gemma"}}
+    )
+    assert cli._config_declares_linear_attention({"model_type": "qwen3_next"})
+
+
 def test_recurrent_alias_auto_defaults_to_512(monkeypatch):
     monkeypatch.setattr(
         "vllm_mlx.model_aliases.resolve_profile",

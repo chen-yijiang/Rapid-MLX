@@ -2607,16 +2607,33 @@ def _resolve_checkpoint_config(model_name: str, profile) -> dict | None:
 
 
 def _config_declares_linear_attention(config: dict | None) -> bool:
-    """Whether the language backbone declares recurrent/linear attention."""
+    """Whether the language backbone declares recurrent/linear attention.
+
+    Keep the checkpoint signals aligned with ``mllm_backbone_is_hybrid``: this
+    variant accepts an already-resolved config so aliases and bare local paths
+    can share the serve prefill policy without another metadata lookup.
+    """
     if not isinstance(config, dict):
         return False
 
     text_config = config.get("text_config")
     language_config = text_config if isinstance(text_config, dict) else config
     layer_types = language_config.get("layer_types") or []
-    return any(
-        isinstance(layer_type, str) and "linear" in layer_type.lower()
+    if any(
+        isinstance(layer_type, str)
+        and any(
+            marker in layer_type.lower() for marker in ("linear", "mamba", "recurrent")
+        )
         for layer_type in layer_types
+    ):
+        return True
+    return any(
+        isinstance(model_type, str)
+        and any(
+            marker in model_type.lower()
+            for marker in ("mamba", "recurrent", "qwen3_next")
+        )
+        for model_type in (language_config.get("model_type"), config.get("model_type"))
     )
 
 

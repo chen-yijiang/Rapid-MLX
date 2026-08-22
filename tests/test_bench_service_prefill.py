@@ -56,3 +56,20 @@ def test_stream_request_rejects_stream_without_visible_delta(monkeypatch):
 
     with pytest.raises(RuntimeError, match="without a visible"):
         bench.stream_request(client, "http://rapid/v1", "model", [], 1)
+
+
+def test_stream_request_rejects_missing_server_usage(monkeypatch):
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.iter_lines.return_value = [
+        'data: {"choices":[{"delta":{"content":"done"}}]}',
+        "data: [DONE]",
+    ]
+    client = MagicMock()
+    client.stream.return_value = response
+    monkeypatch.setattr(
+        bench.time, "perf_counter", MagicMock(side_effect=[1.0, 1.5, 2.0])
+    )
+
+    with pytest.raises(RuntimeError, match="server usage metadata"):
+        bench.stream_request(client, "http://rapid/v1", "model", [], 1)

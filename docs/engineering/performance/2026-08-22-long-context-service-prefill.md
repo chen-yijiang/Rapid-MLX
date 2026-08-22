@@ -68,8 +68,10 @@ role frame, records server-reported prompt/cached tokens, tests exact and
 partial prefix reuse, and submits a short request behind an active long prefill.
 It polls `/v1/status` until the long request is server-confirmed as running
 before it submits the short request, rejects streams with no visible delta, and
-stamps the result with a methodology hash. Use at least three repeats for
-publication claims; the one-repeat runs here are scoped engineering A/Bs.
+rejects streams that omit prompt/completion/cached-token usage rather than
+silently treating missing counters as zero. It stamps the result with a
+methodology hash. Use at least three repeats for publication claims; the
+one-repeat runs here are scoped engineering A/Bs.
 
 The recorded A/B artifacts predate the enforced status poll; their server logs
 show the long request scheduled before the short request. The committed harness
