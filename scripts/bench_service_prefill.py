@@ -149,9 +149,13 @@ def stream_request(
             if choice.get("finish_reason") is not None:
                 finish_reason = choice["finish_reason"]
     finished = time.perf_counter()
+    if first_visible is None:
+        raise RuntimeError(
+            "stream completed without a visible content, reasoning, or tool delta"
+        )
     details = usage.get("prompt_tokens_details") or {}
     return {
-        "ttft_ms": round(((first_visible or finished) - started) * 1000, 2),
+        "ttft_ms": round((first_visible - started) * 1000, 2),
         "total_ms": round((finished - started) * 1000, 2),
         "prompt_tokens": int(usage.get("prompt_tokens") or 0),
         "cached_tokens": int(details.get("cached_tokens") or 0),
@@ -171,6 +175,26 @@ def get_status(client: httpx.Client, root_url: str) -> dict[str, Any]:
     response = client.get(f"{root_url}/v1/status")
     response.raise_for_status()
     return response.json()
+
+
+def wait_for_running_request(
+    client: httpx.Client,
+    root_url: str,
+    *,
+    timeout_seconds: float = 30.0,
+    poll_seconds: float = 0.01,
+) -> dict[str, Any]:
+    """Wait until the service confirms that a request is actively scheduled."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        status = get_status(client, root_url)
+        if int(status.get("num_running") or 0) > 0:
+            return status
+        time.sleep(poll_seconds)
+    raise TimeoutError(
+        f"no running request observed at {root_url}/v1/status "
+        f"within {timeout_seconds:.1f}s"
+    )
 
 
 def main() -> int:
@@ -243,6 +267,7 @@ def main() -> int:
                     long_messages,
                     args.max_tokens,
                 )
+                wait_for_running_request(client, root_url)
                 time.sleep(args.contention_delay_ms / 1000)
                 short_future = executor.submit(
                     stream_request,

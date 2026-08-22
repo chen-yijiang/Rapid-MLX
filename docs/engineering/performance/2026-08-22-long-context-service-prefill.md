@@ -66,8 +66,15 @@ python bench_service_prefill.py \
 times the first visible content/reasoning/tool delta rather than the initial SSE
 role frame, records server-reported prompt/cached tokens, tests exact and
 partial prefix reuse, and submits a short request behind an active long prefill.
-It also stamps the result with a methodology hash. Use at least three repeats
-for publication claims; the one-repeat runs here are scoped engineering A/Bs.
+It polls `/v1/status` until the long request is server-confirmed as running
+before it submits the short request, rejects streams with no visible delta, and
+stamps the result with a methodology hash. Use at least three repeats for
+publication claims; the one-repeat runs here are scoped engineering A/Bs.
+
+The recorded A/B artifacts predate the enforced status poll; their server logs
+show the long request scheduled before the short request. The committed harness
+turns that observed ordering into a required precondition for future runs, so
+its methodology hash intentionally differs from those artifacts.
 
 ## Long-context scaling
 
