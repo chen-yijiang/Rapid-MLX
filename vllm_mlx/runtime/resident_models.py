@@ -494,6 +494,7 @@ class ResidentModelManager:
         image_mode: str | None = None,
         performance: ResidentPerformanceConfig | None = None,
         reload_if_changed: bool = False,
+        replace_mode: str = "reject",
     ) -> ResidencyRecord:
         model_name = model_name.strip()
         if not model_name:
@@ -511,7 +512,7 @@ class ResidentModelManager:
                     record.pinned = True
                 group = _effective_replace_group(record.entry, replace_group)
                 if group is not None:
-                    await self._replace_group_locked(record, group)
+                    await self._replace_group_locked(record, group, replace_mode)
                 return record
 
             await self._evict_for_locked(estimate, exclude={model_name})
@@ -534,20 +535,41 @@ class ResidentModelManager:
                 pinned=pin,
                 performance=performance,
             )
-            self.registry.add(entry)
-            self._index_record(record)
-            self.loads_total += 1
-
+            group = _effective_replace_group(record.entry, replace_group)
+            candidates: list[ResidencyRecord] = []
+            paused_engines: list[object] = []
             try:
-                await self._evict_for_locked(0, exclude={record.model_id})
-                group = _effective_replace_group(record.entry, replace_group)
                 if group is not None:
-                    await self._replace_group_locked(record, group)
+                    candidates, paused_engines = await self._quiesce_group_locked(
+                        record, group, replace_mode
+                    )
+                # Publish only after every replaced engine is quiescent. This
+                # prevents an explicit request for the new id from racing the
+                # replacement transaction while the old engine is draining.
+                self.registry.add(entry)
+                self._index_record(record)
+                self.loads_total += 1
+                await self._evict_for_locked(0, exclude={record.model_id})
+                if group is not None:
+                    await self._commit_group_replacement_locked(
+                        record, group, candidates
+                    )
             except BaseException:
                 # Once the loader returns, this manager owns the engine.  A
                 # later admission/replacement failure must not leave a model
                 # resident even though the control-plane request was rejected.
-                await self._evict_locked(record, reason="load_rollback", count=False)
+                if record.model_id in self._records:
+                    await self._evict_locked(
+                        record, reason="load_rollback", count=False
+                    )
+                else:
+                    stop = getattr(record.entry.engine, "stop", None)
+                    if callable(stop):
+                        result = stop()
+                        if asyncio.iscoroutine(result):
+                            await result
+                    _release_allocator_cache()
+                await self._resume_engines(paused_engines)
                 raise
             return record
 
@@ -633,7 +655,9 @@ class ResidentModelManager:
             self._on_primary_changed(entry)
         return replacement
 
-    async def _replace_group_locked(self, target: ResidencyRecord, group: str) -> None:
+    async def _replace_group_locked(
+        self, target: ResidencyRecord, group: str, replace_mode: str = "reject"
+    ) -> None:
         """Make ``target`` the sole unpinned model in a lifecycle group.
 
         The desktop uses the ``assistant`` group for its chat picker: changing
@@ -642,6 +666,20 @@ class ResidentModelManager:
         primary role to the replacement before the old engine is stopped, so
         legacy health/cache routes never retain a reference to unloaded weights.
         """
+
+        candidates, paused_engines = await self._quiesce_group_locked(
+            target, group, replace_mode
+        )
+        try:
+            await self._commit_group_replacement_locked(target, group, candidates)
+        except BaseException:
+            await self._resume_engines(paused_engines)
+            raise
+
+    async def _quiesce_group_locked(
+        self, target: ResidencyRecord, group: str, replace_mode: str
+    ) -> tuple[list[ResidencyRecord], list[object]]:
+        """Atomically stop admission and drain engines replaced by target."""
 
         if group != _replacement_group(target.entry):
             raise ResidentModelError(
@@ -654,13 +692,54 @@ class ResidentModelManager:
             if record.model_id != target.model_id
             and _replacement_group(record.entry) == group
         ]
+        if replace_mode not in {"reject", "wait", "abort"}:
+            raise ResidentModelError(f"unsupported replacement mode {replace_mode!r}")
         for record in candidates:
-            if record.active_requests or not _engine_is_idle(record.entry.engine):
-                raise ResidentModelBusyError("model is serving an active request")
             if record.pinned and not record.primary:
                 raise ResidentModelError(
                     f"pinned model {record.model_id!r} cannot be replaced"
                 )
+
+        paused_engines: list[object] = []
+        try:
+            for record in candidates:
+                if record.active_requests:
+                    raise ResidentModelBusyError("model is serving an active request")
+                pause = getattr(record.entry.engine, "pause_generation", None)
+                if callable(pause):
+                    try:
+                        await pause(
+                            "wait" if replace_mode == "reject" else replace_mode,
+                            timeout=0 if replace_mode == "reject" else None,
+                        )
+                    except TimeoutError as exc:
+                        resume = getattr(record.entry.engine, "resume_generation", None)
+                        if callable(resume):
+                            await resume()
+                        raise ResidentModelBusyError(
+                            "model is serving an active request"
+                        ) from exc
+                    paused_engines.append(record.entry.engine)
+                elif not _engine_is_idle(record.entry.engine):
+                    raise ResidentModelBusyError("model is serving an active request")
+        except BaseException:
+            await self._resume_engines(paused_engines)
+            raise
+        return candidates, paused_engines
+
+    async def _resume_engines(self, engines: list[object]) -> None:
+        for engine in reversed(engines):
+            resume = getattr(engine, "resume_generation", None)
+            if callable(resume):
+                await resume()
+
+    async def _commit_group_replacement_locked(
+        self,
+        target: ResidencyRecord,
+        group: str,
+        candidates: list[ResidencyRecord],
+    ) -> None:
+        """Publish target as primary, then stop already-quiesced engines."""
 
         old_primary = next((record for record in candidates if record.primary), None)
         if old_primary is not None:
@@ -744,6 +823,19 @@ class ResidentModelManager:
         for record in sorted(self._records.values(), key=lambda item: item.loaded_at):
             engine = record.entry.engine
             resident = not hasattr(engine, "is_resident") or bool(engine.is_resident)
+            lifecycle = (
+                engine.lifecycle_status()
+                if callable(getattr(engine, "lifecycle_status", None))
+                else None
+            )
+            active_requests = record.active_requests
+            if lifecycle is not None:
+                active_requests = max(
+                    active_requests,
+                    int(lifecycle.get("active_requests", 0) or 0),
+                    int(lifecycle.get("running_requests", 0) or 0),
+                    int(lifecycle.get("queued_requests", 0) or 0),
+                )
             models.append(
                 {
                     "id": record.model_id,
@@ -753,7 +845,8 @@ class ResidentModelManager:
                     "state": record.state if resident else "registered",
                     "pinned": record.pinned,
                     "primary": record.primary,
-                    "active_requests": record.active_requests,
+                    "active_requests": active_requests,
+                    "lifecycle": lifecycle,
                     "estimated_bytes": record.estimated_bytes,
                     "measured_bytes": record.measured_bytes or None,
                     "idle_seconds": max(0.0, now - record.last_used_at),

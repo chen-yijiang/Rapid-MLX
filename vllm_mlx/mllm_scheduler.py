@@ -302,6 +302,7 @@ class MLLMScheduler:
         self.waiting: deque[MLLMRequest] = deque()  # Waiting queue (FCFS)
         self.running: dict[str, MLLMRequest] = {}  # Running requests by ID
         self.requests: dict[str, MLLMRequest] = {}  # All requests by ID
+        self._generation_paused = False
         self.finished_req_ids: set[str] = set()  # Recently finished
 
         # Mapping between our request IDs and BatchGenerator UIDs
@@ -523,6 +524,12 @@ class MLLMScheduler:
         Returns:
             Request ID for tracking
         """
+        if getattr(self, "_generation_paused", False):
+            from .scheduler import BackpressureError
+
+            raise BackpressureError(
+                "generation is paused for an engine lifecycle operation"
+            )
         if request_id is None:
             request_id = str(uuid.uuid4())
 
@@ -610,6 +617,11 @@ class MLLMScheduler:
         )
 
         return request_id
+
+    def set_generation_paused(self, paused: bool) -> None:
+        """Close or reopen scheduler admission for model mutation."""
+
+        self._generation_paused = bool(paused)
 
     def abort_request(self, request_id: str) -> bool:
         """

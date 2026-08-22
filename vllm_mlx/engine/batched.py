@@ -11,6 +11,7 @@ MLLMBatchGenerator. MLLM models only initialise the MLLM scheduler (not the
 LLM engine), so text-only requests must also be routed through it.
 """
 
+import asyncio
 import functools
 import json
 import logging
@@ -877,6 +878,12 @@ class BatchedEngine(BaseEngine):
         # checks; an asyncio lock would only serialise the event loop.
         self._admission_lock = threading.Lock()
         self._admission_reservations = 0
+        # vLLM/SGLang-style scheduler admission state.  Model mutation first
+        # closes this gate, then either drains or aborts work already owned by
+        # the scheduler.  Keeping it on the engine makes request lifetime
+        # independent from the HTTP transport.
+        self._generation_paused = False
+        self._generation_pause_mode: str | None = None
 
     @property
     def model_name(self) -> str:
@@ -959,10 +966,13 @@ class BatchedEngine(BaseEngine):
             else:
                 cap = getattr(scheduler.config, "max_concurrent_requests", None)
 
-        if cap is None or cap <= 0:
-            return
-
         with self._admission_lock:
+            if getattr(self, "_generation_paused", False):
+                raise BackpressureError(
+                    "generation is paused for an engine lifecycle operation"
+                )
+            if cap is None or cap <= 0:
+                return
             if self._admission_reservations >= cap:
                 raise BackpressureError(
                     f"max_concurrent_requests={cap} reached "
@@ -980,6 +990,105 @@ class BatchedEngine(BaseEngine):
         with self._admission_lock:
             if self._admission_reservations > 0:
                 self._admission_reservations -= 1
+
+    def lifecycle_status(self) -> dict[str, object]:
+        """Return scheduler-owned lifecycle state for control-plane clients."""
+
+        with self._admission_lock:
+            paused = getattr(self, "_generation_paused", False)
+            mode = getattr(self, "_generation_pause_mode", None)
+            admitted = getattr(self, "_admission_reservations", 0)
+        stats = self.get_stats()
+        return {
+            "paused": paused,
+            "pause_mode": mode,
+            "active_requests": admitted,
+            "running_requests": int(stats.get("num_running", 0) or 0),
+            "queued_requests": int(stats.get("num_waiting", 0) or 0),
+        }
+
+    def _lifecycle_request_ids(self) -> set[str]:
+        """Snapshot request ids owned by either scheduler implementation."""
+
+        scheduler = self._lifecycle_scheduler()
+        if scheduler is None:
+            return set()
+        ids = set(getattr(scheduler, "requests", {}) or {})
+        ids.update(getattr(scheduler, "running", {}) or {})
+        ids.update(
+            str(request.request_id)
+            for request in (getattr(scheduler, "waiting", ()) or ())
+            if getattr(request, "request_id", None)
+        )
+        return {str(request_id) for request_id in ids}
+
+    def _lifecycle_scheduler(self):
+        scheduler = self._mllm_scheduler
+        if scheduler is None and self._engine is not None:
+            scheduler = getattr(
+                getattr(self._engine, "engine", None), "scheduler", None
+            )
+        return scheduler
+
+    async def pause_generation(
+        self, mode: str = "wait", *, timeout: float | None = None
+    ) -> dict[str, object]:
+        """Close admission and quiesce generation like vLLM/SGLang.
+
+        ``wait`` lets admitted work finish. ``abort`` asks the scheduler to
+        terminate every queued/running request, then waits for its ownership
+        tables and route reservations to drain.
+        """
+
+        if mode not in {"wait", "abort"}:
+            raise ValueError("pause mode must be 'wait' or 'abort'")
+        with self._admission_lock:
+            self._generation_paused = True
+            self._generation_pause_mode = mode
+        scheduler = self._lifecycle_scheduler()
+        set_paused = getattr(scheduler, "set_generation_paused", None)
+        if callable(set_paused):
+            set_paused(True)
+
+        async def _drain() -> dict[str, object]:
+            while True:
+                # An already-reserved HTTP request may reach the scheduler
+                # after the pause edge. Re-scan until both reservations and
+                # scheduler queues are empty so abort mode closes that race.
+                if mode == "abort":
+                    for request_id in self._lifecycle_request_ids():
+                        await self.abort_request(request_id)
+                status = self.lifecycle_status()
+                if (
+                    status["active_requests"] == 0
+                    and status["running_requests"] == 0
+                    and status["queued_requests"] == 0
+                ):
+                    return status
+                await asyncio.sleep(0.01)
+
+        initial = self.lifecycle_status()
+        if (
+            initial["active_requests"] == 0
+            and initial["running_requests"] == 0
+            and initial["queued_requests"] == 0
+        ):
+            return initial
+        if timeout is None:
+            return await _drain()
+        return await asyncio.wait_for(_drain(), timeout=max(0.0, timeout))
+
+    async def resume_generation(self) -> dict[str, object]:
+        """Reopen request admission after a lifecycle operation."""
+
+        with self._admission_lock:
+            self._generation_paused = False
+            self._generation_pause_mode = None
+        scheduler = self._lifecycle_scheduler()
+        set_paused = getattr(scheduler, "set_generation_paused", None)
+        if callable(set_paused):
+            set_paused(False)
+        return self.lifecycle_status()
 
     @property
     def tokenizer(self) -> Any:

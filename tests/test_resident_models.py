@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -54,6 +56,34 @@ class FakeEngine:
 
 class FakeImageEngine(FakeEngine):
     is_image_gen = True
+
+
+class FakeLifecycleEngine(FakeEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pauses = []
+        self.paused = False
+
+    async def pause_generation(self, mode="wait", *, timeout=None):
+        self.pauses.append((mode, timeout))
+        self.paused = True
+        if self.running and timeout == 0:
+            raise TimeoutError
+        self.running = 0
+        return self.lifecycle_status()
+
+    async def resume_generation(self):
+        self.paused = False
+        return self.lifecycle_status()
+
+    def lifecycle_status(self):
+        return {
+            "paused": self.paused,
+            "pause_mode": self.pauses[-1][0] if self.pauses else None,
+            "active_requests": self.running,
+            "running_requests": self.running,
+            "queued_requests": 0,
+        }
 
 
 class Clock:
@@ -313,6 +343,102 @@ async def test_failed_assistant_replacement_rolls_back_newly_loaded_model():
     assert "chat-new" not in registry
     assert loaded["chat-new"].stopped is True
     assert {item["id"] for item in manager.snapshot()["models"]} == {"chat"}
+
+
+@pytest.mark.asyncio
+async def test_assistant_replacement_pauses_engine_before_stopping_it():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+
+    async def loader(name: str, path: str | None, performance=None):
+        return entry(name)
+
+    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    await manager.load("chat-new", replace_group="assistant", replace_mode="wait")
+
+    assert old_engine.pauses == [("wait", None)]
+    assert old_engine.stopped is True
+    assert registry.default_name == "chat-new"
+
+
+@pytest.mark.asyncio
+async def test_replacement_does_not_publish_target_until_old_engine_drains():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    old_engine.running = 1
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    allow_drain = asyncio.Event()
+
+    async def pause_generation(mode="wait", *, timeout=None):
+        old_engine.pauses.append((mode, timeout))
+        old_engine.paused = True
+        await allow_drain.wait()
+        old_engine.running = 0
+        return old_engine.lifecycle_status()
+
+    old_engine.pause_generation = pause_generation
+
+    async def loader(name: str, path: str | None, performance=None):
+        return entry(name)
+
+    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    replacement = asyncio.create_task(
+        manager.load("chat-new", replace_group="assistant", replace_mode="wait")
+    )
+    await asyncio.sleep(0)
+
+    assert "chat-new" not in registry
+    assert registry.default_name == "chat-old"
+
+    allow_drain.set()
+    await replacement
+    assert registry.default_name == "chat-new"
+
+
+@pytest.mark.asyncio
+async def test_rejected_busy_replacement_reopens_engine_admission():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    old_engine.running = 1
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+
+    async def loader(name: str, path: str | None, performance=None):
+        return entry(name)
+
+    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(ResidentModelBusyError, match="active request"):
+        await manager.load("chat-new", replace_group="assistant")
+
+    assert old_engine.pauses == [("wait", 0)]
+    assert old_engine.paused is False
+    assert old_engine.stopped is False
+
+
+def test_residency_status_uses_engine_owned_request_counts():
+    registry = ModelRegistry()
+    engine = FakeLifecycleEngine()
+    engine.running = 2
+    primary = entry("chat", engine)
+    registry.add(primary, is_default=True)
+    manager = ResidentModelManager(
+        registry, lambda *_args: None, memory_reader=lambda: 0
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    model = manager.snapshot()["models"][0]
+
+    assert model["active_requests"] == 2
+    assert model["lifecycle"]["running_requests"] == 2
 
 
 @pytest.mark.asyncio

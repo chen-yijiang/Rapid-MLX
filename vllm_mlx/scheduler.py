@@ -3036,6 +3036,7 @@ class Scheduler:
         self.waiting: deque[Request] = deque()  # Waiting queue (FCFS)
         self.running: dict[str, Request] = {}  # Running requests by ID
         self.requests: dict[str, Request] = {}  # All requests by ID
+        self._generation_paused = False
         self.finished_req_ids: set[str] = set()  # Recently finished
         # Debug aid (#1878): resolved ONCE — an os.environ lookup per
         # step would put dict access on the decode hot path advertised
@@ -5856,6 +5857,10 @@ class Scheduler:
                 above ``config.max_concurrent_requests``. Routes catch
                 this and return 503 with Retry-After.
         """
+        if getattr(self, "_generation_paused", False):
+            raise BackpressureError(
+                "generation is paused for an engine lifecycle operation"
+            )
         if request.request_id in self.requests:
             raise ValueError(f"Request {request.request_id} already exists")
 
@@ -6079,6 +6084,11 @@ class Scheduler:
         logger.debug(
             f"Added request {request.request_id} with {request.num_prompt_tokens} prompt tokens"
         )
+
+    def set_generation_paused(self, paused: bool) -> None:
+        """Close or reopen scheduler admission for model mutation."""
+
+        self._generation_paused = bool(paused)
 
     def abort_request(self, request_id: str) -> bool:
         """
