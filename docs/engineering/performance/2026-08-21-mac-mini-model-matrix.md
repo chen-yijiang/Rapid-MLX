@@ -125,7 +125,30 @@ eight prompts, essentially tied on decode, 8.2% faster on prompt processing,
 and materially faster to load. This is positive evidence for testing the next
 mlx-lm release as the upgrade target, not proof that every Qwen3.6 checkpoint is
 fixed: upstream issue #1197 targets VLM-MTP checkpoint weight layouts and
-remains open. The full-family sweep must include that exact failing layout.
+remains open.
+
+The exact issue #1197 layout was therefore re-run separately on the M3 Ultra
+256 GB Studio at Rapid-MLX commit `6acb5306`, using mlx 0.32.1 and released
+mlx-lm 0.31.3. The checkpoint was
+`mlx-community/Qwen3.6-35B-A3B-8bit` snapshot
+`e06a74e6236a60c8367e1a3214e83d8b61b637b0`: its config contains both a
+`vision_config` and `mtp_num_hidden_layers=1`, its weight index contains all
+333 `vision_tower.*` tensors, and the snapshot includes
+`model-mtp.safetensors`. Rapid was forced through the text lane with
+`--no-mllm --disable-prefix-cache --no-thinking`; the blocking coherence gate
+passed 6/6 (Tokyo, 391, blue, seven, banana, and Paris with no think leak).
+This closes the VLM-plus-MTP checkpoint-layout case for the dependency move;
+it does not claim that upstream issue #1197 itself is resolved.
+
+```bash
+python -m vllm_mlx.cli serve "$SNAPSHOT" --port 8403 \
+  --no-mllm --disable-prefix-cache --no-thinking
+RAPID_MLX_BASE_URL=http://127.0.0.1:8403/v1 \
+  python evals/coherence_gate.py
+```
+
+Here `SNAPSHOT` is the local directory for the pinned Hugging Face snapshot
+named above.
 
 ### Long-context follow-up for issue #2165
 
@@ -214,10 +237,33 @@ families passed all 6/6 golden cases: Qwen3.5 4B, Qwen3.5 35B-A3B, Qwen3.6 27B,
 Gemma4 12B, DeepSeek-R1-Distill 32B, and GPT-OSS 20B. The sweep now disables
 prefix-cache reuse because persisted KV tensors are not keyed by MLX runtime;
 before that isolation fix, a stale DeepSeek cache produced a false 4/6 failure,
-while the cold run and full cold-cache rerun both passed 6/6. The Ultra-only Hy3
-checkpoint is 154.6 GiB and could not be staged on the Studio's 117 GiB free
-system volume, so that toolchain-only row remains an explicit release-owner
-follow-up rather than an implied pass.
+while the cold run and full cold-cache rerun both passed 6/6.
+
+The toolchain-only Hy3 representative was subsequently staged on a 1.8 TiB
+external SSD and run on the M3 Ultra 256 GB Studio with the same candidate and
+`--disable-prefix-cache`. `hy3-preview-4bit` passed all 6/6 blocking cases;
+swap usage after the run was only 13.69 MB. The captured sweep artifact is
+`/Volumes/Extreme SSD/rapid-mlx-validation/hy3-mlx0321-coherence-r1.txt`, with
+SHA-256 `817969d4c78df19594d7c464990fa0b4e16beda3b8346e423161735ab8b9db72`.
+Together with the six ordinary release families, the dependency candidate has
+now passed the complete seven-family toolchain coherence fleet (42/42 cases).
+
+### Additional regression spot checks
+
+Three extra cached families were checked on the M2 Pro 32 GB mini with the PR
+wheel, released mlx-lm 0.31.3, cold prefix caches, and MLX 0.32.1:
+
+| Model | MLX 0.32.1 | MLX 0.31.2 A/B | Regression verdict |
+| --- | ---: | ---: | --- |
+| Qwen3.5-9B 4-bit | 6/6 | — | Pass |
+| LFM2.5-1.2B 4-bit | 5/6 (`17×23` → `4939`) | identical 5/6 | No runtime regression |
+| Nemotron-Labs-Diffusion-3B 4-bit | 5/6 (correct blue answer, extra prose) | identical 5/6 | No runtime regression |
+
+The two non-passing rows are stable model capability/instruction-following
+baselines, not output corruption introduced by MLX 0.32.1. Separately, the
+Qwen3.5-9B AR benchmark was re-run with an explicit `--ar-only` command and
+returned 37.4165 median / 37.4258 pooled tok/s with 8/8 exact prompts, matching
+the recorded 37.42 / 37.43 result.
 
 ## Versions and checkpoints
 

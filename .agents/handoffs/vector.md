@@ -63,10 +63,16 @@
     Gemma4 12B, DeepSeek-R1-Distill 32B, and GPT-OSS 20B. The sweep now forces
     `--disable-prefix-cache`: persisted KV tensors are not keyed by MLX runtime
     and a stale DeepSeek cache initially caused a false failure; both its cold
-    rerun and the complete cold-cache release sweep passed. Hy3 is not locally
-    cacheable for this campaign: its checkpoint is 154.6 GiB versus 117 GiB
-    free at preflight on the Studio system volume, and remains an explicit
-    Atlas/Ultra follow-up.
+    rerun and the complete cold-cache release sweep passed. Hy3 was staged on
+    an external 1.8 TiB SSD and passed 6/6 on the M3 Ultra with only 13.69 MB
+    swap used. Artifact SHA-256:
+    `817969d4c78df19594d7c464990fa0b4e16beda3b8346e423161735ab8b9db72`.
+    The complete seven-family toolchain fleet therefore passed 42/42.
+  - Extra M2 Pro spot checks under the PR wheel: Qwen3.5-9B passed 6/6. LFM2.5
+    1.2B and Nemotron Diffusion 3B each scored 5/6, but repeated identically on
+    MLX 0.31.2 (same wrong LFM arithmetic token; same correct-but-verbose
+    Nemotron answer), ruling out an MLX 0.32.1 regression. An explicit Qwen9
+    `--ar-only` rerun produced 37.4165 median / 37.4258 pooled tok/s, 8/8 exact.
   - Existing unarchived Qwen3.6-35B experiments under `~/qwen38-perf` suggest
     Rapid AR around 91 tok/s, mlx-vlm AR around 83 tok/s, and Rapid MTP up to
     120.9 tok/s on one coding prompt. Re-run with the common harness before
@@ -80,8 +86,7 @@
   preflight data must not be published. Only about 137 GiB was available on
   the Studio system volume, so uncached checkpoints need staged downloads or
   explicit cache cleanup.
-- Next action: take PR #2199 through review and CI with its `Coherence-Sweep`
-  attestation (prefill gains cover Qwen3.5-4B +22%, Qwen3.8-27B +24%, and
-  Gemma4-26B-A4B +31--34%, all at unchanged peak memory), then hand Atlas the
-  Ultra-only Hy3 row plus upstream issue #1197's exact VLM-MTP layout as explicit
-  pre-merge/release follow-ups. Continue the remaining model matrix independently.
+- Next action: land PR #2199 after its final CI run. The complete toolchain
+  coherence fleet, Hy3 Ultra, exact Qwen3.6 VLM+MTP layout, and extra mini spot
+  checks are now complete. Continue the remaining performance matrix
+  independently.
