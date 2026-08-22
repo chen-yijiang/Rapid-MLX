@@ -423,7 +423,14 @@ jobs:
         run: bash scripts/l1_smoke.sh "${{ matrix.model }}"
 
   tests:
-    needs: [changes, test-matrix, test-apple-silicon, l1-smoke]
+    needs:
+      - changes
+      - lint
+      - mlx-bound-guard
+      - type-check
+      - test-matrix
+      - test-apple-silicon
+      - l1-smoke
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -432,6 +439,19 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ] \
             && [ "${{ needs.changes.outputs.full_gate }}" != "true" ]; then
             echo "PR gate passed; apply the full-ci label when this PR is ready to merge"
+            exit 1
+          fi
+          if [ "${{ needs.lint.result }}" != success ]; then
+            echo "Lint and static repository contracts failed"
+            exit 1
+          fi
+          if [ "${{ needs.type-check.result }}" != success ]; then
+            echo "Type-check job failed"
+            exit 1
+          fi
+          if [ "${{ github.event_name }}" = pull_request ] \
+            && [ "${{ needs.mlx-bound-guard.result }}" != success ]; then
+            echo "MLX dependency-bound guard failed"
             exit 1
           fi
           expected="${{ needs.changes.outputs.engine }}"

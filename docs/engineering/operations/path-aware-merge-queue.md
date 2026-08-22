@@ -18,7 +18,9 @@ product area selects all applicable lanes.
 
 The required checks are the stable aggregate jobs `tests` and `desktop-tests`.
 They must not be renamed or hidden behind workflow-level path filters without a
-matching branch-protection migration.
+matching branch-protection migration. `tests` includes lint, type-check job
+health, the MLX dependency-bound guard on pull requests, and all selected engine
+test lanes; `desktop-tests` includes every selected Desktop lane.
 
 ## Merge gate
 
