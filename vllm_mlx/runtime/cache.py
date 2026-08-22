@@ -68,6 +68,14 @@ def load_prefix_cache_from_disk() -> None:
     entries (the entries are the source of truth; the radix is a lookup
     accelerator).
     """
+    raw_autoload = os.environ.get("RAPID_MLX_PREFIX_CACHE_AUTOLOAD", "1")
+    if raw_autoload.strip().lower() in ("0", "false", "no", "off"):
+        logger.info(
+            "[lifespan] Prefix-cache auto-load disabled by "
+            "RAPID_MLX_PREFIX_CACHE_AUTOLOAD"
+        )
+        return
+
     cfg = get_config()
     if cfg.engine is None:
         return
