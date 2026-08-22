@@ -215,8 +215,13 @@ struct ServerResidencyClient {
         return request
     }
 
-    func fetch(port: Int, bearer: String?) async -> ModelResidencySnapshot? {
-        let request = request(path: "/v1/models/residency", port: port, bearer: bearer)
+    func fetch(
+        port: Int,
+        bearer: String?,
+        timeoutInterval: TimeInterval? = nil
+    ) async -> ModelResidencySnapshot? {
+        var request = request(path: "/v1/models/residency", port: port, bearer: bearer)
+        if let timeoutInterval { request.timeoutInterval = timeoutInterval }
         guard let (data, response) = try? await session.data(for: request),
               let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode)

@@ -215,6 +215,7 @@ final class ServerManager {
     }
 
     private var activeRequestSwitchConfirmations = ActiveRequestSwitchConfirmationQueue()
+    private var modelSwitchOperationInProgress = false
 
     /// Live-memory source. Production uses the host probe; tests replace it so
     /// launch auto-start semantics can be verified without depending on the
@@ -260,14 +261,15 @@ final class ServerManager {
     }
 
     @discardableResult
-    func refreshResidency() async -> Bool {
+    func refreshResidency(timeoutInterval: TimeInterval? = nil) async -> Bool {
         guard case .ready = state else {
             residency = .empty
             return true
         }
         guard let snapshot = await residencyClient.fetch(
             port: activePort,
-            bearer: activeBearer
+            bearer: activeBearer,
+            timeoutInterval: timeoutInterval
         ) else { return false }
         residency = snapshot
         return true
@@ -991,6 +993,26 @@ final class ServerManager {
         imageMode: ResidentImageMode? = nil,
         residencyEligible: Bool = true
     ) async -> EnsureServingOutcome {
+        guard await acquireModelSwitchOperation() else { return .cancelled }
+        defer { modelSwitchOperationInProgress = false }
+        return await ensureServingOutcomeLocked(
+            alias: alias,
+            hfPath: hfPath,
+            estimatedMemoryGB: estimatedMemoryGB,
+            replacementGroup: replacementGroup,
+            imageMode: imageMode,
+            residencyEligible: residencyEligible
+        )
+    }
+
+    private func ensureServingOutcomeLocked(
+        alias: String,
+        hfPath: String?,
+        estimatedMemoryGB: Double?,
+        replacementGroup: ResidentModelReplacementGroup? = nil,
+        imageMode: ResidentImageMode? = nil,
+        residencyEligible: Bool = true
+    ) async -> EnsureServingOutcome {
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed }
         let requestedPerformanceFlags = perfLaunchFlagsProvider?(trimmed) ?? []
@@ -1211,6 +1233,8 @@ final class ServerManager {
     ) async -> EnsureServingOutcome {
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed }
+        guard await acquireModelSwitchOperation() else { return .cancelled }
+        defer { modelSwitchOperationInProgress = false }
         if child != nil,
            await confirmActiveRequestSwitch(
                to: trimmed,
@@ -1219,7 +1243,7 @@ final class ServerManager {
             return .cancelled
         }
         await stop()
-        return await ensureServingOutcome(
+        return await ensureServingOutcomeLocked(
             alias: trimmed,
             hfPath: hfPath,
             estimatedMemoryGB: estimatedMemoryGB,
@@ -1232,7 +1256,7 @@ final class ServerManager {
         to targetAlias: String,
         activeRequests count: (ModelResidencySnapshot) -> Int
     ) async -> Bool {
-        let residencyIsCurrent = await refreshResidency()
+        let residencyIsCurrent = await refreshResidency(timeoutInterval: 2)
         let activeRequests = residencyIsCurrent ? count(residency) : nil
         if activeRequests == 0 { return true }
         let requestID = UUID()
@@ -1246,6 +1270,19 @@ final class ServerManager {
         )
         activeRequestSwitchConfirmations.enqueue(warning, requestID: requestID)
         return await awaitActiveRequestSwitchDecision(for: requestID) == true
+    }
+
+    /// Serialize the full check → confirmation → replacement transaction.
+    /// A later switch re-enters only after the earlier operation has settled,
+    /// so its decision-point fetch observes the newly serving model.
+    private func acquireModelSwitchOperation() async -> Bool {
+        while modelSwitchOperationInProgress {
+            guard !Task.isCancelled else { return false }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard !Task.isCancelled else { return false }
+        modelSwitchOperationInProgress = true
+        return true
     }
 
     /// Rebuild only the named resident engine with its current performance

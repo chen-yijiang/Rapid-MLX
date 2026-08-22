@@ -240,6 +240,48 @@ struct ModelResidencyTests {
         #expect(server.state == .ready(alias: "current"))
     }
 
+    @Test("Overlapping switches revalidate after the preceding decision")
+    func overlappingSwitchesRevalidate() async throws {
+        OverlappingResidencyProtocol.fetchCount = 0
+        OverlappingResidencyProtocol.lastTimeout = nil
+        let server = makeSwitchServer(protocolClass: OverlappingResidencyProtocol.self)
+        let firstTask = Task { @MainActor in
+            await server.ensureServingOutcome(
+                alias: "first", hfPath: nil, estimatedMemoryGB: nil,
+                residencyEligible: false
+            )
+        }
+        let secondTask = Task { @MainActor in
+            await server.ensureServingOutcome(
+                alias: "second", hfPath: nil, estimatedMemoryGB: nil,
+                residencyEligible: false
+            )
+        }
+
+        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let firstWarning = try #require(server.pendingActiveRequestSwitch)
+        #expect(OverlappingResidencyProtocol.fetchCount == 1)
+        #expect(OverlappingResidencyProtocol.lastTimeout == 2)
+        // Stand in for the first transaction installing B while it still owns
+        // the operation gate; the second transaction must observe B afterward.
+        server._testSetState(.ready(alias: "replacement"))
+        server.cancelActiveRequestSwitch(firstWarning)
+        #expect(await firstTask.value == .cancelled)
+
+        // The queued operation fetches again and describes the current process,
+        // rather than reusing the first transaction's A-era warning.
+        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let secondWarning = try #require(server.pendingActiveRequestSwitch)
+        #expect(secondWarning.currentAlias == "replacement")
+        #expect(OverlappingResidencyProtocol.fetchCount == 2)
+        server.cancelActiveRequestSwitch(secondWarning)
+        #expect(await secondTask.value == .cancelled)
+    }
+
     @Test("Production restart surfaces use the confirmation-aware manager API")
     func restartSurfacesDoNotStopDirectly() throws {
         let rapidMacRoot = URL(fileURLWithPath: #filePath)
@@ -490,6 +532,18 @@ private final class ActiveResidencyProtocol: ResidencySnapshotProtocol, @uncheck
 }
 
 private final class IdleResidencyProtocol: ResidencySnapshotProtocol, @unchecked Sendable {}
+
+private final class OverlappingResidencyProtocol: ResidencySnapshotProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var fetchCount = 0
+    nonisolated(unsafe) static var lastTimeout: TimeInterval?
+    override class var activeRequests: Int { 1 }
+
+    override func startLoading() {
+        Self.fetchCount += 1
+        Self.lastTimeout = request.timeoutInterval
+        super.startLoading()
+    }
+}
 
 private final class ResidencyLoadCaptureProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var capturedBody: Data?
