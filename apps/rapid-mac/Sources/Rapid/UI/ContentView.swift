@@ -199,7 +199,7 @@ struct ContentView: View {
             Text(warning.message)
         }
         .alert(
-            "Switch models while requests are active?",
+            "Switch models?",
             isPresented: Binding(
                 get: { server.pendingActiveRequestSwitch != nil },
                 set: {
@@ -219,7 +219,9 @@ struct ContentView: View {
             }
             .accessibilityIdentifier("ActiveRequestSwitch.Confirm")
         } message: { warning in
-            if let count = warning.activeRequests {
+            if warning.activeRequests == 0 {
+                Text("Switching from \(warning.currentAlias) to \(warning.targetAlias) briefly stops the current server. New requests may be interrupted during the handoff.")
+            } else if let count = warning.activeRequests {
                 Text("\(count) active request\(count == 1 ? " is" : "s are") using \(warning.currentAlias). Switching to \(warning.targetAlias) will interrupt \(count == 1 ? "it" : "them").")
             } else {
                 Text("Rapid couldn't verify whether requests are active. Switching from \(warning.currentAlias) to \(warning.targetAlias) may interrupt clients using the server.")

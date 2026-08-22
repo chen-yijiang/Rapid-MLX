@@ -197,15 +197,22 @@ struct ModelResidencyTests {
         #expect(server.pendingActiveRequestSwitch == nil)
     }
 
-    @Test("A current zero-request snapshot does not prompt")
-    func zeroActiveRequestsDoNotPrompt() async {
+    @Test("A process replacement confirms even after an idle snapshot")
+    func idleProcessReplacementStillConfirms() async throws {
         let server = makeSwitchServer(protocolClass: IdleResidencyProtocol.self)
-        let outcome = await server.ensureServingOutcome(
-            alias: "target", hfPath: nil, estimatedMemoryGB: nil,
-            residencyEligible: false
-        )
-        #expect(outcome == .failed)
-        #expect(server.pendingActiveRequestSwitch == nil)
+        let switchTask = Task { @MainActor in
+            await server.ensureServingOutcome(
+                alias: "target", hfPath: nil, estimatedMemoryGB: nil,
+                residencyEligible: false
+            )
+        }
+        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let warning = try #require(server.pendingActiveRequestSwitch)
+        #expect(warning.activeRequests == 0)
+        server.cancelActiveRequestSwitch(warning)
+        #expect(await switchTask.value == .cancelled)
     }
 
     @Test("Restart confirms before stopping an active server")
@@ -222,6 +229,26 @@ struct ModelResidencyTests {
 
         #expect(await restartTask.value == .cancelled)
         #expect(server.state == .ready(alias: "current"))
+    }
+
+    @Test("Explicit stop cancels a pending switch and remains authoritative")
+    func stopCancelsPendingSwitch() async throws {
+        let server = makeSwitchServer(protocolClass: ActiveResidencyProtocol.self)
+        let switchTask = Task { @MainActor in
+            await server.ensureServingOutcome(
+                alias: "target", hfPath: nil, estimatedMemoryGB: nil,
+                residencyEligible: false
+            )
+        }
+        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let stopTask = Task { @MainActor in await server.stop() }
+
+        #expect(await switchTask.value == .cancelled)
+        await stopTask.value
+        #expect(server.pendingActiveRequestSwitch == nil)
+        #expect(server.state == .stopped)
     }
 
     @Test("Speculative restart cancellation preserves the active server")

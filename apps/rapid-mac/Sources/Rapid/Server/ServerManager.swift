@@ -52,6 +52,13 @@ struct ActiveRequestSwitchConfirmationQueue {
         decisions.removeValue(forKey: requestID)
         pending.removeAll { $0.requestID == requestID }
     }
+
+    mutating func cancelAll() {
+        for item in pending {
+            decisions[item.requestID] = false
+        }
+        pending.removeAll()
+    }
 }
 
 /// FIFO state machine for memory-risk confirmations. A request token is
@@ -1182,6 +1189,7 @@ final class ServerManager {
         if child != nil,
            await confirmActiveRequestSwitch(
                to: trimmed,
+               confirmWhenIdle: true,
                activeRequests: { $0.activeRequestCount }
            ) == false {
             return .cancelled
@@ -1238,11 +1246,12 @@ final class ServerManager {
         if child != nil,
            await confirmActiveRequestSwitch(
                to: trimmed,
+               confirmWhenIdle: true,
                activeRequests: { $0.activeRequestCount }
            ) == false {
             return .cancelled
         }
-        await stop()
+        await stop(preservingLastServedAlias: false)
         return await ensureServingOutcomeLocked(
             alias: trimmed,
             hfPath: hfPath,
@@ -1254,11 +1263,12 @@ final class ServerManager {
 
     private func confirmActiveRequestSwitch(
         to targetAlias: String,
+        confirmWhenIdle: Bool = false,
         activeRequests count: (ModelResidencySnapshot) -> Int
     ) async -> Bool {
         let residencyIsCurrent = await refreshResidency(timeoutInterval: 2)
         let activeRequests = residencyIsCurrent ? count(residency) : nil
-        if activeRequests == 0 { return true }
+        if activeRequests == 0, !confirmWhenIdle { return true }
         let requestID = UUID()
         let warning = ActiveRequestSwitchWarning(
             id: UUID(),
@@ -2268,6 +2278,9 @@ final class ServerManager {
     /// SIGKILL if still alive. State transitions to `.stopped` on
     /// success.
     func stop() async {
+        activeRequestSwitchConfirmations.cancelAll()
+        guard await acquireModelSwitchOperation() else { return }
+        defer { modelSwitchOperationInProgress = false }
         await stop(preservingLastServedAlias: false)
     }
 
