@@ -1069,8 +1069,8 @@ start_model() {
             if jq -e '.data.ui_elements[]?
                       | select(.identifier == "MemoryWarning.Confirm" and .enabled == true)' \
                 "$OUT/readiness-after-start.json" >/dev/null; then
-                press "$OUT/readiness-after-start.json" MemoryWarning.Confirm \
-                    "$OUT/readiness-memory-confirm.json"
+                "$AX_DRIVER" click-center "$APP_PID" MemoryWarning.Confirm \
+                    > "$OUT/readiness-memory-confirm.json"
                 memory_confirmed=1
                 log "  confirmed hosted-runner memory warning for fake sidecar"
             fi

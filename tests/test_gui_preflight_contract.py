@@ -180,7 +180,14 @@ def test_start_model_waits_for_an_interactive_readiness_action():
         'press "$OUT/readiness-start.json" Readiness.Action'
     )
     assert 'identifier == "MemoryWarning.Confirm" and .enabled == true' in helper
-    assert 'press "$OUT/readiness-after-start.json" MemoryWarning.Confirm' in helper
+    assert '"$AX_DRIVER" click-center "$APP_PID" MemoryWarning.Confirm' in helper
+
+    driver = DRIVER.read_text()
+    click = driver.split('case "click-center":', 1)[1].split(
+        'case "set-scroll-value":', 1
+    )[0]
+    assert "kAXPositionAttribute" in click and "kAXSizeAttribute" in click
+    assert ".leftMouseDown" in click and ".leftMouseUp" in click
 
 
 def test_audio_baseline_waits_for_residency_poll_to_settle():
