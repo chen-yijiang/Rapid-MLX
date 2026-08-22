@@ -1193,16 +1193,10 @@ def test_post_parameter_consecutive_bare_call_fails_closed():
         "<function=w><parameter=p>b</parameter></function>"
     )
     calls = _nemotron(text, _tools(("w", "p")))
-    names = [c["name"] for c in calls]
 
-    # The trailing bare opener after the first call's closer is retained as
-    # payload, not emitted. Asserting the exact fail-closed shape pin down the
-    # deliberate trade and prevents a future "fix" from re-opening the
-    # injection channel.
-    assert names == ["w"], (
-        f"expected the ambiguous second bare call to fail closed as payload, "
-        f"got names={names}"
-    )
+    # Reject the complete sequence. Returning one call with p="b" would merge
+    # the second block into the first and silently rewrite execution semantics.
+    assert calls == []
 
 
 def test_declared_tool_marker_inside_streamed_refusal_remains_prose():
