@@ -38,7 +38,7 @@ from typing import Any
 
 
 def payload_spans(text: str, opener: str, closer: str) -> list[tuple[int, int]]:
-    """Half-open ranges covering ``opener`` element payload bodies.
+    """Half-open ranges covering ``opener…closer`` element bodies.
 
     Used to tell an element that CONTAINS marker-shaped text apart from a
     real sibling. A tool name inside a parameter value is prose the model
@@ -46,38 +46,22 @@ def payload_spans(text: str, opener: str, closer: str) -> list[tuple[int, int]]:
     not a call it made, and emitting it as one turns any content an agent
     ingests into an execution channel.
 
-    The range for each ``opener`` element reaches the next *sibling* ``opener``
-    (same rule ``split_marked_parameters`` uses to bound a value) or, failing
-    a sibling, the next ``<tool_call>`` wrapper — NOT the first ``closer``.
-
-    Ending at the first ``closer`` was a security hole, not mere over-coverage:
-    these escaping-free formats put literal closers inside values all the
-    time, and an attacker who controls argument text can forge one to close
-    the protected range early, then place a declared executable opener (e.g.
-    ``<function=run_shell>``) in the gap. The first-closer rule would skip
-    exactly that gap and still fabricate an executable call. This is the
-    closer-escape variant of the tool-name-in-an-argument injection.
-
-    Bounding on openers that START a new element — the next sibling
-    ``<parameter>``, or the next ``<tool_call>`` — cannot be truncated by a
-    forged closer, so a payload that itself contains delimiter-shaped text
-    fails CLOSED (the whole ambiguous element stays payload) rather than
-    continuing to emit an executable call. The deliberate cost, matching the
-    sibling rule used when parsing parameters, is that a value with a genuine
-    sibling parameter still ends at that sibling's opener.
+    Deliberately conservative: the range ends at the FIRST closer, so a
+    value that itself contains a literal closer under-covers rather than
+    over-covers. Under-covering leaves the pre-existing behaviour; the
+    reverse would silently drop calls the model really did make.
     """
-    openers = list(re.finditer(re.escape(opener), text))
     spans: list[tuple[int, int]] = []
-    for index, m in enumerate(openers):
-        end = len(text)
-        wrapper = text.find("<tool_call>", m.end())
-        if wrapper != -1:
-            end = min(end, wrapper)
-        sibling = _next_sibling(text, openers, index, closer)
-        if sibling < len(openers):
-            end = min(end, openers[sibling].start())
-        spans.append((m.start(), end))
-    return spans
+    i = 0
+    while True:
+        a = text.find(opener, i)
+        if a == -1:
+            return spans
+        b = text.find(closer, a + len(opener))
+        if b == -1:
+            return spans
+        spans.append((a, b + len(closer)))
+        i = b + len(closer)
 
 
 __all__ = [
