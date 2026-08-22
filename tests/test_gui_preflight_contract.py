@@ -179,6 +179,8 @@ def test_start_model_waits_for_an_interactive_readiness_action():
     assert helper.index("wait_identifier_enabled Readiness.Action") < helper.index(
         'press "$OUT/readiness-start.json" Readiness.Action'
     )
+    assert 'identifier == "MemoryWarning.Confirm" and .enabled == true' in helper
+    assert 'press "$OUT/readiness-after-start.json" MemoryWarning.Confirm' in helper
 
 
 def test_audio_baseline_waits_for_residency_poll_to_settle():
