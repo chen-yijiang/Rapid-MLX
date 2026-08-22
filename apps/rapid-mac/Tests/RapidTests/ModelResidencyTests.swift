@@ -224,6 +224,42 @@ struct ModelResidencyTests {
         #expect(server.state == .ready(alias: "current"))
     }
 
+    @Test("Speculative restart cancellation preserves the active server")
+    func speculativeRestartCancellationPreservesServer() async throws {
+        let server = makeSwitchServer(protocolClass: ActiveResidencyProtocol.self)
+        let restartTask = Task { @MainActor in
+            await server.restartForSpeculativePerformance(alias: "current")
+        }
+        for _ in 0..<100 where server.pendingActiveRequestSwitch == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let warning = try #require(server.pendingActiveRequestSwitch)
+        server.cancelActiveRequestSwitch(warning)
+
+        #expect(await restartTask.value == .cancelled)
+        #expect(server.state == .ready(alias: "current"))
+    }
+
+    @Test("Production restart surfaces use the confirmation-aware manager API")
+    func restartSurfacesDoNotStopDirectly() throws {
+        let rapidMacRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        for relativePath in [
+            "Sources/Rapid/UI/AudioView.swift",
+            "Sources/Rapid/UI/ImagesView.swift",
+            "Sources/Rapid/UI/SettingsConnectorsPanel.swift",
+        ] {
+            let source = try String(
+                contentsOf: rapidMacRoot.appendingPathComponent(relativePath),
+                encoding: .utf8
+            )
+            #expect(!source.contains("await server.stop()"), "Direct stop bypass in \(relativePath)")
+            #expect(source.contains("restartServingOutcome"))
+        }
+    }
+
     @Test("Connector restart prefers a resident text model over the process-owning audio alias")
     func connectorRestartTextAlias() {
         let text = ResidentModelStatus(

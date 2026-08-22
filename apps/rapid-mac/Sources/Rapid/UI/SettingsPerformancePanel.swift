@@ -408,13 +408,13 @@ struct SettingsPerformancePanel: View {
             let speculativeChanged = (perf.config(forAlias: alias).speculativePreset != nil)
                 != server.hasAppliedSpeculativeDecoding(forAlias: alias)
             if speculativeChanged {
-                let restarted = await server.restartForSpeculativePerformance(
+                let restartOutcome = await server.restartForSpeculativePerformance(
                     alias: alias,
                     hfPath: entry?.hfRepo
                 )
-                if restarted {
+                if restartOutcome == .ready {
                     launchedFlags = perf.launchFlags(forAlias: alias)
-                } else {
+                } else if restartOutcome == .failed {
                     applyError = "Could not restart this model with its speculative-decoding setting."
                 }
                 isReloading = false

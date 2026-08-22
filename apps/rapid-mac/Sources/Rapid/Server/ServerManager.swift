@@ -1278,9 +1278,15 @@ final class ServerManager {
     /// Speculative decoding is installed while the process-owning engine
     /// starts, unlike the resident API's per-engine KV/prefix knobs. Rebuild
     /// one setting changes; conversations and downloaded weights remain.
-    func restartForSpeculativePerformance(alias: String, hfPath: String? = nil) async -> Bool {
-        await stop()
-        return await ensureServing(alias: alias, hfPath: hfPath, residencyEligible: false)
+    func restartForSpeculativePerformance(
+        alias: String,
+        hfPath: String? = nil
+    ) async -> EnsureServingOutcome {
+        await restartServingOutcome(
+            alias: alias,
+            hfPath: hfPath,
+            residencyEligible: false
+        )
     }
 
     /// True when the child is serving exactly this alias.

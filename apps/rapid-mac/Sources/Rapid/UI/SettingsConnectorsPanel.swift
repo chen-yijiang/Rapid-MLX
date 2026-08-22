@@ -333,8 +333,11 @@ struct SettingsConnectorsPanel: View {
         ) else { return }
         isRestarting = true
         Task {
-            await server.stop()
-            await server.start(alias: alias)
+            _ = await server.restartServingOutcome(
+                alias: alias,
+                hfPath: nil,
+                residencyEligible: false
+            )
             // The fresh child publishes its connector state on /healthz; the
             // ready transition in ContentView refreshes the catalog, but this
             // panel may be the only thing on screen — refresh here too so the

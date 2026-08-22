@@ -546,13 +546,27 @@ struct AudioView: View {
         case .start(let alias), .retry(let alias):
             Task { await loadAudioModel(alias) }
         case .restart(let alias):
-            Task {
-                await server.stop()
-                await loadAudioModel(alias)
-            }
+            Task { await restartAudioModel(alias) }
         case .openModelManagement:
             openModelManagement()
         }
+    }
+
+    private func restartAudioModel(_ alias: String) async {
+        guard let entry = viewModel.audioModels.first(where: { $0.alias == alias }) else { return }
+        let outcome = await server.restartServingOutcome(
+            alias: alias,
+            hfPath: entry.hfRepo,
+            estimatedMemoryGB: ModelSizing.residentEstimateGB(
+                alias: alias,
+                sizeText: entry.sizeOnDisk
+            ),
+            residencyEligible: false
+        )
+        if outcome == .failed {
+            viewModel.errorMessage = "The audio model couldn't restart."
+        }
+        await viewModel.refreshCatalog()
     }
 
     private func loadAudioModel(_ alias: String) async {
