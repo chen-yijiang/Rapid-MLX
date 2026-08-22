@@ -525,35 +525,10 @@ class TestNemotronToolParser:
     def parser(self):
         return NemotronToolParser()
 
-    def test_reuses_qwen3_xml_parser(self, parser):
-        """Nemotron stays a thin alias of the upstream-aligned parser."""
-        from vllm_mlx.tool_parsers.qwen3coder_tool_parser import (
-            Qwen3CoderToolParser,
-        )
-
-        assert isinstance(parser, Qwen3CoderToolParser)
-
     def test_parameter_format(self, parser):
         """Test parsing Nemotron parameter format."""
         text = "<tool_call><function=get_weather><parameter=city>Paris</parameter><parameter=units>celsius</parameter></function></tool_call>"
-        request = {
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "city": {"type": "string"},
-                                "units": {"type": "string"},
-                            },
-                        },
-                    },
-                }
-            ]
-        }
-        result = parser.extract_tool_calls(text, request)
+        result = parser.extract_tool_calls(text)
 
         assert result.tools_called
         assert len(result.tool_calls) == 1
@@ -562,25 +537,18 @@ class TestNemotronToolParser:
         assert args["city"] == "Paris"
         assert args["units"] == "celsius"
 
+    def test_json_format(self, parser):
+        """Test parsing Nemotron with JSON arguments."""
+        text = '<tool_call><function=calculate>{"expression": "2*3"}</function></tool_call>'
+        result = parser.extract_tool_calls(text)
+
+        assert result.tools_called
+        assert result.tool_calls[0]["name"] == "calculate"
+
     def test_multiple_calls(self, parser):
         """Test multiple Nemotron tool calls."""
         text = "<tool_call><function=func1><parameter=a>1</parameter></function></tool_call><tool_call><function=func2><parameter=b>2</parameter></function></tool_call>"
-        request = {
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "parameters": {
-                            "type": "object",
-                            "properties": {key: {"type": "integer"}},
-                        },
-                    },
-                }
-                for name, key in (("func1", "a"), ("func2", "b"))
-            ]
-        }
-        result = parser.extract_tool_calls(text, request)
+        result = parser.extract_tool_calls(text)
 
         assert result.tools_called
         assert len(result.tool_calls) == 2
