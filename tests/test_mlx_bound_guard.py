@@ -138,6 +138,35 @@ def test_desktop_sidecar_uses_validated_mlx_vlm_bound():
     assert Version("0.6.3") in vision_specs[0].specifier
 
 
+def test_image_extra_tracks_mlx_032_compatible_mflux_line():
+    """The image extra must remain resolvable with the validated core runtime.
+
+    mflux 0.18.x requires ``mlx<0.32``.  Once core moved to MLX 0.32.1, leaving
+    the old mflux floor made ``pip install rapid-mlx[image]`` unsatisfiable.
+    Lock both sides of that compatibility boundary into the package metadata.
+    """
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
+    core_specs = [
+        Requirement(spec)
+        for spec in pyproject["project"]["dependencies"]
+        if Requirement(spec).name == "mlx"
+    ]
+    image_specs = [
+        Requirement(spec)
+        for spec in pyproject["project"]["optional-dependencies"]["image"]
+        if Requirement(spec).name == "mflux"
+    ]
+
+    assert len(core_specs) == 1
+    assert len(image_specs) == 1
+    assert Version("0.32.1") in core_specs[0].specifier
+    assert Version("0.32.0") not in core_specs[0].specifier
+    assert Version("0.33.0") not in core_specs[0].specifier
+    assert Version("0.19.0") in image_specs[0].specifier
+    assert Version("0.18.1") not in image_specs[0].specifier
+    assert Version("0.20.0") not in image_specs[0].specifier
+
+
 class TestStrictMode:
     def test_malformed_guarded_requirement_raises_in_strict(self):
         text = _pp("mlx-lm>=0.31.3", "mlx >>>= broken")

@@ -1,6 +1,6 @@
 # Vector handoff
 
-- Status: in progress; benchmark host available
+- Status: in progress; MLX 0.32.1 dependency PR candidate under validation
 - Active task: benchmark the 16--64 GB Mac model matrix against mlx-vlm,
   oMLX, and applicable MLXFast/MTPLX implementations; optimize material
   Rapid-MLX deficits and re-run the controlled matrix.
@@ -41,6 +41,20 @@
     and raised peak memory from 5.62 to 7.28/11.02/18.63 GB. Hybrid/GDN must
     keep an architecture-specific smaller-step policy; do not promote a generic
     largest-chunk-that-fits rule.
+  - Shipping candidate keeps released mlx-lm 0.31.3 and changes core to
+    `mlx>=0.32.1,<0.33`. Fresh resolver probes select MLX 0.32.1 for core.
+    Because mflux 0.18.1 requires `mlx<0.32`, `[image]` moves to
+    `mflux>=0.19.0,<0.20`; its metadata requires `mlx>=0.32,<0.33`, the image
+    resolver succeeds, and 88 image-lane plus 67 alias/dependency tests pass.
+  - The MLX 0.32.1 candidate passed 6/6 blocking golden coherence cases for
+    every ordinary release family: Qwen3.5 4B, Qwen3.5 35B-A3B, Qwen3.6 27B,
+    Gemma4 12B, DeepSeek-R1-Distill 32B, and GPT-OSS 20B. The sweep now forces
+    `--disable-prefix-cache`: persisted KV tensors are not keyed by MLX runtime
+    and a stale DeepSeek cache initially caused a false failure; both its cold
+    rerun and the complete cold-cache release sweep passed. Hy3 is not locally
+    cacheable for this campaign: its checkpoint is 154.6 GiB versus 117 GiB
+    free at preflight on the Studio system volume, and remains an explicit
+    Atlas/Ultra follow-up.
   - Existing unarchived Qwen3.6-35B experiments under `~/qwen38-perf` suggest
     Rapid AR around 91 tok/s, mlx-vlm AR around 83 tok/s, and Rapid MTP up to
     120.9 tok/s on one coding prompt. Re-run with the common harness before
@@ -53,8 +67,7 @@
   preflight data must not be published. Only about 137 GiB was available on
   the Studio system volume, so uncached checkpoints need staged downloads or
   explicit cache cleanup.
-- Next action: ask Atlas to own the compatibility-sensitive MLX 0.32 / mlx-lm
-  next-release move, reproduce upstream issue #1197 with its exact VLM-MTP
-  checkpoint layout, then run the full-family output-coherence sweep required
-  by #1248 before changing `pyproject.toml`. Continue the remaining model matrix
-  independently of that dependency event.
+- Next action: publish the dependency PR with the `Coherence-Sweep` attestation
+  and hand Atlas the
+  Ultra-only Hy3 row plus upstream issue #1197's exact VLM-MTP layout as explicit
+  pre-merge/release follow-ups. Continue the remaining model matrix independently.

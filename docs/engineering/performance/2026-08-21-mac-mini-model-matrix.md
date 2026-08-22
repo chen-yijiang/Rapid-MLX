@@ -159,6 +159,34 @@ raise peak MLX memory by 3.3x. Issue #2165's adaptive chunk policy therefore
 must be architecture-specific; dense full-attention models still require their
 own sweep and may behave differently.
 
+## Shipping recommendation
+
+Ship the runtime improvement with `mlx>=0.32.1,<0.33` while retaining the
+released `mlx-lm>=0.31.3,<0.32` line. The controlled crossover attributes the
+Qwen3.5 prefill gain to MLX itself: moving only MLX/Metal from 0.31.2 to 0.32.1
+improved 1K/4K prefill by 22.3%, whereas moving from released mlx-lm 0.31.3 to
+official main on the same MLX 0.32.1 runtime changed Qwen3.5 throughput by less
+than 0.3%. This avoids pinning an unreleased mlx-lm commit while taking the
+measured runtime gain.
+
+The image extra must move at the same time from mflux 0.18.x to
+`mflux>=0.19.0,<0.20`: mflux 0.18.1 declares `mlx<0.32`, while 0.19.0 declares
+`mlx>=0.32,<0.33`. Fresh pip resolver probes selected MLX 0.32.1 and mlx-lm
+0.31.3 for core, and additionally mflux 0.19.0 for `[image]`. The mflux 0.19.0
+candidate passed Rapid-MLX's 88 image-lane tests and 67 image alias/dependency
+contract tests.
+
+The blocking coherence evidence for the dependency PR is separate from the
+throughput harness. Under mlx-lm 0.31.3 + MLX 0.32.1, all six ordinary release
+families passed all 6/6 golden cases: Qwen3.5 4B, Qwen3.5 35B-A3B, Qwen3.6 27B,
+Gemma4 12B, DeepSeek-R1-Distill 32B, and GPT-OSS 20B. The sweep now disables
+prefix-cache reuse because persisted KV tensors are not keyed by MLX runtime;
+before that isolation fix, a stale DeepSeek cache produced a false 4/6 failure,
+while the cold run and full cold-cache rerun both passed 6/6. The Ultra-only Hy3
+checkpoint is 154.6 GiB and could not be staged on the Studio's 117 GiB free
+system volume, so that toolchain-only row remains an explicit release-owner
+follow-up rather than an implied pass.
+
 ## Versions and checkpoints
 
 | Engine | Version | MLX stack |
