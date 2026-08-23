@@ -1398,6 +1398,7 @@ def _agent_server_alive(
     except (
         OSError,
         TypeError,
+        UnicodeError,
         http.client.HTTPException,
         urllib.error.URLError,
         ValueError,

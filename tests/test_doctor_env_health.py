@@ -52,6 +52,15 @@ class _HTTPResponse:
         return json.dumps(self.payload).encode()
 
 
+class _RawHTTPResponse(_HTTPResponse):
+    def __init__(self, body: bytes, status: int = 200):
+        self.status = status
+        self.body = body
+
+    def read(self, _limit: int = -1):
+        return self.body
+
+
 # ---------------------------------------------------------------------------
 # Section: System
 # ---------------------------------------------------------------------------
@@ -257,6 +266,19 @@ def test_agent_integration_rejects_unrelated_2xx_health_payload(tmp_path):
         home=tmp_path,
         open_url=lambda *_args, **_kwargs: _HTTPResponse(payload={"status": "ok"}),
     )
+    assert section.checks[0].status is eh.CheckStatus.WARN
+
+
+def test_agent_integration_invalid_utf8_health_payload_warns(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8000"}}')
+
+    section = eh.section_agent_integrations(
+        home=tmp_path,
+        open_url=lambda *_args, **_kwargs: _RawHTTPResponse(b"\xff"),
+    )
+
     assert section.checks[0].status is eh.CheckStatus.WARN
 
 
