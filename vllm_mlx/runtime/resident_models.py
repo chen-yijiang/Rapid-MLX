@@ -829,13 +829,13 @@ class ResidentModelManager:
                 except TimeoutError:
                     task.cancel()
                     _, pending = await asyncio.wait({task}, timeout=1.0)
+                    force_resume = getattr(engine, "force_resume_generation", None)
+                    if callable(force_resume):
+                        force_resume()
                     if pending:
                         self._rollback_tasks.add(task)
                         self._rollback_task_engines[task] = engine
                         task.add_done_callback(self._on_rollback_done)
-                        force_resume = getattr(engine, "force_resume_generation", None)
-                        if callable(force_resume):
-                            force_resume()
                     failure = failure or TimeoutError(
                         "timed out resuming a model engine after replacement rollback"
                     )
@@ -865,7 +865,15 @@ class ResidentModelManager:
 
     def _on_rollback_done(self, task: asyncio.Task) -> None:
         self._rollback_tasks.discard(task)
-        self._rollback_task_engines.pop(task, None)
+        engine = self._rollback_task_engines.pop(task, None)
+        failed = task.cancelled()
+        if not failed:
+            try:
+                failed = task.exception() is not None
+            except asyncio.CancelledError:
+                failed = True
+        if failed and engine is not None:
+            self._retired_engines.append(engine)
 
     async def _commit_group_replacement_locked(
         self,
@@ -927,6 +935,13 @@ class ResidentModelManager:
                 result = stop()  # type: ignore[operator]
                 if asyncio.iscoroutine(result):
                     await result
+            except asyncio.CancelledError:
+                self._retired_engines.append(record.entry.engine)
+                logger.warning(
+                    "Retired model %r stop was cancelled; cleanup will retry "
+                    "during shutdown",
+                    record.model_id,
+                )
             except Exception:
                 self._retired_engines.append(record.entry.engine)
                 logger.exception(
