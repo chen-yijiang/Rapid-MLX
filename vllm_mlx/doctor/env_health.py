@@ -1271,7 +1271,9 @@ def _configured_agent_urls(home: Path) -> list[tuple[str, Path, str | None]]:
                     (
                         entry.get("apiBase")
                         for entry in data.get("models", [])
-                        if isinstance(entry, dict) and entry.get("title") == "rapid-mlx"
+                        if isinstance(entry, dict)
+                        and entry.get("title") == "rapid-mlx"
+                        and entry.get("provider") == "openai"
                     ),
                     None,
                 )
@@ -1292,7 +1294,17 @@ def _configured_agent_urls(home: Path) -> list[tuple[str, Path, str | None]]:
     for root in cline_roots:
         path = root / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json"
         if path.exists():
-            candidates.append(("Cline", path, lambda data: data.get("openAiBaseUrl")))
+            candidates.append(
+                (
+                    "Cline",
+                    path,
+                    lambda data: (
+                        data.get("openAiBaseUrl")
+                        if data.get("apiProvider") == "openai"
+                        else None
+                    ),
+                )
+            )
 
     configured: list[tuple[str, Path, str | None]] = []
     for name, path, extract in candidates:
@@ -1380,6 +1392,21 @@ def _probe_agent_urls(
         return {url: results.get(url, False) for url in unique_urls}
 
 
+def _redacted_server_url(url: str) -> str:
+    """Render an endpoint without credentials, query values, or fragments."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, host + port, parsed.path, "", "")
+        )
+    except ValueError:
+        return "<invalid URL>"
+
+
 def section_agent_integrations(
     *,
     home: Path | None = None,
@@ -1406,13 +1433,13 @@ def section_agent_integrations(
             s.add(
                 f"{name} config points to a live server",
                 CheckStatus.OK,
-                detail=f"path={path} server={url}",
+                detail=f"path={path} server={_redacted_server_url(url)}",
             )
         else:
             s.add(
                 f"{name} config points to a server that is not responding",
                 CheckStatus.WARN,
-                detail=f"path={path} server={url}",
+                detail=f"path={path} server={_redacted_server_url(url)}",
             )
     return s
 

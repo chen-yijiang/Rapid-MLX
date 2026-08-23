@@ -179,11 +179,14 @@ def test_agent_integrations_probe_each_configured_server(tmp_path):
         / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
     )
     cline.parent.mkdir(parents=True)
-    cline.write_text('{"openAiBaseUrl":"http://localhost:8001/v1"}')
+    cline.write_text(
+        '{"apiProvider":"openai","openAiBaseUrl":"http://localhost:8001/v1"}'
+    )
     cont = tmp_path / ".continue/config.json"
     cont.parent.mkdir(parents=True)
     cont.write_text(
-        '{"models":[{"title":"rapid-mlx","apiBase":"http://localhost:8002/v1"}]}'
+        '{"models":[{"title":"rapid-mlx","provider":"openai",'
+        '"apiBase":"http://localhost:8002/v1"}]}'
     )
 
     requested = []
@@ -241,7 +244,9 @@ def test_agent_integrations_probe_every_existing_cline_config(tmp_path):
     for index, root in enumerate(roots):
         path = root / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
         path.parent.mkdir(parents=True)
-        path.write_text(f'{{"openAiBaseUrl":"http://localhost:800{index}/v1"}}')
+        path.write_text(
+            f'{{"apiProvider":"openai","openAiBaseUrl":"http://localhost:800{index}/v1"}}'
+        )
 
     def open_url(request, *, timeout):
         if ":8001/" in request.full_url:
@@ -279,6 +284,50 @@ def test_doctor_discovers_the_exact_config_written_by_cline_launcher(
 
     configured = eh._configured_agent_urls(tmp_path)
     assert configured == [("Cline", doctor_path, "http://127.0.0.1:8000/v1")]
+
+
+def test_stale_inactive_provider_urls_are_not_probed(tmp_path):
+    cline_path = (
+        tmp_path
+        / "Library/Application Support/Code/User/globalStorage"
+        / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+    )
+    cline_path.parent.mkdir(parents=True)
+    cline_path.write_text(
+        '{"apiProvider":"anthropic","openAiBaseUrl":"http://localhost:8000/v1"}'
+    )
+    cont = tmp_path / ".continue/config.json"
+    cont.parent.mkdir(parents=True)
+    cont.write_text(
+        '{"models":[{"title":"rapid-mlx","provider":"anthropic",'
+        '"apiBase":"http://localhost:8001/v1"}]}'
+    )
+
+    section = eh.section_agent_integrations(
+        home=tmp_path,
+        open_url=lambda *_args, **_kwargs: pytest.fail("stale URL was probed"),
+    )
+    assert len(section.checks) == 2
+    assert all(check.status is eh.CheckStatus.WARN for check in section.checks)
+
+
+def test_agent_integration_details_redact_url_secrets(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text(
+        '{"env":{"ANTHROPIC_BASE_URL":'
+        '"https://user:password@localhost:8000/v1?token=secret#fragment"}}'
+    )
+
+    section = eh.section_agent_integrations(
+        home=tmp_path,
+        open_url=lambda *_args, **_kwargs: _HTTPResponse(),
+    )
+    detail = section.checks[0].detail
+    assert "https://localhost:8000/v1" in detail
+    assert all(
+        secret not in detail for secret in ("user", "password", "token", "secret")
+    )
 
 
 def test_agent_integration_non_http_service_is_reported_unresponsive(tmp_path):
