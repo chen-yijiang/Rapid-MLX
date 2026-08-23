@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 from scripts.select_gui_flows import all_flows, select
@@ -65,6 +66,14 @@ def test_new_file_cannot_inherit_ownership_from_mixed_ui_directory():
         select(["apps/rapid-mac/Sources/Rapid/UI/NewImagesToolbar.swift"])
         == all_flows()
     )
+
+
+@pytest.mark.parametrize(
+    "shared_control",
+    ["ReadinessBanner.swift", "ModelPickerBar.swift", "InstructionTextEditor.swift"],
+)
+def test_shared_controls_without_explicit_ownership_run_every_flow(shared_control):
+    assert select([f"apps/rapid-mac/Sources/Rapid/UI/{shared_control}"]) == all_flows()
 
 
 def test_empty_or_invalid_diff_fails_closed():
