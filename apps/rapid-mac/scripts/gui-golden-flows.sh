@@ -1480,7 +1480,7 @@ flow_cached_variant_collapse() {
 
 flow_download_progress() {
     log "download progress never shows observed bytes above its total (#1550)"
-    start_persona download-progress FAKE_DOWNLOAD_OVERRUN=1
+    start_persona download-progress FAKE_DOWNLOAD_OVERRUN=1 RAPID_HARDWARE_RAM_GB=$GOLDEN_RAM_GB
 
     see_main "$OUT/consent.json"
     if jq -e '.data.ui_elements[]? | select(.identifier == "TelemetryConsent.DontShare")' \
