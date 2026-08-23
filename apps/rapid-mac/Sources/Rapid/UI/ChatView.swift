@@ -220,7 +220,7 @@ struct ChatView: View {
     @Environment(QuickstartCoordinator.self) private var quickstart
 
     @State private var draft: String = ""
-    @State private var attachmentDraft = ChatAttachmentDraft()
+    @State private var attachmentDrafts = ChatAttachmentDraftStore()
     @State private var isAttachmentDropTarget = false
     @State private var composeFocusToken: Int = 0
     /// Incremented every time the user tries to send while gated. Drives
@@ -248,6 +248,10 @@ struct ChatView: View {
     @State private var scrollToBottomRequest = 0
 
     private var messages: [ChatMessage] { viewModel.messages }
+    private var attachmentDraft: ChatAttachmentDraft {
+        get { attachmentDrafts[viewModel.activeConversationID] }
+        nonmutating set { attachmentDrafts[viewModel.activeConversationID] = newValue }
+    }
 
     var body: some View {
         // The reader exists for one value: the surface's own width, which
@@ -293,11 +297,6 @@ struct ChatView: View {
         .onChange(of: composerFocusRequest) { _, request in
             guard request != 0 else { return }
             composeFocusToken &+= 1
-        }
-        // Parsing runs off-main-thread. A completion started in conversation A
-        // must not attach itself after the user has navigated to conversation B.
-        .onChange(of: viewModel.activeConversationID) { _, newConversationID in
-            cancelFileImportAfterNavigation(activeConversationID: newConversationID)
         }
     }
 
@@ -1033,48 +1032,20 @@ struct ChatView: View {
             return false
         }
         let importConversationID = viewModel.activeConversationID
-        guard let importID = attachmentDraft.beginFileImport(
-            conversationID: importConversationID
-        ) else { return false }
+        guard let importID = attachmentDraft.beginFileImport() else { return false }
         Task { @MainActor in
             let outcome = await Task.detached(priority: .userInitiated) {
                 Self.loadFileAttachments(selection.accepted)
             }.value
 
-            // Do not rely only on SwiftUI's onChange delivery: the observable
-            // ID can change before SwiftUI schedules that callback. Comparing
-            // ownership here closes the window where A's completion could be
-            // accepted into B's composer. Returning to A before completion is
-            // intentionally accepted: this composer, including its draft text
-            // and ready chips, persists while the user browses conversations.
-            guard viewModel.activeConversationID == importConversationID else {
-                cancelFileImportAfterNavigation(importID: importID)
-                return
-            }
             let notice = selection.rejectedCount > 0
                 ? "Attach up to \(ChatFileAttachment.maxAttachmentsPerMessage) PDF, CSV, or TXT files per message."
                 : outcome.1
-            attachmentDraft.finishFileImport(id: importID, outcome.0, notice: notice)
+            var originDraft = attachmentDrafts[importConversationID]
+            originDraft.finishFileImport(id: importID, outcome.0, notice: notice)
+            attachmentDrafts[importConversationID] = originDraft
         }
         return true
-    }
-
-    private func cancelFileImportAfterNavigation(
-        importID: UUID? = nil,
-        activeConversationID: UUID? = nil
-    ) {
-        let notice = "File import canceled because you switched conversations."
-        let cancelled = if let activeConversationID {
-            attachmentDraft.cancelFileImport(
-                notOwnedBy: activeConversationID,
-                notice: notice
-            )
-        } else {
-            attachmentDraft.cancelFileImport(id: importID, notice: notice)
-        }
-        if cancelled {
-            VoiceOverAnnouncer.announce(notice)
-        }
     }
 
     /// Parse candidates without losing which source produced each attachment.

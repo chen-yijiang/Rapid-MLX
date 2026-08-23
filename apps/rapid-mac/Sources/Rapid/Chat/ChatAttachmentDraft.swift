@@ -5,15 +5,7 @@ import Foundation
 /// Keeping this outside ``ChatView`` makes the important identity and lifecycle
 /// rules directly testable: every input method feeds the same draft, a send
 /// atomically consumes it, and a later turn cannot inherit stale attachments.
-/// Like the text composer beside it, this draft survives conversation browsing;
-/// an import is accepted if the user returns to its owning conversation before
-/// completion, but can never land in or cancel work owned by another one.
 struct ChatAttachmentDraft: Equatable {
-    struct FileImport: Equatable {
-        let id: UUID
-        let conversationID: UUID
-    }
-
     /// Immutable ownership transfer from the composer to one user turn.
     ///
     /// The arrays are captured before asynchronous chat work starts, so later
@@ -26,11 +18,11 @@ struct ChatAttachmentDraft: Equatable {
     private(set) var images: [ChatImageAttachment] = []
     private(set) var files: [ChatFileAttachment] = []
     private(set) var sourcePaths: [UUID: String] = [:]
-    private(set) var fileImport: FileImport?
+    private(set) var fileImportID: UUID?
     var notice: String?
 
     var hasAttachments: Bool { !images.isEmpty || !files.isEmpty }
-    var isImportingFiles: Bool { fileImport != nil }
+    var isImportingFiles: Bool { fileImportID != nil }
 
     mutating func appendImage(_ image: ChatImageAttachment, sourceURL: URL? = nil) {
         images.append(image)
@@ -45,10 +37,10 @@ struct ChatAttachmentDraft: Equatable {
 
     /// Starts one asynchronous import generation. A second source cannot race
     /// the first because every UI entry point funnels through this method.
-    mutating func beginFileImport(conversationID: UUID) -> UUID? {
-        guard fileImport == nil else { return nil }
+    mutating func beginFileImport() -> UUID? {
+        guard fileImportID == nil else { return nil }
         let id = UUID()
-        fileImport = FileImport(id: id, conversationID: conversationID)
+        fileImportID = id
         return id
     }
 
@@ -63,40 +55,25 @@ struct ChatAttachmentDraft: Equatable {
         _ imported: [(attachment: ChatFileAttachment, sourceURL: URL)],
         notice: String?
     ) -> Bool {
-        guard fileImport?.id == id else { return false }
+        guard fileImportID == id else { return false }
         files = ChatFileAttachment.fittedForMessage(files + imported.map(\.attachment))
         for item in imported {
             sourcePaths[item.attachment.id] = Self.attachmentKey(for: item.sourceURL)
         }
         self.notice = notice
-        fileImport = nil
+        fileImportID = nil
         return true
     }
 
-    /// Invalidates the active generation and leaves a visible explanation.
-    /// Returns whether an import was actually cancelled so callers can avoid
-    /// announcing navigation that had no attachment work in flight.
+    /// Invalidates only the expected generation, when supplied. This prevents
+    /// late cleanup from an older task from cancelling newer work.
     @discardableResult
     mutating func cancelFileImport(id expectedID: UUID? = nil, notice: String? = nil) -> Bool {
-        guard let activeImport = fileImport else { return false }
-        guard expectedID == nil || expectedID == activeImport.id else { return false }
-        fileImport = nil
+        guard let activeID = fileImportID else { return false }
+        guard expectedID == nil || expectedID == activeID else { return false }
+        fileImportID = nil
         if let notice { self.notice = notice }
         return true
-    }
-
-    /// Cancels only work owned by a conversation other than the active one.
-    /// This remains correct even when SwiftUI delivers navigation after the new
-    /// conversation has already started its own import. An A -> B -> A sequence
-    /// intentionally preserves A's work, matching the persistent composer.
-    @discardableResult
-    mutating func cancelFileImport(
-        notOwnedBy conversationID: UUID,
-        notice: String? = nil
-    ) -> Bool {
-        guard let activeImport = fileImport else { return false }
-        guard activeImport.conversationID != conversationID else { return false }
-        return cancelFileImport(id: activeImport.id, notice: notice)
     }
 
     mutating func removeImage(id: UUID) {
@@ -118,7 +95,7 @@ struct ChatAttachmentDraft: Equatable {
         files = []
         sourcePaths = [:]
         notice = nil
-        fileImport = nil
+        fileImportID = nil
         return submission
     }
 
@@ -141,5 +118,19 @@ struct ChatAttachmentDraft: Equatable {
             fresh.append(url)
         }
         return (fresh, urls.count - fresh.count)
+    }
+}
+
+/// Conversation-keyed composer state.
+///
+/// Async work always writes through the ID it started with. Browsing another
+/// conversation therefore neither exposes the old draft nor cancels the new
+/// conversation's work; returning restores the original draft and results.
+struct ChatAttachmentDraftStore: Equatable {
+    private var drafts: [UUID: ChatAttachmentDraft] = [:]
+
+    subscript(conversationID: UUID) -> ChatAttachmentDraft {
+        get { drafts[conversationID] ?? ChatAttachmentDraft() }
+        set { drafts[conversationID] = newValue }
     }
 }
