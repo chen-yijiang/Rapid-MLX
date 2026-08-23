@@ -1044,7 +1044,7 @@ struct ChatView: View {
             // ownership here closes the window where A's completion could be
             // accepted into B's composer.
             guard viewModel.activeConversationID == importConversationID else {
-                cancelFileImportAfterNavigation()
+                cancelFileImportAfterNavigation(importID: importID)
                 return
             }
             let notice = selection.rejectedCount > 0
@@ -1055,9 +1055,9 @@ struct ChatView: View {
         return true
     }
 
-    private func cancelFileImportAfterNavigation() {
+    private func cancelFileImportAfterNavigation(importID: UUID? = nil) {
         let notice = "File import canceled because you switched conversations."
-        if attachmentDraft.cancelFileImport(notice: notice) {
+        if attachmentDraft.cancelFileImport(id: importID, notice: notice) {
             VoiceOverAnnouncer.announce(notice)
         }
     }

@@ -141,6 +141,25 @@ struct ChatAttachmentDraftTests {
         #expect(draft.files == [newFile])
     }
 
+    @Test("a stale generation cannot cancel the newer active import")
+    func staleGenerationCannotCancelNewImport() throws {
+        var draft = ChatAttachmentDraft()
+        let startedOldID = draft.beginFileImport()
+        let oldID = try #require(startedOldID)
+        _ = draft.cancelFileImport(id: oldID)
+        let startedNewID = draft.beginFileImport()
+        let newID = try #require(startedNewID)
+
+        let cancelled = draft.cancelFileImport(
+            id: oldID,
+            notice: "Old conversation changed."
+        )
+
+        #expect(!cancelled)
+        #expect(draft.fileImportID == newID)
+        #expect(draft.notice == nil)
+    }
+
     @Test("submission is an immutable snapshot of one composer turn")
     func submissionDoesNotFollowLaterDraftMutations() throws {
         let first = try makeImage(name: "first.png")
@@ -171,7 +190,7 @@ struct ChatAttachmentDraftTests {
         #expect(stripped.contains("letimportID=attachmentDraft.beginFileImport()"))
         #expect(stripped.contains("letimportConversationID=viewModel.activeConversationID"))
         #expect(stripped.contains(
-            "guardviewModel.activeConversationID==importConversationIDelse{cancelFileImportAfterNavigation()"
+            "guardviewModel.activeConversationID==importConversationIDelse{cancelFileImportAfterNavigation(importID:importID)"
         ))
         #expect(stripped.contains("attachmentDraft.finishFileImport(id:importID"))
         #expect(stripped.contains(
