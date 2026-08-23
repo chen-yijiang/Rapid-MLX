@@ -98,6 +98,13 @@ def test_gui_router_dependencies_are_desktop_scoped():
     )
 
 
+def test_gui_router_contract_runs_in_desktop_ci():
+    run = _step_run(
+        DESKTOP_WORKFLOW, "gui-harness-contracts", "GUI journey routing contract"
+    )
+    assert "pytest tests/test_gui_journey_routing.py -q" in run
+
+
 def test_engine_only_contracts_are_not_universal_pr_guards():
     universal_steps = {
         step.get("name") for step in _job(ENGINE_WORKFLOW, "lint")["steps"]

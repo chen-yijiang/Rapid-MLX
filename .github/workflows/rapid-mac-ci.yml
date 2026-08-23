@@ -221,6 +221,9 @@ jobs:
       - name: GUI golden-flow coverage contract
         run: pytest tests/test_gui_golden_ci_coverage.py -q
 
+      - name: GUI journey routing contract
+        run: pytest tests/test_gui_journey_routing.py -q
+
       - name: Fake sidecar catalog contract
         run: pytest tests/test_fake_sidecar_image_catalog.py -q
 
