@@ -97,8 +97,8 @@ PR workflow. `chat-depth` is explicitly local-only because the hosted runner's
 small window virtualizes its oldest transcript rows; all other declared flows
 are PR-gated when the full Desktop gate is selected.
 
-Each invocation writes a `result.json` containing its outcome, UTC start time,
-execution duration in seconds, and artifact directory. This makes per-journey
+Each journey execution writes a `result.json` containing its outcome, UTC start
+time, execution duration in seconds, and artifact directory. This makes per-journey
 timing and failure evidence machine-readable without parsing Actions logs.
 
 ### Current baseline
