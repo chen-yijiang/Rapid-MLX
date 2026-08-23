@@ -2396,8 +2396,8 @@ struct QuickstartView: View {
                     .accessibilityLabel("Browse all models")
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("B = 参数数量（十亿），越大越聪明")
-                        Text("4-bit = 量化精度，更省内存、更适合 Mac")
+                        Text("B = parameters (billions) — bigger is smarter")
+                        Text("4-bit = quantization precision — less RAM, more Mac-friendly")
                     }
                     .scaledSystemFont(11, weight: .regular)
                     .foregroundStyle(RapidTheme.textTertiary)
