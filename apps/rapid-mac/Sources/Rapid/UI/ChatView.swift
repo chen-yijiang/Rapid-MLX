@@ -1044,7 +1044,9 @@ struct ChatView: View {
             // Do not rely only on SwiftUI's onChange delivery: the observable
             // ID can change before SwiftUI schedules that callback. Comparing
             // ownership here closes the window where A's completion could be
-            // accepted into B's composer.
+            // accepted into B's composer. Returning to A before completion is
+            // intentionally accepted: this composer, including its draft text
+            // and ready chips, persists while the user browses conversations.
             guard viewModel.activeConversationID == importConversationID else {
                 cancelFileImportAfterNavigation(importID: importID)
                 return

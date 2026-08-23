@@ -5,6 +5,9 @@ import Foundation
 /// Keeping this outside ``ChatView`` makes the important identity and lifecycle
 /// rules directly testable: every input method feeds the same draft, a send
 /// atomically consumes it, and a later turn cannot inherit stale attachments.
+/// Like the text composer beside it, this draft survives conversation browsing;
+/// an import is accepted if the user returns to its owning conversation before
+/// completion, but can never land in or cancel work owned by another one.
 struct ChatAttachmentDraft: Equatable {
     struct FileImport: Equatable {
         let id: UUID
@@ -84,7 +87,8 @@ struct ChatAttachmentDraft: Equatable {
 
     /// Cancels only work owned by a conversation other than the active one.
     /// This remains correct even when SwiftUI delivers navigation after the new
-    /// conversation has already started its own import.
+    /// conversation has already started its own import. An A -> B -> A sequence
+    /// intentionally preserves A's work, matching the persistent composer.
     @discardableResult
     mutating func cancelFileImport(
         notOwnedBy conversationID: UUID,

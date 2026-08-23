@@ -182,6 +182,27 @@ struct ChatAttachmentDraftTests {
         #expect(draft.notice == nil)
     }
 
+    @Test("returning to the owning conversation preserves its pending import")
+    func abaNavigationPreservesOwningImport() throws {
+        let conversationA = UUID()
+        var draft = ChatAttachmentDraft()
+        let startedA = draft.beginFileImport(conversationID: conversationA)
+        let importA = try #require(startedA)
+        let file = try makeFile(name: "a.txt", text: "owned by A")
+
+        // SwiftUI may coalesce A -> B -> A into a final callback carrying A.
+        let cancelled = draft.cancelFileImport(notOwnedBy: conversationA)
+        let accepted = draft.finishFileImport(
+            id: importA,
+            [(file, URL(fileURLWithPath: "/tmp/a.txt"))],
+            notice: nil
+        )
+
+        #expect(!cancelled)
+        #expect(accepted)
+        #expect(draft.files == [file])
+    }
+
     @Test("submission is an immutable snapshot of one composer turn")
     func submissionDoesNotFollowLaterDraftMutations() throws {
         let first = try makeImage(name: "first.png")
