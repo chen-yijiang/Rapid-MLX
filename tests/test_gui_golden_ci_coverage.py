@@ -181,6 +181,18 @@ def test_early_precondition_failure_writes_typed_result_evidence(tmp_path: Path)
     datetime.strptime(payload["started_at"], "%Y-%m-%dT%H:%M:%SZ")
 
 
+def test_help_does_not_require_harness_runtime_dependencies():
+    result = subprocess.run(
+        ["bash", str(HARNESS), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Usage: gui-golden-flows.sh" in result.stdout
+
+
 def test_failure_diagnostic_regenerates_every_ci_baseline_and_nothing_else():
     assert diagnostic_flows() == workflow_flows() & baseline_flows()
 

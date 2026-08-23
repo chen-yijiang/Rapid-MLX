@@ -45,8 +45,8 @@ MAIN_WINDOW_ID=""
 BUNDLE_ID=""
 AX_DRIVER=""
 RESULT_WRITTEN=0
+RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RUN_STARTED_EPOCH="$(date +%s)"
-RUN_STARTED_AT="$(python3 -c 'from datetime import datetime, timezone; import sys; print(datetime.fromtimestamp(int(sys.argv[1]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$RUN_STARTED_EPOCH")"
 PERSONA_ENV=()
 
 usage() {
