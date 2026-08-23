@@ -11,6 +11,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 HARNESS = ROOT / "apps/rapid-mac/scripts/gui-golden-flows.sh"
 WORKFLOW = ROOT / ".github/workflows/rapid-mac-ci.yml"
+MANIFEST = ROOT / "apps/rapid-mac/Tests/GUIGoldenFlows/journeys.yaml"
 
 # `chat-depth` requires all five turns to be simultaneously realised in AX.
 # The hosted runner's 1024x681 app window virtualises the oldest messages, so
@@ -44,6 +45,12 @@ def workflow_steps() -> list[dict[str, object]]:
     return yaml.safe_load(WORKFLOW.read_text())["jobs"]["gui-golden-flows"]["steps"]
 
 
+def manifest_journeys() -> list[dict[str, object]]:
+    payload = yaml.safe_load(MANIFEST.read_text())
+    assert payload["version"] == 1
+    return payload["journeys"]
+
+
 def diagnostic_flows() -> set[str]:
     workflow = WORKFLOW.read_text()
     loop = workflow.split("for flow in ", 1)[1].split("; do", 1)[0]
@@ -66,6 +73,71 @@ def test_every_named_flow_is_gated_or_explicitly_excluded():
     gated = workflow_flows()
     assert named - gated == CI_EXCLUSIONS
     assert not gated - named
+
+
+def test_manifest_is_the_complete_unique_flow_inventory():
+    journeys = manifest_journeys()
+    names = [str(journey["name"]) for journey in journeys]
+    assert len(names) == len(set(names))
+    assert set(names) == harness_flows()
+
+
+def test_manifest_fields_are_valid_and_fail_closed():
+    allowed_groups = {
+        "chat",
+        "audio",
+        "models",
+        "onboarding-settings",
+        "images",
+        "app-lifecycle",
+    }
+    allowed_risks = {"low", "medium", "high"}
+    allowed_drivers = {"ax", "xcuitest", "hybrid"}
+    allowed_tiers = {"pr", "local"}
+
+    for journey in manifest_journeys():
+        assert journey["group"] in allowed_groups
+        assert journey["risk"] in allowed_risks
+        assert journey["driver"] in allowed_drivers
+        assert journey["ci_tier"] in allowed_tiers
+        assert journey["fixtures"]
+        assert journey["source_paths"]
+        assert all(
+            str(path).startswith("apps/rapid-mac/") for path in journey["source_paths"]
+        )
+        assert all((ROOT / str(path)).exists() for path in journey["source_paths"])
+        assert isinstance(journey["owns_baseline"], bool)
+
+
+def test_manifest_ci_tiers_match_the_workflow_contract():
+    pr_flows = {
+        str(journey["name"])
+        for journey in manifest_journeys()
+        if journey["ci_tier"] == "pr"
+    }
+    local_flows = {
+        str(journey["name"])
+        for journey in manifest_journeys()
+        if journey["ci_tier"] == "local"
+    }
+    assert pr_flows == workflow_flows()
+    assert local_flows == CI_EXCLUSIONS
+
+
+def test_manifest_baseline_ownership_matches_harness_usage():
+    declared = {
+        str(journey["name"])
+        for journey in manifest_journeys()
+        if journey["owns_baseline"]
+    }
+    assert declared == baseline_flows()
+
+
+def test_result_evidence_records_timing_and_artifact_location():
+    source = HARNESS.read_text()
+    assert source.count("duration_seconds: $duration_seconds") == 2
+    assert source.count("artifact_path: $artifact_path") == 2
+    assert source.count("started_at: $started_at") == 2
 
 
 def test_failure_diagnostic_regenerates_every_ci_baseline_and_nothing_else():
