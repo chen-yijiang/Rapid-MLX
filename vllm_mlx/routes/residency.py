@@ -47,7 +47,14 @@ class ModelLoadRequest(BaseModel):
     image_mode: Literal["generation", "editing"] | None = None
     performance: ModelPerformanceRequest | None = None
     reload_if_changed: bool = False
-    replace_mode: Literal["reject", "wait", "abort"] = "reject"
+    replace_mode: Literal["reject", "wait", "abort"] = Field(
+        default="reject",
+        description=(
+            "Replacement policy: reject returns a busy conflict immediately; "
+            "wait blocks for existing inference to drain (with a bounded server "
+            "deadline); abort cancels existing inference before replacement."
+        ),
+    )
 
 
 class ModelPinRequest(BaseModel):

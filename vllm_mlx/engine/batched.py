@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # appended. Replay a negligible suffix so non-trimmable caches never snapshot
 # an optimistic boundary that the next request cannot reuse.
 _PREFIX_BOUNDARY_REPLAY_TOKENS = 8
+_DEFAULT_LIFECYCLE_DRAIN_TIMEOUT_SECONDS = 300.0
 _admission_token_context: contextvars.ContextVar[tuple[int, tuple[int, ...]] | None] = (
     contextvars.ContextVar("rapid_mlx_admission_token", default=None)
 )
@@ -1150,9 +1151,12 @@ class BatchedEngine(BaseEngine):
                 and initial["queued_requests"] == 0
             ):
                 return initial
-            if timeout is None:
-                return await _drain()
-            return await asyncio.wait_for(_drain(), timeout=max(0.0, timeout))
+            effective_timeout = (
+                _DEFAULT_LIFECYCLE_DRAIN_TIMEOUT_SECONDS
+                if timeout is None
+                else max(0.0, timeout)
+            )
+            return await asyncio.wait_for(_drain(), timeout=effective_timeout)
         except BaseException as original:
             # `pause_generation` is a safe public transaction boundary: a
             # timed-out or cancelled direct caller cannot leave both gates

@@ -272,22 +272,22 @@ def test_request_id_snapshot_is_safe_during_concurrent_mutation(scheduler_type):
     scheduler = scheduler_type.__new__(scheduler_type)
     scheduler._cancel_counter_lock = threading.Lock()
     scheduler.requests = {}
-    start = threading.Event()
+    result = []
+    scheduler._cancel_counter_lock.acquire()
+    try:
+        reader = threading.Thread(
+            target=lambda: result.append(scheduler.request_ids_snapshot())
+        )
+        reader.start()
+        # Snapshot must be blocked on the exact lock used for request commits.
+        reader.join(timeout=0.01)
+        assert reader.is_alive()
+        scheduler.requests.update({"one": 1, "two": 2})
+    finally:
+        scheduler._cancel_counter_lock.release()
 
-    def mutate():
-        start.wait()
-        for index in range(2_000):
-            with scheduler._cancel_counter_lock:
-                scheduler.requests[str(index)] = index
-                if index:
-                    scheduler.requests.pop(str(index - 1), None)
-
-    writer = threading.Thread(target=mutate)
-    writer.start()
-    start.set()
-    for _ in range(2_000):
-        assert isinstance(scheduler.request_ids_snapshot(), tuple)
-    writer.join()
+    reader.join(timeout=1)
+    assert result == [("one", "two")]
 
 
 @pytest.mark.asyncio
