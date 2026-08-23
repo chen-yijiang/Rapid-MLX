@@ -211,6 +211,19 @@ def test_scheduler_transfer_releases_route_owned_reservation():
     assert engine._admission_tokens == set()
 
 
+def test_lifecycle_active_requests_is_authoritative_total():
+    running = {"one": object(), "two": object()}
+    engine, scheduler = _engine(reservations=1, running=running)
+    scheduler.waiting.append(object())
+
+    status = engine.lifecycle_status()
+
+    assert status["admitted_requests"] == 1
+    assert status["running_requests"] == 2
+    assert status["queued_requests"] == 1
+    assert status["active_requests"] == 4
+
+
 @pytest.mark.parametrize("scheduler_type", [Scheduler, MLLMScheduler])
 def test_request_id_snapshot_is_safe_during_concurrent_mutation(scheduler_type):
     scheduler = scheduler_type.__new__(scheduler_type)

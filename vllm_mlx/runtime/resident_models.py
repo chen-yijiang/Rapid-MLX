@@ -770,15 +770,32 @@ class ResidentModelManager:
         return candidates, paused_engines
 
     async def _resume_engines(self, engines: list[object]) -> None:
+        cancellation: asyncio.CancelledError | None = None
         for engine in reversed(engines):
             resume = getattr(engine, "resume_generation", None)
             if callable(resume):
+                task = asyncio.create_task(resume())
                 try:
-                    await resume()
-                except BaseException:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+                    try:
+                        await asyncio.wait_for(task, timeout=5.0)
+                    except (Exception, asyncio.CancelledError):
+                        logger.exception(
+                            "Failed to finish resuming a model engine after cancellation"
+                        )
+                except TimeoutError:
+                    task.cancel()
+                    logger.error(
+                        "Timed out resuming one model engine after replacement rollback"
+                    )
+                except Exception:
                     logger.exception(
                         "Failed to resume one model engine after replacement rollback"
                     )
+        if cancellation is not None:
+            raise cancellation
 
     async def _commit_group_replacement_locked(
         self,
@@ -953,8 +970,6 @@ class ResidentModelManager:
                 active_requests = max(
                     active_requests,
                     int(lifecycle.get("active_requests", 0) or 0),
-                    int(lifecycle.get("running_requests", 0) or 0),
-                    int(lifecycle.get("queued_requests", 0) or 0),
                 )
             models.append(
                 {

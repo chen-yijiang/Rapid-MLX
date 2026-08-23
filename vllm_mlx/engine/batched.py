@@ -1039,12 +1039,15 @@ class BatchedEngine(BaseEngine):
             mode = getattr(self, "_generation_pause_mode", None)
             admitted = getattr(self, "_admission_reservations", 0)
         stats = self.get_stats()
+        running = int(stats.get("num_running", 0) or 0)
+        queued = int(stats.get("num_waiting", 0) or 0)
         return {
             "paused": paused,
             "pause_mode": mode,
-            "active_requests": admitted,
-            "running_requests": int(stats.get("num_running", 0) or 0),
-            "queued_requests": int(stats.get("num_waiting", 0) or 0),
+            "active_requests": admitted + running + queued,
+            "admitted_requests": admitted,
+            "running_requests": running,
+            "queued_requests": queued,
         }
 
     def _lifecycle_request_ids(self) -> set[str]:
