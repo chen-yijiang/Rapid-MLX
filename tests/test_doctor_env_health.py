@@ -274,6 +274,25 @@ def test_agent_integration_accepts_ddtree_health_payload(tmp_path):
     assert section.checks[0].status is eh.CheckStatus.OK
 
 
+def test_agent_integration_accepts_dflash_health_payload(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8000"}}')
+
+    section = eh.section_agent_integrations(
+        home=tmp_path,
+        open_url=lambda *_args, **_kwargs: _HTTPResponse(
+            payload={
+                "status": "ok",
+                "engine": "dflash",
+                "mode": "single-user-serial",
+                "drafter": "mlx-community/drafter",
+            }
+        ),
+    )
+    assert section.checks[0].status is eh.CheckStatus.OK
+
+
 def test_agent_integrations_probe_every_existing_cline_config(tmp_path):
     roots = [
         tmp_path / "Library/Application Support/Code/User/globalStorage",

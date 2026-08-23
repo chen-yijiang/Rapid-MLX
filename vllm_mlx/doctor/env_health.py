@@ -1357,7 +1357,13 @@ def _agent_server_alive(
                 and payload.get("status") in {"ok", "loading", "error"}
                 and isinstance(payload.get("ready"), bool)
             )
-            return standard or ddtree
+            dflash = (
+                payload.get("engine") == "dflash"
+                and payload.get("status") == "ok"
+                and payload.get("mode") == "single-user-serial"
+                and isinstance(payload.get("drafter"), str)
+            )
+            return standard or ddtree or dflash
     except urllib.error.HTTPError:
         # An auth challenge proves that *something* answered, but not that it
         # was Rapid-MLX. Without a health payload the identity is unverifiable.
