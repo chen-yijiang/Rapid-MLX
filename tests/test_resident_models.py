@@ -351,7 +351,7 @@ async def test_second_image_model_evicts_the_first_without_an_explicit_group():
 
 
 @pytest.mark.asyncio
-async def test_failed_assistant_replacement_rolls_back_newly_loaded_model():
+async def test_busy_assistant_replacement_rejects_before_loading_model():
     manager, registry, loaded, _ = manager_fixture(limit_gib=20)
     registry.get_engine("chat").running = 1
 
@@ -364,7 +364,7 @@ async def test_failed_assistant_replacement_rolls_back_newly_loaded_model():
 
     assert "chat" in registry
     assert "chat-new" not in registry
-    assert loaded["chat-new"].stopped is True
+    assert "chat-new" not in loaded
     assert {item["id"] for item in manager.snapshot()["models"]} == {"chat"}
 
 
@@ -374,8 +374,11 @@ async def test_assistant_replacement_pauses_engine_before_stopping_it():
     old_engine = FakeLifecycleEngine()
     primary = entry("chat-old", old_engine)
     registry.add(primary, is_default=True)
+    loader_called = False
 
     async def loader(name: str, path: str | None, performance=None):
+        nonlocal loader_called
+        loader_called = True
         return entry(name)
 
     manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
@@ -471,8 +474,11 @@ async def test_rejected_busy_replacement_reopens_engine_admission():
     old_engine.running = 1
     primary = entry("chat-old", old_engine)
     registry.add(primary, is_default=True)
+    loader_called = False
 
     async def loader(name: str, path: str | None, performance=None):
+        nonlocal loader_called
+        loader_called = True
         return entry(name)
 
     manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
@@ -484,6 +490,7 @@ async def test_rejected_busy_replacement_reopens_engine_admission():
     assert old_engine.pauses == [("wait", 0)]
     assert old_engine.paused is False
     assert old_engine.stopped is False
+    assert loader_called is False
 
 
 def test_residency_status_uses_engine_owned_request_counts():

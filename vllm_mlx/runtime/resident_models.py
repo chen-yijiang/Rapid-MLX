@@ -580,14 +580,25 @@ class ResidentModelManager:
                     await self._replace_group_locked(record, group, replace_mode)
                 return record
 
-            await self._evict_for_locked(estimate, exclude={model_name})
-            before = self._read_memory()
-            if image_mode is None:
-                entry = await self.loader(model_name, model_path, performance)
-            else:
-                entry = await self.loader(
-                    model_name, model_path, performance, image_mode
+            candidates: list[ResidencyRecord] = []
+            paused_engines: list[object] = []
+            reject_preflight = replace_mode == "reject" and replace_group is not None
+            if reject_preflight:
+                candidates, paused_engines = await self._quiesce_group_name_locked(
+                    replace_group, replace_mode
                 )
+            try:
+                await self._evict_for_locked(estimate, exclude={model_name})
+                before = self._read_memory()
+                if image_mode is None:
+                    entry = await self.loader(model_name, model_path, performance)
+                else:
+                    entry = await self.loader(
+                        model_name, model_path, performance, image_mode
+                    )
+            except BaseException as original:
+                await self._resume_after_failure(paused_engines, original)
+                raise
             now = self._clock()
             after = self._read_memory()
             delta = max(0, after - before) if before and after else 0
@@ -601,13 +612,18 @@ class ResidentModelManager:
                 performance=performance,
             )
             group = _effective_replace_group(record.entry, replace_group)
-            candidates: list[ResidencyRecord] = []
-            paused_engines: list[object] = []
             try:
                 if group is not None:
-                    candidates, paused_engines = await self._quiesce_group_locked(
-                        record, group, replace_mode
-                    )
+                    if reject_preflight:
+                        if group != replace_group:
+                            raise ResidentModelError(
+                                f"model {record.model_id!r} does not belong to "
+                                f"replacement group {replace_group!r}"
+                            )
+                    else:
+                        candidates, paused_engines = await self._quiesce_group_locked(
+                            record, group, replace_mode
+                        )
                 # Publish only after every replaced engine is quiescent. This
                 # prevents an explicit request for the new id from racing the
                 # replacement transaction while the old engine is draining.
@@ -766,10 +782,23 @@ class ResidentModelManager:
                 f"model {target.model_id!r} does not belong to replacement group {group!r}"
             )
 
+        return await self._quiesce_group_name_locked(
+            group, replace_mode, exclude_model_id=target.model_id
+        )
+
+    async def _quiesce_group_name_locked(
+        self,
+        group: str,
+        replace_mode: str,
+        *,
+        exclude_model_id: str | None = None,
+    ) -> tuple[list[ResidencyRecord], list[object]]:
+        """Pause every replaceable engine in a named lifecycle group."""
+
         candidates = [
             record
             for record in self._records.values()
-            if record.model_id != target.model_id
+            if record.model_id != exclude_model_id
             and _replacement_group(record.entry) == group
         ]
         if replace_mode not in {"reject", "wait", "abort"}:
