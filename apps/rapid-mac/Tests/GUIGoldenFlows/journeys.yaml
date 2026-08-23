@@ -26,6 +26,13 @@ routing:
     audio:
       - apps/rapid-mac/Sources/Rapid/UI/AudioView.swift
       - apps/rapid-mac/Sources/Rapid/UI/DictationView.swift
+      # Stateful app-to-UI boundaries; leaf policies and clients remain unit-only.
+      - apps/rapid-mac/Sources/Rapid/Audio/AudioViewModel.swift
+      - apps/rapid-mac/Sources/Rapid/Dictation/DictationController.swift
+      - apps/rapid-mac/Sources/Rapid/Dictation/DictationHUD.swift
+      - apps/rapid-mac/Sources/Rapid/Dictation/DictationHotkey.swift
+      - apps/rapid-mac/Sources/Rapid/Dictation/DictationInjector.swift
+      - apps/rapid-mac/Sources/Rapid/Dictation/DictationRecorder.swift
     models:
       - apps/rapid-mac/Sources/Rapid/UI/SettingsModelManagementPanel.swift
       - apps/rapid-mac/Sources/Rapid/UI/ModelPickerBar.swift
@@ -41,9 +48,11 @@ routing:
       - apps/rapid-mac/Sources/Rapid/UI/SettingsRouter.swift
       - apps/rapid-mac/Sources/Rapid/UI/AppearanceConfig.swift
       - apps/rapid-mac/Sources/Rapid/UI/TelemetryConsentView.swift
+      - apps/rapid-mac/Sources/Rapid/Updater/
     images:
       - apps/rapid-mac/Sources/Rapid/UI/ImagesView.swift
       - apps/rapid-mac/Sources/Rapid/UI/InstructionTextEditor.swift
+      - apps/rapid-mac/Sources/Rapid/Images/ImageGenViewModel.swift
     app-lifecycle:
       - apps/rapid-mac/Sources/Rapid/RapidApp.swift
       - apps/rapid-mac/Sources/Rapid/UI/MainWindowCloseInterceptor.swift
@@ -54,8 +63,9 @@ routing:
 
 # Machine-readable inventory for GUI coverage and future source-based routing.
 # `source_paths` are intentionally conservative product-area prefixes, not a
-# promise that every edit below them requires this journey. Routing will be a
-# separate, fail-closed change once this inventory is established.
+# promise that every edit below them requires this journey. The routing table
+# above narrows these broad ownership hints to UI and stateful integration
+# boundaries; leaf logic remains covered by Swift tests and the app build.
 journeys:
   - name: fresh-install
     group: onboarding-settings

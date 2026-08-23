@@ -26,7 +26,12 @@ def groups(*paths: str, force_all: bool = False) -> set[str]:
         ("apps/rapid-mac/Sources/Rapid/UI/Markdown/MathView.swift", {"chat"}),
         ("apps/rapid-mac/Sources/Rapid/UI/AudioView.swift", {"audio"}),
         ("apps/rapid-mac/Sources/Rapid/UI/DictationView.swift", {"audio"}),
+        (
+            "apps/rapid-mac/Sources/Rapid/Dictation/DictationController.swift",
+            {"audio"},
+        ),
         ("apps/rapid-mac/Sources/Rapid/UI/ImagesView.swift", {"images"}),
+        ("apps/rapid-mac/Sources/Rapid/Images/ImageGenViewModel.swift", {"images"}),
         (
             "apps/rapid-mac/Sources/Rapid/UI/SettingsModelManagementPanel.swift",
             {"models"},
@@ -38,6 +43,10 @@ def groups(*paths: str, force_all: bool = False) -> set[str]:
         (
             "apps/rapid-mac/Sources/Rapid/UI/CampaignBanner.swift",
             {"app-lifecycle"},
+        ),
+        (
+            "apps/rapid-mac/Sources/Rapid/Updater/UpdateChecker.swift",
+            {"onboarding-settings"},
         ),
     ],
 )
@@ -51,6 +60,7 @@ def test_domain_ui_routes_to_one_group(path: str, expected: set[str]):
         "apps/rapid-mac/Sources/Rapid/Chat/ChatAttachmentDraft.swift",
         "apps/rapid-mac/Sources/Rapid/Audio/AudioClient.swift",
         "apps/rapid-mac/Sources/Rapid/Dictation/DictationEnablePolicy.swift",
+        "apps/rapid-mac/Sources/Rapid/Images/ImageClient.swift",
         "apps/rapid-mac/Sources/Rapid/Server/ModelCatalog.swift",
         "apps/rapid-mac/Tests/RapidTests/ChatAttachmentDraftTests.swift",
         "README.md",
