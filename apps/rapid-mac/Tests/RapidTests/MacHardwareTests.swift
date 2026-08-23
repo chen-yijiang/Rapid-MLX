@@ -104,17 +104,32 @@ struct MacHardwareTests {
 
     @Test("RAM override is ignored when not set or invalid")
     func goldenRAMOverrideIgnoredWhenAbsent() {
-        // No env pin → the real sysctl probe runs (non-zero on any Mac).
-        let absent = MacHardware.physicalRAMBytes(environment: [:])
-        #expect(absent > 0)
-        // A non-parserable or non-positive value also falls back to sysctl.
-        let bad = MacHardware.physicalRAMBytes(environment: ["RAPID_HARDWARE_RAM_GB": "not-a-number"])
-        #expect(bad > 0)
-        let nonFinite = MacHardware.physicalRAMBytes(environment: ["RAPID_HARDWARE_RAM_GB": "inf"])
-        #expect(nonFinite > 0)
+        let fallback: UInt64 = 24 * UInt64(1 << 30)
+        // Missing, malformed, non-finite, and implausibly large values must
+        // return the exact probe result, not merely an arbitrary nonzero value.
+        let absent = MacHardware.physicalRAMBytes(environment: [:]) { fallback }
+        #expect(absent == fallback)
+        let bad = MacHardware.physicalRAMBytes(
+            environment: ["RAPID_HARDWARE_RAM_GB": "not-a-number"]
+        ) { fallback }
+        #expect(bad == fallback)
+        let nonFinite = MacHardware.physicalRAMBytes(
+            environment: ["RAPID_HARDWARE_RAM_GB": "inf"]
+        ) { fallback }
+        #expect(nonFinite == fallback)
         let implausiblyLarge = MacHardware.physicalRAMBytes(
             environment: ["RAPID_HARDWARE_RAM_GB": "1e100"]
-        )
-        #expect(implausiblyLarge > 0)
+        ) { fallback }
+        #expect(implausiblyLarge == fallback)
+    }
+
+    @Test("Golden hardware brand is deterministic and bounded")
+    func goldenHardwareBrand() {
+        #expect(MacHardware.brandString(environment: [
+            "RAPID_HARDWARE_BRAND": "Apple M1",
+        ]) == "Apple M1")
+        #expect(MacHardware.brandString(environment: [
+            "RAPID_HARDWARE_BRAND": String(repeating: "x", count: 129),
+        ]) != String(repeating: "x", count: 129))
     }
 }

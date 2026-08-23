@@ -55,15 +55,13 @@ struct MacHardware: Sendable, Equatable {
     /// through to ``.mUnknown / .unknown`` rather than crashing the
     /// picker).
     ///
-    /// ``RAPID_HARDWARE_RAM_GB`` (a decimal GB of total physical RAM)
-    /// overrides ``hw.memsize`` when set and parseable. Production
-    /// launches never set it, so the picker still reflects the real
-    /// Mac; the golden flows set it to a fixed tier so their structural
-    /// AX baselines are deterministic across hosts of very different
-    /// RAM.
+    /// ``RAPID_HARDWARE_RAM_GB`` and ``RAPID_HARDWARE_BRAND`` override
+    /// the corresponding probes when valid. Production launches never set
+    /// them; golden flows pin both so AX output is host-independent.
     static func detect() -> MacHardware {
-        let brand = sysctlString("machdep.cpu.brand_string") ?? "Apple Silicon"
-        let mem = Self.physicalRAMBytes(environment: ProcessInfo.processInfo.environment)
+        let environment = ProcessInfo.processInfo.environment
+        let brand = Self.brandString(environment: environment)
+        let mem = Self.physicalRAMBytes(environment: environment)
         let (family, tier) = Self.classify(brand)
         let bw = Self.bandwidthGBs(family: family, tier: tier)
         return MacHardware(
@@ -76,16 +74,33 @@ struct MacHardware: Sendable, Equatable {
     }
 
     /// ``hw.memsize`` in bytes, unless ``RAPID_HARDWARE_RAM_GB`` pins
-    /// it. Only the RAM is overridable — the chip brand still comes
-    /// from this host, so the labelled chip family stays truthful.
-    /// Pure so the golden-flow pin is unit-testable without mutating
-    /// the test process's global environment.
+    /// it. Pure so the golden-flow pin is unit-testable without mutating the
+    /// test process's global environment.
     static func physicalRAMBytes(environment: [String: String]) -> UInt64 {
+        physicalRAMBytes(environment: environment) {
+            sysctlUInt64("hw.memsize")
+        }
+    }
+
+    static func physicalRAMBytes(
+        environment: [String: String],
+        fallback: () -> UInt64?
+    ) -> UInt64 {
         if let override = environment["RAPID_HARDWARE_RAM_GB"],
            let gb = Double(override), gb.isFinite, gb > 0, gb <= 1024 {
             return UInt64((gb * Double(1 << 30)).rounded())
         }
-        return sysctlUInt64("hw.memsize") ?? 0
+        return fallback() ?? 0
+    }
+
+    /// The golden harness pins the displayed chip together with RAM so AX
+    /// output remains identical across CI and release-validation Macs.
+    static func brandString(environment: [String: String]) -> String {
+        if let override = environment["RAPID_HARDWARE_BRAND"],
+           !override.isEmpty, override.utf8.count <= 128 {
+            return override
+        }
+        return sysctlString("machdep.cpu.brand_string") ?? "Apple Silicon"
     }
 
     // MARK: - Display helpers
