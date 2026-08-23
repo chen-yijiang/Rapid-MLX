@@ -415,13 +415,15 @@ enum WebSearchTool {
                 return ToolCallResult(
                     toolCallID: "",
                     content: "\(toolName) error: Keenable rejected the API key (HTTP \(http.statusCode)). Re-paste it in Settings → Tools → Web search.",
-                    isError: true
+                    isError: true,
+                    failureKind: .webSearchKeyRejected
                 )
             case 402 where apiKey != nil:
                 return ToolCallResult(
                     toolCallID: "",
                     content: "\(toolName) error: the Keenable key's monthly credit allowance is used up (HTTP 402). Searches continue on the keyless pool if you clear the key.",
-                    isError: true
+                    isError: true,
+                    failureKind: .webSearchKeyQuotaExceeded
                 )
             case 429 where apiKey != nil:
                 // Codex r1 MAJOR: a keyed 429 is an account problem
@@ -432,7 +434,8 @@ enum WebSearchTool {
                 return ToolCallResult(
                     toolCallID: "",
                     content: "\(toolName) error: Keenable rate limit hit for this API key (HTTP 429). Wait a moment or check the plan's limits.",
-                    isError: true
+                    isError: true,
+                    failureKind: .webSearchKeyRateLimited
                 )
             default:
                 // Keyless 429 (shared pool exhausted), 5xx, or any
