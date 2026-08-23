@@ -33,6 +33,10 @@ class ResidentModelBusyError(ResidentModelError):
     """A model cannot be removed while it owns active work."""
 
 
+class _CommittedReplacementCancelled(asyncio.CancelledError):
+    """Cancellation delivered after the replacement became routable."""
+
+
 @dataclass(frozen=True)
 class ResidentPerformanceConfig:
     """Audited scheduler overrides attached to one resident text model.
@@ -568,23 +572,9 @@ class ResidentModelManager:
                     await self._commit_group_replacement_locked(
                         record, group, candidates
                     )
+            except _CommittedReplacementCancelled as exc:
+                raise asyncio.CancelledError from exc
             except BaseException:
-                # `_commit_group_replacement_locked` publishes the target and
-                # removes every predecessor before awaiting teardown.  A task
-                # cancellation delivered while one of those stops is awaited
-                # must therefore propagate without rolling back the already
-                # committed target (there may no longer be an old engine that
-                # can be made routable again).
-                committed = (
-                    group is not None
-                    and record.model_id in self._records
-                    and all(
-                        candidate.model_id not in self._records
-                        for candidate in candidates
-                    )
-                )
-                if committed:
-                    raise
                 # Once the loader returns, this manager owns the engine.  A
                 # later admission/replacement failure must not leave a model
                 # resident even though the control-plane request was rejected.
@@ -710,11 +700,9 @@ class ResidentModelManager:
         )
         try:
             await self._commit_group_replacement_locked(target, group, candidates)
+        except _CommittedReplacementCancelled as exc:
+            raise asyncio.CancelledError from exc
         except BaseException:
-            if target.model_id in self._records and all(
-                candidate.model_id not in self._records for candidate in candidates
-            ):
-                raise
             await self._resume_engines(paused_engines)
             raise
 
@@ -851,7 +839,7 @@ class ResidentModelManager:
                     )
         _release_allocator_cache()
         if cancellation is not None:
-            raise cancellation
+            raise _CommittedReplacementCancelled from cancellation
 
     async def set_pinned(self, model_name: str, pinned: bool) -> ResidencyRecord:
         async with self._lock:

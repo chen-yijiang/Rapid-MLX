@@ -156,6 +156,7 @@ class MLLMRequest:
     # Token counts
     num_prompt_tokens: int = 0
     num_output_tokens: int = 0
+    lifecycle_admission_token: str | None = None
 
 
 def _find_stop_match_in_new_window(
@@ -525,20 +526,16 @@ class MLLMScheduler:
         Returns:
             Request ID for tracking
         """
-        pause_allowance_consumed = False
         with self._request_state_lock():
-            paused = getattr(self, "_generation_paused", False)
-        if paused:
-            from .scheduler import BackpressureError
+            if getattr(self, "_generation_paused", False):
+                from .scheduler import BackpressureError
 
-            with self._request_state_lock():
-                allowance = getattr(self, "_paused_add_allowance", 0)
-                if allowance <= 0:
+                allowed = getattr(self, "_paused_admission_tokens", set())
+                token = kwargs.get("lifecycle_admission_token")
+                if token not in allowed:
                     raise BackpressureError(
                         "generation is paused for an engine lifecycle operation"
                     )
-                self._paused_add_allowance = allowance - 1
-                pause_allowance_consumed = True
         if request_id is None:
             request_id = str(uuid.uuid4())
 
@@ -589,6 +586,7 @@ class MLLMScheduler:
             stop=stop or [],
             video_fps=video_fps,
             video_max_frames=video_max_frames,
+            lifecycle_admission_token=kwargs.pop("lifecycle_admission_token", None),
         )
 
         # D-M01-2X (0.8.2 dogfood, codex r10 BLOCKING follow-up):
@@ -606,18 +604,15 @@ class MLLMScheduler:
         # ``Scheduler.remove_finished_request`` docstring for the
         # multi-branch race repro the persistence plugs.
         with self._cancel_counter_lock:
-            if (
-                getattr(self, "_generation_paused", False)
-                and not pause_allowance_consumed
-            ):
+            if getattr(self, "_generation_paused", False):
                 from .scheduler import BackpressureError
 
-                allowance = getattr(self, "_paused_add_allowance", 0)
-                if allowance <= 0:
+                allowed = getattr(self, "_paused_admission_tokens", set())
+                if request.lifecycle_admission_token not in allowed:
                     raise BackpressureError(
                         "generation is paused for an engine lifecycle operation"
                     )
-                self._paused_add_allowance = allowance - 1
+                allowed.remove(request.lifecycle_admission_token)
             self._cancelled_request_ids.discard(request_id)
             self._disconnect_abort_ids.discard(request_id)
             self.requests[request_id] = request
@@ -645,17 +640,22 @@ class MLLMScheduler:
         with self._request_state_lock():
             self._generation_paused = bool(paused)
             self._paused_add_allowance = max(0, int(add_allowance)) if paused else 0
+            self._paused_admission_tokens = set()
 
-    def pause_generation_admission(self, admitted_reservations: int, mode: str) -> None:
+    def pause_generation_admission(self, admission_tokens: set[str], mode: str) -> None:
         """Atomically close admission and account for pre-pause reservations."""
 
         with self._request_state_lock():
             self._generation_paused = True
-            self._paused_add_allowance = (
-                max(0, int(admitted_reservations) - len(self.requests))
-                if mode == "wait"
-                else 0
+            owned = {
+                request.lifecycle_admission_token
+                for request in self.requests.values()
+                if request.lifecycle_admission_token is not None
+            }
+            self._paused_admission_tokens = (
+                set(admission_tokens) - owned if mode == "wait" else set()
             )
+            self._paused_add_allowance = len(self._paused_admission_tokens)
 
     def request_ids_snapshot(self) -> tuple[str, ...]:
         """Return an atomic snapshot of all queued/running request ids."""

@@ -639,6 +639,34 @@ async def test_rollback_stop_failure_still_resumes_old_engine(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_post_publish_failure_without_candidates_rolls_target_back(monkeypatch):
+    registry = ModelRegistry()
+    loaded_engine = FakeEngine()
+
+    async def loader(name: str, path: str | None, performance=None):
+        return entry(name, loaded_engine)
+
+    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
+    calls = 0
+    original = manager._evict_for_locked  # noqa: SLF001
+
+    async def fail_after_publish(incoming_bytes, exclude):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("post-publish failure")
+        return await original(incoming_bytes, exclude)
+
+    monkeypatch.setattr(manager, "_evict_for_locked", fail_after_publish)
+
+    with pytest.raises(RuntimeError, match="post-publish failure"):
+        await manager.load("chat-new", replace_group="assistant", replace_mode="wait")
+
+    assert "chat-new" not in registry
+    assert loaded_engine.stopped is True
+
+
+@pytest.mark.asyncio
 async def test_resume_attempts_every_engine_after_one_resume_fails():
     manager, _, _, _ = manager_fixture()
     engines = [

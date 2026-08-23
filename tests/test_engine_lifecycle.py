@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm_mlx.engine.batched import BatchedEngine
+from vllm_mlx.engine.batched import BatchedEngine, _admission_token_context
 from vllm_mlx.engine_core import EngineCore
 from vllm_mlx.mllm_scheduler import MLLMScheduler
 from vllm_mlx.output_collector import RequestOutputCollector
@@ -19,6 +19,9 @@ def _engine(*, reservations: int = 0, running: dict | None = None):
     engine._mllm_scheduler = None
     engine._admission_lock = threading.Lock()
     engine._admission_reservations = reservations
+    engine._admission_tokens = {f"reserved-{index}" for index in range(reservations)}
+    if reservations:
+        _admission_token_context.set((id(engine), "reserved-0"))
     engine._generation_paused = False
     engine._generation_pause_mode = None
     scheduler = SimpleNamespace(
@@ -147,12 +150,15 @@ def test_scheduler_pause_atomically_accounts_for_already_owned_requests(
 ):
     scheduler = scheduler_type.__new__(scheduler_type)
     scheduler._cancel_counter_lock = threading.Lock()
-    scheduler.requests = {"already-owned": object()}
+    scheduler.requests = {
+        "already-owned": SimpleNamespace(lifecycle_admission_token="owned")
+    }
 
-    scheduler.pause_generation_admission(2, "wait")
+    scheduler.pause_generation_admission({"owned", "pending"}, "wait")
 
     assert scheduler._generation_paused is True
     assert scheduler._paused_add_allowance == 1
+    assert scheduler._paused_admission_tokens == {"pending"}
 
     scheduler.set_generation_paused(False)
     assert scheduler._generation_paused is False
