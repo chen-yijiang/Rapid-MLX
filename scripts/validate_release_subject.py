@@ -31,6 +31,7 @@ try:
 except ModuleNotFoundError:  # imported by tests as ``scripts.*`` from repo root
     from scripts.release_version import SUBJECT_RE
 
+
 def diagnose(subject: str) -> list[str]:
     """Return a list of human-readable problems with the subject.
 

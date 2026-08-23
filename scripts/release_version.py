@@ -15,7 +15,9 @@ import re
 import sys
 from dataclasses import dataclass
 
-VERSION_PATTERN = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-rc(?:[1-9][0-9]*))?"
+VERSION_PATTERN = (
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-rc(?:[1-9][0-9]*))?"
+)
 VERSION_RE = re.compile(rf"^(?P<version>{VERSION_PATTERN})$")
 SUBJECT_RE = re.compile(rf"^chore: bump version to (?P<version>{VERSION_PATTERN})$")
 SUBJECT_WITH_PR_RE = re.compile(
@@ -82,9 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             print(args.candidate)
         else:
             print(
-                version_from_subject(
-                    args.subject, allow_pr_suffix=args.allow_pr_suffix
-                )
+                version_from_subject(args.subject, allow_pr_suffix=args.allow_pr_suffix)
             )
     except ValueError as error:
         print(error, file=sys.stderr)

@@ -41,7 +41,9 @@ def test_rc_never_replaces_stable_updater_pointer():
 
 def test_rc_github_release_is_still_created_as_prerelease():
     workflow = DESKTOP_WORKFLOW.read_text(encoding="utf-8")
-    release = _step(workflow, "Create the GitHub Release (last — nothing ships before the pointer)")
+    release = _step(
+        workflow, "Create the GitHub Release (last — nothing ships before the pointer)"
+    )
     assert '[[ "$VERSION" == *-* ]] && PRERELEASE="--prerelease"' in release
     assert "gh release create" in release
 

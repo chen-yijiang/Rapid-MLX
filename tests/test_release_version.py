@@ -15,10 +15,7 @@ def test_release_order_supports_rc_progression_and_stable_promotion():
 
 
 def test_subject_parser_preserves_hyphenated_rc_spelling():
-    assert (
-        version_from_subject("chore: bump version to 0.13.0-rc1")
-        == "0.13.0-rc1"
-    )
+    assert version_from_subject("chore: bump version to 0.13.0-rc1") == "0.13.0-rc1"
 
 
 def test_auto_release_parser_can_tolerate_squash_suffix():
