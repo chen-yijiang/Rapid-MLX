@@ -337,6 +337,7 @@ class ResidentModelManager:
         # of turning a cleanup failure into loss of the serving model.
         self._retired_engines: list[object] = []
         self._retirement_tasks: set[asyncio.Task] = set()
+        self._retirement_task_engines: dict[asyncio.Task, object] = {}
         self.evictions_total = 0
         self.loads_total = 0
         self.registry.on_engine_access = self.touch
@@ -430,6 +431,7 @@ class ResidentModelManager:
 
         async with self._lock:
             retirement_tasks = tuple(self._retirement_tasks)
+            stuck_engines: list[object] = []
             if retirement_tasks:
                 _, pending = await asyncio.wait(retirement_tasks, timeout=5.0)
                 if pending:
@@ -439,6 +441,17 @@ class ResidentModelManager:
                     )
                     for retirement_task in pending:
                         retirement_task.cancel()
+                    _, still_pending = await asyncio.wait(pending, timeout=1.0)
+                    for retirement_task in still_pending:
+                        engine = self._retirement_task_engines.get(retirement_task)
+                        if engine is not None:
+                            stuck_engines.append(engine)
+                    if still_pending:
+                        logger.error(
+                            "%d retired model engine(s) ignored cancellation; "
+                            "retaining handles after bounded shutdown",
+                            len(still_pending),
+                        )
             dynamic = [
                 record for record in self._records.values() if not record.primary
             ]
@@ -454,6 +467,7 @@ class ResidentModelManager:
                             await result
                     except Exception:
                         logger.exception("Failed to stop a retired model engine")
+            self._retired_engines.extend(stuck_engines)
 
     async def _ttl_loop(self) -> None:
         interval = min(60.0, max(1.0, self.idle_ttl_seconds / 4.0))
@@ -877,13 +891,15 @@ class ResidentModelManager:
                     group,
                 )
 
-        tasks = [
-            asyncio.create_task(stop_retired(record, stop))
+        task_records = [
+            (asyncio.create_task(stop_retired(record, stop)), record)
             for record, stop in retired
             if callable(stop)
         ]
+        tasks = [task for task, _ in task_records]
         self._retirement_tasks.update(tasks)
-        for task in tasks:
+        for task, record in task_records:
+            self._retirement_task_engines[task] = record.entry.engine
             task.add_done_callback(self._on_retirement_done)
 
         if tasks:
@@ -898,6 +914,9 @@ class ResidentModelManager:
 
     def _on_retirement_done(self, task: asyncio.Task) -> None:
         self._retirement_tasks.discard(task)
+        engine = self._retirement_task_engines.pop(task, None)
+        if task.cancelled() and engine is not None:
+            self._retired_engines.append(engine)
         if not self._retirement_tasks:
             _release_allocator_cache()
 
@@ -977,10 +996,7 @@ class ResidentModelManager:
             )
             active_requests = record.active_requests
             if lifecycle is not None:
-                active_requests = max(
-                    active_requests,
-                    int(lifecycle.get("active_requests", 0) or 0),
-                )
+                active_requests = int(lifecycle.get("active_requests", 0) or 0)
             models.append(
                 {
                     "id": record.model_id,

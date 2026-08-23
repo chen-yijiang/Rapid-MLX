@@ -495,7 +495,8 @@ def test_residency_status_uses_engine_owned_request_counts():
     manager = ResidentModelManager(
         registry, lambda *_args: None, memory_reader=lambda: 0
     )
-    manager.register_primary(primary, estimated_bytes=4 * GIB)
+    record = manager.register_primary(primary, estimated_bytes=4 * GIB)
+    record.active_requests = 9
 
     model = manager.snapshot()["models"][0]
 
