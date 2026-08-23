@@ -1266,6 +1266,9 @@ def _agent_integrations(home: Path) -> list[tuple[str, Path, str | None]]:
         url = None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                integrations.append((name, path, None))
+                continue
             if name == "Claude Code" and isinstance(data.get("env"), dict):
                 url = data["env"].get("ANTHROPIC_BASE_URL")
             elif name == "Continue.dev" and isinstance(data.get("models"), list):

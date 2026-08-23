@@ -185,10 +185,13 @@ def test_agent_integrations_report_config_and_server_reachability(tmp_path):
     ]
 
 
-def test_agent_integrations_warn_for_malformed_or_inactive_config(tmp_path):
+@pytest.mark.parametrize("claude_config", ["not json", "null", "[]"])
+def test_agent_integrations_warn_for_malformed_or_inactive_config(
+    tmp_path, claude_config
+):
     claude = tmp_path / ".claude/settings.json"
     claude.parent.mkdir(parents=True)
-    claude.write_text("not json")
+    claude.write_text(claude_config)
     cline = (
         tmp_path
         / "Library/Application Support/Code/User/globalStorage"
