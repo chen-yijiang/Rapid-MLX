@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -230,11 +232,61 @@ def test_help_does_not_require_harness_runtime_dependencies():
     assert "Usage: gui-golden-flows.sh" in result.stdout
 
 
-def test_interrupt_and_termination_flow_through_exit_evidence_handler():
-    source = HARNESS.read_text()
-    assert "trap finish EXIT" in source
-    assert "trap 'exit 130' INT" in source
-    assert "trap 'exit 143' TERM" in source
+def test_interrupt_and_termination_emit_evidence_after_cleanup(tmp_path: Path):
+    finish = HARNESS.read_text().split("finish() {", 1)[1].split("\n}", 1)[0]
+    assert finish.index("cleanup_persona") < finish.index("write_result")
+    assert finish.index("cleanup_operator_server") < finish.index("write_result")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ready = tmp_path / "swiftc-started"
+    child_pid_path = tmp_path / "swiftc-pid"
+    fake_swiftc = fake_bin / "swiftc"
+    fake_swiftc.write_text(
+        '#!/bin/sh\necho "$$" > "$SIGNAL_CHILD_PID"\n'
+        'touch "$SIGNAL_READY"\nexec sleep 30\n'
+    )
+    fake_swiftc.chmod(0o755)
+
+    for sent, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
+        output = tmp_path / sent.name.lower()
+        app = tmp_path / f"{sent.name}.app"
+        app.mkdir()
+        ready.unlink(missing_ok=True)
+        child_pid_path.unlink(missing_ok=True)
+        process = subprocess.Popen(
+            ["bash", str(HARNESS), "--flow", "fresh-install"],
+            env={
+                **os.environ,
+                "HOME": str(tmp_path),
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "RAPID_GUI_GOLDEN_OUT": str(output),
+                "RAPID_GUI_SOURCE_APP": str(app),
+                "SIGNAL_READY": str(ready),
+                "SIGNAL_CHILD_PID": str(child_pid_path),
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 5
+        while not ready.exists() and process.poll() is None:
+            if time.monotonic() >= deadline:
+                process.kill()
+                raise AssertionError("harness did not reach the interruptible fixture")
+            time.sleep(0.01)
+
+        os.kill(process.pid, sent)
+        os.kill(int(child_pid_path.read_text()), sent)
+        process.communicate(timeout=5)
+
+        assert process.returncode == expected
+        payload = json.loads((output / "result.json").read_text())
+        assert payload["status"] == "fail"
+        assert payload["flow"] == "fresh-install"
+        assert payload["exit_code"] == expected
+        assert payload["artifact_path"] == str(output)
 
 
 def test_failure_diagnostic_regenerates_every_ci_baseline_and_nothing_else():
