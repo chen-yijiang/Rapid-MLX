@@ -41,6 +41,7 @@ jobs:
       is_bump: ${{ steps.check.outputs.is_bump }}
       version: ${{ steps.check.outputs.version }}
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - id: check
         env:
           TITLE: ${{ github.event.pull_request.title }}

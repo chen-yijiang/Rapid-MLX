@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DESKTOP_WORKFLOW = ROOT / ".github/workflows/rapid-mac-release.yml"
+PREFLIGHT_WORKFLOW = ROOT / ".github/workflows/release-preflight.yml"
 
 
 def _step(workflow: str, name: str) -> str:
@@ -15,6 +16,14 @@ def _step(workflow: str, name: str) -> str:
 def test_rc_tag_is_accepted_for_immutable_desktop_artifacts():
     workflow = DESKTOP_WORKFLOW.read_text(encoding="utf-8")
     assert "(-rc[1-9][0-9]*)?" in workflow
+
+
+def test_bump_detection_checks_out_version_parser_before_invoking_it():
+    workflow = PREFLIGHT_WORKFLOW.read_text(encoding="utf-8")
+    detect = workflow[workflow.index("  detect-bump-pr:") : workflow.index("\n  pf1-")]
+    checkout = detect.index("actions/checkout@")
+    invocation = detect.index("scripts/release_version.py")
+    assert checkout < invocation
 
 
 def test_rc_never_replaces_stable_updater_pointer():
