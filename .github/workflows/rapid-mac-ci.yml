@@ -279,7 +279,9 @@ jobs:
   # not promises — which is what the preflight step below is for.
   gui-golden-flows:
     needs: changes
-    if: needs.changes.outputs.full_gate == 'true'
+    if: >-
+      needs.changes.outputs.desktop == 'true' &&
+      needs.changes.outputs.full_gate == 'true'
     # macos-15 for the same reason as the build job: Package.swift is
     # swift-tools-version 6.0, and macos-14 still defaults to Swift 5.x.
     runs-on: macos-15

@@ -21,6 +21,10 @@ def _step_run(workflow: Path, job: str, step_name: str) -> str:
     return str(step["run"])
 
 
+def _job(workflow: Path, job: str) -> dict[str, object]:
+    return yaml.safe_load(workflow.read_text())["jobs"][job]
+
+
 def test_engine_full_ci_still_classifies_the_pr_diff():
     run = _step_run(ENGINE_WORKFLOW, "changes", "Classify validation lanes")
     assert 'git diff --no-renames --name-only "$PR_BASE_SHA" "$GITHUB_SHA"' in run
@@ -48,3 +52,9 @@ def test_non_desktop_change_exits_before_full_ci_requirement():
     no_lane = run.index('if [ "$DESKTOP_EXPECTED" != true ]')
     promotion = run.index('if [ "${{ github.event_name }}" = pull_request ]')
     assert no_lane < promotion
+
+
+def test_gui_golden_job_requires_both_desktop_lane_and_full_promotion():
+    condition = str(_job(DESKTOP_WORKFLOW, "gui-golden-flows")["if"])
+    assert "needs.changes.outputs.desktop == 'true'" in condition
+    assert "needs.changes.outputs.full_gate == 'true'" in condition
