@@ -97,18 +97,6 @@ class FailingResumeLifecycleEngine(FakeLifecycleEngine):
         raise RuntimeError("resume failed")
 
 
-class BlockingStopLifecycleEngine(FakeLifecycleEngine):
-    def __init__(self) -> None:
-        super().__init__()
-        self.stop_started = asyncio.Event()
-        self.allow_stop = asyncio.Event()
-
-    async def stop(self) -> None:
-        self.stop_started.set()
-        await self.allow_stop.wait()
-        self.stopped = True
-
-
 class Clock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -351,7 +339,7 @@ async def test_second_image_model_evicts_the_first_without_an_explicit_group():
 
 
 @pytest.mark.asyncio
-async def test_busy_assistant_replacement_rejects_before_loading_model():
+async def test_failed_assistant_replacement_rolls_back_newly_loaded_model():
     manager, registry, loaded, _ = manager_fixture(limit_gib=20)
     registry.get_engine("chat").running = 1
 
@@ -364,7 +352,7 @@ async def test_busy_assistant_replacement_rejects_before_loading_model():
 
     assert "chat" in registry
     assert "chat-new" not in registry
-    assert "chat-new" not in loaded
+    assert loaded["chat-new"].stopped is True
     assert {item["id"] for item in manager.snapshot()["models"]} == {"chat"}
 
 
@@ -374,11 +362,8 @@ async def test_assistant_replacement_pauses_engine_before_stopping_it():
     old_engine = FakeLifecycleEngine()
     primary = entry("chat-old", old_engine)
     registry.add(primary, is_default=True)
-    loader_called = False
 
     async def loader(name: str, path: str | None, performance=None):
-        nonlocal loader_called
-        loader_called = True
         return entry(name)
 
     manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
@@ -464,7 +449,7 @@ async def test_cancelled_replacement_resumes_old_engine_and_discards_target():
     assert old_engine.paused is False
     assert old_engine.stopped is False
     assert "chat-new" not in registry
-    assert loaded is None
+    assert loaded is not None and loaded.engine.stopped is True
 
 
 @pytest.mark.asyncio
@@ -474,11 +459,8 @@ async def test_rejected_busy_replacement_reopens_engine_admission():
     old_engine.running = 1
     primary = entry("chat-old", old_engine)
     registry.add(primary, is_default=True)
-    loader_called = False
 
     async def loader(name: str, path: str | None, performance=None):
-        nonlocal loader_called
-        loader_called = True
         return entry(name)
 
     manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
@@ -490,7 +472,6 @@ async def test_rejected_busy_replacement_reopens_engine_admission():
     assert old_engine.pauses == [("wait", 0)]
     assert old_engine.paused is False
     assert old_engine.stopped is False
-    assert loader_called is False
 
 
 def test_residency_status_uses_engine_owned_request_counts():
@@ -502,8 +483,7 @@ def test_residency_status_uses_engine_owned_request_counts():
     manager = ResidentModelManager(
         registry, lambda *_args: None, memory_reader=lambda: 0
     )
-    record = manager.register_primary(primary, estimated_bytes=4 * GIB)
-    record.active_requests = 9
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
 
     model = manager.snapshot()["models"][0]
 
@@ -555,74 +535,6 @@ async def test_replacement_keeps_new_primary_when_retired_engine_stop_fails(
     assert "chat-secondary" not in registry
     assert "chat-new" in registry
     assert manager.snapshot()["retired_cleanup_pending"] == 1
-
-
-@pytest.mark.asyncio
-async def test_cancellation_during_retired_stop_keeps_committed_new_primary():
-    registry = ModelRegistry()
-    old_engine = BlockingStopLifecycleEngine()
-    old_primary = entry("chat-old", old_engine)
-    registry.add(old_primary, is_default=True)
-
-    async def loader(name: str, path: str | None, performance=None):
-        return entry(name)
-
-    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
-    manager.register_primary(old_primary, estimated_bytes=4 * GIB)
-
-    replacement = asyncio.create_task(
-        manager.load("chat-new", replace_group="assistant", replace_mode="wait")
-    )
-    await old_engine.stop_started.wait()
-    replacement.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(replacement, timeout=0.1)
-
-    # Cancellation arrived after the registry commit.  The target must stay
-    # routable while shielded retirement finishes.
-    assert registry.default_name == "chat-new"
-    assert "chat-old" not in registry
-    old_engine.allow_stop.set()
-    for _ in range(100):
-        if old_engine.stopped:
-            break
-        await asyncio.sleep(0)
-
-    assert old_engine.stopped is True
-    assert registry.default_name == "chat-new"
-    assert "chat-new" in registry
-
-
-@pytest.mark.asyncio
-async def test_primary_callback_failure_restores_old_primary():
-    registry = ModelRegistry()
-    old_primary = entry("chat-old", FakeLifecycleEngine())
-    registry.add(old_primary, is_default=True)
-    callbacks = []
-
-    def change_primary(value):
-        callbacks.append(value.model_name)
-        if value.model_name == "chat-new":
-            raise RuntimeError("callback failed")
-
-    async def loader(name: str, path: str | None, performance=None):
-        return entry(name)
-
-    manager = ResidentModelManager(
-        registry,
-        loader,
-        memory_reader=lambda: 0,
-        on_primary_changed=change_primary,
-    )
-    old_record = manager.register_primary(old_primary, estimated_bytes=4 * GIB)
-
-    with pytest.raises(RuntimeError, match="callback failed"):
-        await manager.load("chat-new", replace_group="assistant", replace_mode="wait")
-
-    assert registry.default_name == "chat-old"
-    assert old_record.primary is True
-    assert "chat-new" not in registry
-    assert callbacks == ["chat-new", "chat-old"]
 
 
 @pytest.mark.asyncio
@@ -680,34 +592,6 @@ async def test_rollback_stop_failure_still_resumes_old_engine(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_post_publish_failure_without_candidates_rolls_target_back(monkeypatch):
-    registry = ModelRegistry()
-    loaded_engine = FakeEngine()
-
-    async def loader(name: str, path: str | None, performance=None):
-        return entry(name, loaded_engine)
-
-    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
-    calls = 0
-    original = manager._evict_for_locked  # noqa: SLF001
-
-    async def fail_after_publish(incoming_bytes, exclude):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise RuntimeError("post-publish failure")
-        return await original(incoming_bytes, exclude)
-
-    monkeypatch.setattr(manager, "_evict_for_locked", fail_after_publish)
-
-    with pytest.raises(RuntimeError, match="post-publish failure"):
-        await manager.load("chat-new", replace_group="assistant", replace_mode="wait")
-
-    assert "chat-new" not in registry
-    assert loaded_engine.stopped is True
-
-
-@pytest.mark.asyncio
 async def test_resume_attempts_every_engine_after_one_resume_fails():
     manager, _, _, _ = manager_fixture()
     engines = [
@@ -718,8 +602,7 @@ async def test_resume_attempts_every_engine_after_one_resume_fails():
     for engine in engines:
         engine.paused = True
 
-    with pytest.raises(RuntimeError, match="resume failed"):
-        await manager._resume_engines(engines)  # noqa: SLF001
+    await manager._resume_engines(engines)  # noqa: SLF001
 
     assert engines[0].paused is False
     assert engines[2].paused is False

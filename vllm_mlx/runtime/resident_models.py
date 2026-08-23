@@ -33,10 +33,6 @@ class ResidentModelBusyError(ResidentModelError):
     """A model cannot be removed while it owns active work."""
 
 
-class _CommittedReplacementCancelled(asyncio.CancelledError):
-    """Cancellation delivered after the replacement became routable."""
-
-
 @dataclass(frozen=True)
 class ResidentPerformanceConfig:
     """Audited scheduler overrides attached to one resident text model.
@@ -336,10 +332,6 @@ class ResidentModelManager:
         # primary remains serviceable; shutdown retries these handles instead
         # of turning a cleanup failure into loss of the serving model.
         self._retired_engines: list[object] = []
-        self._retirement_tasks: set[asyncio.Task] = set()
-        self._retirement_task_engines: dict[asyncio.Task, object] = {}
-        self._rollback_tasks: set[asyncio.Task] = set()
-        self._rollback_task_engines: dict[asyncio.Task, object] = {}
         self.evictions_total = 0
         self.loads_total = 0
         self.registry.on_engine_access = self.touch
@@ -432,30 +424,6 @@ class ResidentModelManager:
                 pass
 
         async with self._lock:
-            retirement_tasks = tuple(self._retirement_tasks | self._rollback_tasks)
-            stuck_engines: list[object] = []
-            if retirement_tasks:
-                _, pending = await asyncio.wait(retirement_tasks, timeout=5.0)
-                if pending:
-                    logger.warning(
-                        "Timed out waiting for %d retired model engine(s) during shutdown",
-                        len(pending),
-                    )
-                    for retirement_task in pending:
-                        retirement_task.cancel()
-                    _, still_pending = await asyncio.wait(pending, timeout=1.0)
-                    for retirement_task in still_pending:
-                        engine = self._retirement_task_engines.get(
-                            retirement_task
-                        ) or self._rollback_task_engines.get(retirement_task)
-                        if engine is not None:
-                            stuck_engines.append(engine)
-                    if still_pending:
-                        logger.error(
-                            "%d retired model engine(s) ignored cancellation; "
-                            "retaining handles after bounded shutdown",
-                            len(still_pending),
-                        )
             dynamic = [
                 record for record in self._records.values() if not record.primary
             ]
@@ -468,26 +436,9 @@ class ResidentModelManager:
                     try:
                         result = stop()
                         if asyncio.iscoroutine(result):
-                            stop_task = asyncio.create_task(result)
-                            try:
-                                await asyncio.wait_for(
-                                    asyncio.shield(stop_task), timeout=5.0
-                                )
-                            except TimeoutError:
-                                stop_task.cancel()
-                                _, still_pending = await asyncio.wait(
-                                    {stop_task}, timeout=1.0
-                                )
-                                if still_pending:
-                                    self._retired_engines.append(engine)
-                                logger.error(
-                                    "Timed out stopping a retired model engine "
-                                    "during shutdown"
-                                )
+                            await result
                     except Exception:
-                        self._retired_engines.append(engine)
                         logger.exception("Failed to stop a retired model engine")
-            self._retired_engines.extend(stuck_engines)
 
     async def _ttl_loop(self) -> None:
         interval = min(60.0, max(1.0, self.idle_ttl_seconds / 4.0))
@@ -562,8 +513,6 @@ class ResidentModelManager:
         model_name = model_name.strip()
         if not model_name:
             raise ResidentModelError("model must not be empty")
-        if replace_mode not in {"reject", "wait", "abort"}:
-            raise ResidentModelError(f"unsupported replacement mode {replace_mode!r}")
         estimate = max(1, estimated_bytes or estimate_model_bytes(model_name))
 
         async with self._lock:
@@ -580,25 +529,14 @@ class ResidentModelManager:
                     await self._replace_group_locked(record, group, replace_mode)
                 return record
 
-            candidates: list[ResidencyRecord] = []
-            paused_engines: list[object] = []
-            group_preflight = replace_group is not None
-            if group_preflight:
-                candidates, paused_engines = await self._quiesce_group_name_locked(
-                    replace_group, replace_mode
+            await self._evict_for_locked(estimate, exclude={model_name})
+            before = self._read_memory()
+            if image_mode is None:
+                entry = await self.loader(model_name, model_path, performance)
+            else:
+                entry = await self.loader(
+                    model_name, model_path, performance, image_mode
                 )
-            try:
-                await self._evict_for_locked(estimate, exclude={model_name})
-                before = self._read_memory()
-                if image_mode is None:
-                    entry = await self.loader(model_name, model_path, performance)
-                else:
-                    entry = await self.loader(
-                        model_name, model_path, performance, image_mode
-                    )
-            except BaseException as original:
-                await self._resume_after_failure(paused_engines, original)
-                raise
             now = self._clock()
             after = self._read_memory()
             delta = max(0, after - before) if before and after else 0
@@ -612,35 +550,25 @@ class ResidentModelManager:
                 performance=performance,
             )
             group = _effective_replace_group(record.entry, replace_group)
+            candidates: list[ResidencyRecord] = []
+            paused_engines: list[object] = []
             try:
                 if group is not None:
-                    if group_preflight:
-                        if group != replace_group:
-                            raise ResidentModelError(
-                                f"model {record.model_id!r} does not belong to "
-                                f"replacement group {replace_group!r}"
-                            )
-                    else:
-                        candidates, paused_engines = await self._quiesce_group_locked(
-                            record, group, replace_mode
-                        )
+                    candidates, paused_engines = await self._quiesce_group_locked(
+                        record, group, replace_mode
+                    )
                 # Publish only after every replaced engine is quiescent. This
                 # prevents an explicit request for the new id from racing the
                 # replacement transaction while the old engine is draining.
                 self.registry.add(entry)
                 self._index_record(record)
                 self.loads_total += 1
-                await self._evict_for_locked(
-                    0,
-                    exclude={record.model_id, *(item.model_id for item in candidates)},
-                )
+                await self._evict_for_locked(0, exclude={record.model_id})
                 if group is not None:
                     await self._commit_group_replacement_locked(
                         record, group, candidates
                     )
-            except _CommittedReplacementCancelled as exc:
-                raise asyncio.CancelledError from exc
-            except BaseException as original:
+            except BaseException:
                 # Once the loader returns, this manager owns the engine.  A
                 # later admission/replacement failure must not leave a model
                 # resident even though the control-plane request was rejected.
@@ -663,7 +591,7 @@ class ResidentModelManager:
                         "old-engine admission will still be resumed"
                     )
                 finally:
-                    await self._resume_after_failure(paused_engines, original)
+                    await self._resume_engines(paused_engines)
                 raise
             return record
 
@@ -766,10 +694,8 @@ class ResidentModelManager:
         )
         try:
             await self._commit_group_replacement_locked(target, group, candidates)
-        except _CommittedReplacementCancelled as exc:
-            raise asyncio.CancelledError from exc
-        except BaseException as original:
-            await self._resume_after_failure(paused_engines, original)
+        except BaseException:
+            await self._resume_engines(paused_engines)
             raise
 
     async def _quiesce_group_locked(
@@ -782,23 +708,10 @@ class ResidentModelManager:
                 f"model {target.model_id!r} does not belong to replacement group {group!r}"
             )
 
-        return await self._quiesce_group_name_locked(
-            group, replace_mode, exclude_model_id=target.model_id
-        )
-
-    async def _quiesce_group_name_locked(
-        self,
-        group: str,
-        replace_mode: str,
-        *,
-        exclude_model_id: str | None = None,
-    ) -> tuple[list[ResidencyRecord], list[object]]:
-        """Pause every replaceable engine in a named lifecycle group."""
-
         candidates = [
             record
             for record in self._records.values()
-            if record.model_id != exclude_model_id
+            if record.model_id != target.model_id
             and _replacement_group(record.entry) == group
         ]
         if replace_mode not in {"reject", "wait", "abort"}:
@@ -830,92 +743,21 @@ class ResidentModelManager:
                         ) from exc
                 elif not _engine_is_idle(record.entry.engine):
                     raise ResidentModelBusyError("model is serving an active request")
-        except BaseException as original:
-            await self._resume_after_failure(paused_engines, original)
+        except BaseException:
+            await self._resume_engines(paused_engines)
             raise
         return candidates, paused_engines
 
     async def _resume_engines(self, engines: list[object]) -> None:
-        cancellation: asyncio.CancelledError | None = None
-        failure: Exception | None = None
         for engine in reversed(engines):
             resume = getattr(engine, "resume_generation", None)
             if callable(resume):
-                task = asyncio.create_task(resume())
                 try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
-                except asyncio.CancelledError as exc:
-                    cancellation = cancellation or exc
-                    try:
-                        await asyncio.wait_for(task, timeout=5.0)
-                    except TimeoutError:
-                        task.cancel()
-                        _, pending = await asyncio.wait({task}, timeout=1.0)
-                        force_resume = getattr(engine, "force_resume_generation", None)
-                        if callable(force_resume):
-                            force_resume()
-                        if pending:
-                            self._rollback_tasks.add(task)
-                            self._rollback_task_engines[task] = engine
-                            task.add_done_callback(self._on_rollback_done)
-                        failure = failure or TimeoutError(
-                            "timed out resuming a model engine after cancellation"
-                        )
-                    except (Exception, asyncio.CancelledError):
-                        failure = failure or RuntimeError(
-                            "failed to finish resuming a model engine after cancellation"
-                        )
-                        logger.exception(
-                            "Failed to finish resuming a model engine after cancellation"
-                        )
-                except TimeoutError:
-                    task.cancel()
-                    _, pending = await asyncio.wait({task}, timeout=1.0)
-                    force_resume = getattr(engine, "force_resume_generation", None)
-                    if callable(force_resume):
-                        force_resume()
-                    if pending:
-                        self._rollback_tasks.add(task)
-                        self._rollback_task_engines[task] = engine
-                        task.add_done_callback(self._on_rollback_done)
-                    failure = failure or TimeoutError(
-                        "timed out resuming a model engine after replacement rollback"
-                    )
-                    logger.error(
-                        "Timed out resuming one model engine after replacement rollback"
-                    )
-                except Exception as exc:
-                    failure = failure or exc
+                    await resume()
+                except BaseException:
                     logger.exception(
                         "Failed to resume one model engine after replacement rollback"
                     )
-        if cancellation is not None:
-            raise cancellation
-        if failure is not None:
-            raise failure
-
-    async def _resume_after_failure(
-        self, engines: list[object], original: BaseException
-    ) -> None:
-        """Run bounded rollback without replacing the operation's root error."""
-
-        try:
-            await self._resume_engines(engines)
-        except BaseException as cleanup:
-            original.add_note(f"rollback resume also failed: {cleanup!r}")
-            raise original from cleanup
-
-    def _on_rollback_done(self, task: asyncio.Task) -> None:
-        self._rollback_tasks.discard(task)
-        engine = self._rollback_task_engines.pop(task, None)
-        failed = task.cancelled()
-        if not failed:
-            try:
-                failed = task.exception() is not None
-            except asyncio.CancelledError:
-                failed = True
-        if failed and engine is not None:
-            self._retired_engines.append(engine)
 
     async def _commit_group_replacement_locked(
         self,
@@ -933,95 +775,35 @@ class ResidentModelManager:
 
         old_primary = next((record for record in candidates if record.primary), None)
         if old_primary is not None:
-            old_primary_was_pinned = old_primary.pinned
             old_primary.primary = False
             old_primary.pinned = False
             target.primary = True
             target.pinned = True
             self.registry.set_default(target.model_id)
             if self._on_primary_changed is not None:
-                try:
-                    self._on_primary_changed(target.entry)
-                except BaseException:
-                    # No predecessor has been removed or stopped yet, so the
-                    # primary handoff remains fully reversible. Restore both
-                    # registry and record flags before outer rollback evicts
-                    # the unpublished target.
-                    target.primary = False
-                    target.pinned = False
-                    old_primary.primary = True
-                    old_primary.pinned = old_primary_was_pinned
-                    self.registry.set_default(old_primary.model_id)
-                    try:
-                        self._on_primary_changed(old_primary.entry)
-                    except BaseException:
-                        logger.exception(
-                            "Failed to restore primary callback after rejected handoff"
-                        )
-                    raise
+                self._on_primary_changed(target.entry)
 
-        # Establish the commit point completely before the first teardown
-        # await.  This makes cancellation state unambiguous: after this loop
-        # the new target is the only routable member of the group.
-        retired: list[tuple[ResidencyRecord, object | None]] = []
         for record in candidates:
             record.state = "evicting"
             self.registry.remove(record.model_id)
             self._drop_record(record.model_id)
             stop = getattr(record.entry.engine, "stop", None)
-            retired.append((record, stop if callable(stop) else None))
+            if callable(stop):
+                try:
+                    result = stop()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    self._retired_engines.append(record.entry.engine)
+                    logger.exception(
+                        "Failed to stop retired model %r after replacing %s; "
+                        "the replacement remains active and cleanup will retry "
+                        "during shutdown",
+                        record.model_id,
+                        group,
+                    )
             self.evictions_total += 1
-
-        async def stop_retired(record: ResidencyRecord, stop: object) -> None:
-            try:
-                result = stop()  # type: ignore[operator]
-                if asyncio.iscoroutine(result):
-                    await result
-            except asyncio.CancelledError:
-                self._retired_engines.append(record.entry.engine)
-                logger.warning(
-                    "Retired model %r stop was cancelled; cleanup will retry "
-                    "during shutdown",
-                    record.model_id,
-                )
-            except Exception:
-                self._retired_engines.append(record.entry.engine)
-                logger.exception(
-                    "Failed to stop retired model %r after replacing %s; "
-                    "the replacement remains active and cleanup will retry "
-                    "during shutdown",
-                    record.model_id,
-                    group,
-                )
-
-        task_records = [
-            (asyncio.create_task(stop_retired(record, stop)), record)
-            for record, stop in retired
-            if callable(stop)
-        ]
-        tasks = [task for task, _ in task_records]
-        self._retirement_tasks.update(tasks)
-        for task, record in task_records:
-            self._retirement_task_engines[task] = record.entry.engine
-            task.add_done_callback(self._on_retirement_done)
-
-        if tasks:
-            try:
-                await asyncio.shield(asyncio.gather(*tasks))
-            except asyncio.CancelledError as exc:
-                # Registry commit is complete and teardown tasks are strongly
-                # tracked by the manager. The cancelled control-plane caller
-                # must not wait for an unrelated old engine's slow/hung stop.
-                raise _CommittedReplacementCancelled from exc
         _release_allocator_cache()
-
-    def _on_retirement_done(self, task: asyncio.Task) -> None:
-        self._retirement_tasks.discard(task)
-        engine = self._retirement_task_engines.pop(task, None)
-        if task.cancelled() and engine is not None:
-            self._retired_engines.append(engine)
-        if not self._retirement_tasks:
-            _release_allocator_cache()
 
     async def set_pinned(self, model_name: str, pinned: bool) -> ResidencyRecord:
         async with self._lock:
@@ -1099,7 +881,12 @@ class ResidentModelManager:
             )
             active_requests = record.active_requests
             if lifecycle is not None:
-                active_requests = int(lifecycle.get("active_requests", 0) or 0)
+                active_requests = max(
+                    active_requests,
+                    int(lifecycle.get("active_requests", 0) or 0),
+                    int(lifecycle.get("running_requests", 0) or 0),
+                    int(lifecycle.get("queued_requests", 0) or 0),
+                )
             models.append(
                 {
                     "id": record.model_id,
@@ -1131,7 +918,6 @@ class ResidentModelManager:
             "idle_ttl_seconds": self.idle_ttl_seconds,
             "loads_total": self.loads_total,
             "evictions_total": self.evictions_total,
-            "retired_cleanup_pending": len(self._retired_engines)
-            + len(self._retirement_tasks),
+            "retired_cleanup_pending": len(self._retired_engines),
             "models": models,
         }

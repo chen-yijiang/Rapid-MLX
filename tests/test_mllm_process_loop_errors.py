@@ -86,9 +86,7 @@ async def test_process_loop_failure_unblocks_every_inflight_request() -> None:
         uid_only,
         pending_only,
     }
-    assert outputs[-1].request_id == aborted
-    assert outputs[-1].finished is True
-    assert outputs[-1].error_kind == "lifecycle"
+    assert outputs[-1] is None
     for output in outputs[:-1]:
         assert output.finished is True
         assert output.finish_reason == "length"

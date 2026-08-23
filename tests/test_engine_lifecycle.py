@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm_mlx.engine.batched import BatchedEngine, _admission_token_context
+from vllm_mlx.engine.batched import BatchedEngine
 from vllm_mlx.engine_core import EngineCore
 from vllm_mlx.mllm_scheduler import MLLMScheduler
 from vllm_mlx.output_collector import RequestOutputCollector
@@ -19,9 +19,6 @@ def _engine(*, reservations: int = 0, running: dict | None = None):
     engine._mllm_scheduler = None
     engine._admission_lock = threading.Lock()
     engine._admission_reservations = reservations
-    engine._admission_tokens = {index + 1 for index in range(reservations)}
-    if reservations:
-        _admission_token_context.set((id(engine), (1,)))
     engine._generation_paused = False
     engine._generation_pause_mode = None
     scheduler = SimpleNamespace(
@@ -128,51 +125,6 @@ async def test_zero_timeout_atomically_pauses_an_idle_engine():
         engine.check_admission()
 
 
-@pytest.mark.asyncio
-async def test_resume_reopens_scheduler_before_outer_engine_gate():
-    engine, scheduler = _engine()
-    engine._generation_paused = True
-
-    def set_generation_paused(paused, *, add_allowance=0):
-        assert engine._generation_paused is True
-        scheduler.generation_paused = paused
-
-    scheduler.set_generation_paused = set_generation_paused
-
-    await engine.resume_generation()
-
-    assert scheduler.generation_paused is False
-    assert engine._generation_paused is False
-
-
-@pytest.mark.asyncio
-async def test_pause_timeout_automatically_reopens_both_gates():
-    running = {"busy": SimpleNamespace(request_id="busy")}
-    engine, scheduler = _engine(running=running)
-
-    with pytest.raises(TimeoutError):
-        await engine.pause_generation("wait", timeout=0)
-
-    assert engine._generation_paused is False
-    assert scheduler.generation_paused is False
-
-
-@pytest.mark.asyncio
-async def test_concurrent_pause_transactions_are_serialized():
-    engine, _ = _engine(reservations=1)
-
-    first = asyncio.create_task(engine.pause_generation("wait"))
-    await asyncio.sleep(0)
-    second = asyncio.create_task(engine.pause_generation("wait"))
-    await asyncio.sleep(0)
-    assert not second.done()
-
-    engine.release_admission_reservation()
-    await asyncio.wait_for(first, timeout=1)
-    await asyncio.wait_for(second, timeout=1)
-    await engine.resume_generation()
-
-
 def test_text_scheduler_rejects_direct_add_while_paused():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler._generation_paused = True
@@ -189,27 +141,6 @@ def test_mllm_scheduler_rejects_direct_add_while_paused():
         scheduler.add_request("prompt", request_id="direct")
 
 
-@pytest.mark.parametrize("scheduler_type", [Scheduler, MLLMScheduler])
-@pytest.mark.parametrize("mode", ["wait", "abort"])
-def test_scheduler_pause_atomically_accounts_for_already_owned_requests(
-    scheduler_type,
-    mode,
-):
-    scheduler = scheduler_type.__new__(scheduler_type)
-    scheduler._cancel_counter_lock = threading.Lock()
-    scheduler.requests = {"already-owned": SimpleNamespace(lifecycle_admission_token=1)}
-
-    scheduler.pause_generation_admission({1, 2}, mode)
-
-    assert scheduler._generation_paused is True
-    assert scheduler._paused_add_allowance == 1
-    assert scheduler._paused_admission_tokens == {2}
-
-    scheduler.set_generation_paused(False)
-    assert scheduler._generation_paused is False
-    assert scheduler._paused_add_allowance == 0
-
-
 def test_paused_engine_rejects_even_when_concurrency_cap_is_unlimited():
     engine, scheduler = _engine()
     scheduler.config.max_concurrent_requests = None
@@ -219,88 +150,27 @@ def test_paused_engine_rejects_even_when_concurrency_cap_is_unlimited():
         engine.check_admission()
 
 
-def test_unlimited_cap_still_tracks_lifecycle_reservation():
-    engine, _ = _engine()
-    engine._engine.engine.scheduler.config.max_concurrent_requests = None
-
-    engine.check_admission()
-
-    assert engine._admission_reservations == 1
-    engine.release_admission_reservation()
-    assert engine._admission_reservations == 0
-
-
-def test_same_context_admissions_release_as_a_token_stack():
-    engine, _ = _engine()
-    engine._engine.engine.scheduler.config.max_concurrent_requests = None
-
-    engine.check_admission()
-    engine.check_admission()
-    assert engine._admission_reservations == 2
-
-    engine.release_admission_reservation()
-    assert engine._admission_reservations == 1
-    engine.release_admission_reservation()
-    assert engine._admission_reservations == 0
-
-
-def test_scheduler_transfer_releases_route_owned_reservation():
-    engine, _ = _engine()
-    engine.check_admission()
-    context = _admission_token_context.get()
-    assert context is not None
-
-    engine._transfer_admission_to_scheduler(context[1][-1])
-
-    assert engine._admission_reservations == 0
-    assert engine._admission_tokens == set()
-
-
-def test_cross_context_release_preserves_legacy_release_contract():
-    engine, _ = _engine()
-    engine.check_admission()
-    _admission_token_context.set(None)
-
-    engine.release_admission_reservation()
-
-    assert engine._admission_reservations == 0
-    assert engine._admission_tokens == set()
-
-
-def test_lifecycle_active_requests_is_authoritative_total():
-    running = {"one": object(), "two": object()}
-    engine, scheduler = _engine(reservations=1, running=running)
-    scheduler.waiting.append(object())
-
-    status = engine.lifecycle_status()
-
-    assert status["admitted_requests"] == 1
-    assert status["running_requests"] == 2
-    assert status["queued_requests"] == 1
-    assert status["active_requests"] == 4
-
-
 @pytest.mark.parametrize("scheduler_type", [Scheduler, MLLMScheduler])
 def test_request_id_snapshot_is_safe_during_concurrent_mutation(scheduler_type):
     scheduler = scheduler_type.__new__(scheduler_type)
     scheduler._cancel_counter_lock = threading.Lock()
     scheduler.requests = {}
-    result = []
-    scheduler._cancel_counter_lock.acquire()
-    try:
-        reader = threading.Thread(
-            target=lambda: result.append(scheduler.request_ids_snapshot())
-        )
-        reader.start()
-        # Snapshot must be blocked on the exact lock used for request commits.
-        reader.join(timeout=0.01)
-        assert reader.is_alive()
-        scheduler.requests.update({"one": 1, "two": 2})
-    finally:
-        scheduler._cancel_counter_lock.release()
+    start = threading.Event()
 
-    reader.join(timeout=1)
-    assert result == [("one", "two")]
+    def mutate():
+        start.wait()
+        for index in range(2_000):
+            with scheduler._cancel_counter_lock:
+                scheduler.requests[str(index)] = index
+                if index:
+                    scheduler.requests.pop(str(index - 1), None)
+
+    writer = threading.Thread(target=mutate)
+    writer.start()
+    start.set()
+    for _ in range(2_000):
+        assert isinstance(scheduler.request_ids_snapshot(), tuple)
+    writer.join()
 
 
 @pytest.mark.asyncio
@@ -325,10 +195,6 @@ async def test_text_abort_wakes_non_streaming_consumer_with_terminal_error():
     # terminal signal. Removing these here recreates the hung HTTP request.
     assert "active" in engine._output_collectors
     assert "active" in engine._finished_events
-
-    engine._cleanup_aborted_if_unconsumed("active")
-    assert "active" not in engine._output_collectors
-    assert "active" not in engine._finished_events
 
 
 def test_mllm_abort_delivers_terminal_error_instead_of_empty_success():
