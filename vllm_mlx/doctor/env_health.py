@@ -1290,7 +1290,7 @@ def _configured_agent_urls(home: Path) -> list[tuple[str, Path, str | None]]:
         home / ".config/VSCodium/User/globalStorage",
     )
     for root in cline_roots:
-        path = root / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+        path = root / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json"
         if path.exists():
             candidates.append(("Cline", path, lambda data: data.get("openAiBaseUrl")))
 

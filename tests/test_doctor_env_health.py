@@ -29,6 +29,7 @@ from unittest import mock
 import pytest
 
 from vllm_mlx.doctor import env_health as eh
+from vllm_mlx.launch import cline
 
 
 class _HTTPResponse:
@@ -255,6 +256,29 @@ def test_agent_integrations_probe_every_existing_cline_config(tmp_path):
     ]
     assert roots[0].as_posix() in cline[0].detail
     assert roots[1].as_posix() in cline[1].detail
+
+
+def test_doctor_discovers_the_exact_config_written_by_cline_launcher(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "vscode-globalStorage"
+    launcher_path = (
+        root / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json"
+    )
+    launcher_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(cline, "_candidate_settings_roots", lambda: [root])
+    cline.write_or_patch_config(
+        "http://127.0.0.1:8000", "model", config_path=launcher_path
+    )
+
+    # Doctor's macOS Stable root resolves to the same relative destination.
+    doctor_root = tmp_path / "Library/Application Support/Code/User/globalStorage"
+    doctor_path = doctor_root / launcher_path.relative_to(root)
+    doctor_path.parent.mkdir(parents=True)
+    doctor_path.write_bytes(launcher_path.read_bytes())
+
+    configured = eh._configured_agent_urls(tmp_path)
+    assert configured == [("Cline", doctor_path, "http://127.0.0.1:8000/v1")]
 
 
 def test_agent_integration_non_http_service_is_reported_unresponsive(tmp_path):
