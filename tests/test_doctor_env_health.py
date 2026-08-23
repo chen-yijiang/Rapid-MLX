@@ -39,6 +39,7 @@ class _HTTPResponse:
     def __exit__(self, *_args):
         return None
 
+
 # ---------------------------------------------------------------------------
 # Section: System
 # ---------------------------------------------------------------------------
@@ -168,9 +169,7 @@ def test_agent_integrations_are_quiet_when_no_client_is_configured(tmp_path):
 def test_agent_integrations_probe_each_configured_server(tmp_path):
     claude = tmp_path / ".claude/settings.json"
     claude.parent.mkdir(parents=True)
-    claude.write_text(
-        '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}'
-    )
+    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}')
     cline = (
         tmp_path
         / "Library/Application Support/Code/User/globalStorage"
@@ -216,6 +215,44 @@ def test_agent_integration_malformed_or_unrelated_config_warns(tmp_path):
     assert len(section.checks) == 2
     assert all(check.status is eh.CheckStatus.WARN for check in section.checks)
     assert all("no Rapid-MLX server" in check.label for check in section.checks)
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_agent_integration_auth_response_proves_server_is_alive(tmp_path, status):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}')
+
+    def open_url(request, *, timeout):
+        raise urllib.error.HTTPError(request.full_url, status, "auth", {}, None)
+
+    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
+    assert section.checks[0].status is eh.CheckStatus.OK
+
+
+def test_agent_integrations_probe_every_existing_cline_config(tmp_path):
+    roots = [
+        tmp_path / "Library/Application Support/Code/User/globalStorage",
+        tmp_path / "Library/Application Support/VSCodium/User/globalStorage",
+    ]
+    for index, root in enumerate(roots):
+        path = root / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(f'{{"openAiBaseUrl":"http://localhost:800{index}/v1"}}')
+
+    def open_url(request, *, timeout):
+        if ":8001/" in request.full_url:
+            raise urllib.error.URLError("offline")
+        return _HTTPResponse()
+
+    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
+    cline = [check for check in section.checks if check.label.startswith("Cline")]
+    assert [check.status for check in cline] == [
+        eh.CheckStatus.OK,
+        eh.CheckStatus.WARN,
+    ]
+    assert roots[0].as_posix() in cline[0].detail
+    assert roots[1].as_posix() in cline[1].detail
 
 
 # ---------------------------------------------------------------------------

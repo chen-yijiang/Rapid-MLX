@@ -1252,23 +1252,27 @@ def _configured_agent_urls(home: Path) -> list[tuple[str, Path, str | None]]:
         (
             "Claude Code",
             home / ".claude/settings.json",
-            lambda data: data.get("env", {}).get("ANTHROPIC_BASE_URL")
-            if isinstance(data.get("env"), dict)
-            else None,
+            lambda data: (
+                data.get("env", {}).get("ANTHROPIC_BASE_URL")
+                if isinstance(data.get("env"), dict)
+                else None
+            ),
         ),
         (
             "Continue.dev",
             home / ".continue/config.json",
-            lambda data: next(
-                (
-                    entry.get("apiBase")
-                    for entry in data.get("models", [])
-                    if isinstance(entry, dict) and entry.get("title") == "rapid-mlx"
-                ),
-                None,
-            )
-            if isinstance(data.get("models"), list)
-            else None,
+            lambda data: (
+                next(
+                    (
+                        entry.get("apiBase")
+                        for entry in data.get("models", [])
+                        if isinstance(entry, dict) and entry.get("title") == "rapid-mlx"
+                    ),
+                    None,
+                )
+                if isinstance(data.get("models"), list)
+                else None
+            ),
         ),
     ]
 
@@ -1284,7 +1288,6 @@ def _configured_agent_urls(home: Path) -> list[tuple[str, Path, str | None]]:
         path = root / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
         if path.exists():
             candidates.append(("Cline", path, lambda data: data.get("openAiBaseUrl")))
-            break
 
     configured: list[tuple[str, Path, str | None]] = []
     for name, path, extract in candidates:
@@ -1320,6 +1323,10 @@ def _agent_server_alive(
     try:
         with opener(request, timeout=timeout) as response:  # noqa: S310
             return 200 <= int(response.status) < 300
+    except urllib.error.HTTPError as error:
+        # Authentication proves that a server answered. Some supported
+        # serving modes intentionally protect even their health endpoint.
+        return error.code in {401, 403}
     except (OSError, TypeError, urllib.error.URLError, ValueError):
         return False
 
