@@ -197,14 +197,14 @@ cleanup_operator_server() {
 finish() {
     local status=$?
     set +e
+    cleanup_persona
+    cleanup_operator_server
     if [[ "$status" -ne 0 && "$RESULT_WRITTEN" == 0 ]]; then
         mkdir -p "$OUT_ROOT" 2>/dev/null || true
         if [[ -d "$OUT_ROOT" ]]; then
             write_result fail "$status" 2>/dev/null || true
         fi
     fi
-    cleanup_persona
-    cleanup_operator_server
 }
 trap finish EXIT
 trap 'cleanup_persona; cleanup_operator_server; exit 130' INT

@@ -98,18 +98,55 @@ def test_manifest_fields_are_valid_and_fail_closed():
     allowed_risks = {"low", "medium", "high"}
     allowed_drivers = {"ax", "xcuitest", "hybrid"}
     allowed_tiers = {"pr", "local"}
+    allowed_fixtures = {
+        "audio-models",
+        "cached-model",
+        "campaign",
+        "crash-once",
+        "delayed-transcription",
+        "document",
+        "fake-sidecar",
+        "generated-images",
+        "isolated-home",
+        "large-window",
+        "low-memory",
+        "mixed-capability-catalog",
+        "resident-model",
+        "slow-download",
+        "slow-stream",
+        "two-images",
+        "update-busy",
+        "update-state",
+    }
+    expected_keys = {
+        "name",
+        "group",
+        "risk",
+        "driver",
+        "ci_tier",
+        "fixtures",
+        "source_paths",
+        "owns_baseline",
+    }
 
     for journey in manifest_journeys():
+        assert set(journey) == expected_keys
+        assert isinstance(journey["name"], str) and journey["name"]
         assert journey["group"] in allowed_groups
         assert journey["risk"] in allowed_risks
         assert journey["driver"] in allowed_drivers
         assert journey["ci_tier"] in allowed_tiers
-        assert journey["fixtures"]
-        assert journey["source_paths"]
+        assert isinstance(journey["fixtures"], list) and journey["fixtures"]
         assert all(
-            str(path).startswith("apps/rapid-mac/") for path in journey["source_paths"]
+            isinstance(fixture, str) and fixture in allowed_fixtures
+            for fixture in journey["fixtures"]
         )
-        assert all((ROOT / str(path)).exists() for path in journey["source_paths"])
+        assert isinstance(journey["source_paths"], list) and journey["source_paths"]
+        assert all(
+            isinstance(path, str) and path.startswith("apps/rapid-mac/")
+            for path in journey["source_paths"]
+        )
+        assert all((ROOT / path).exists() for path in journey["source_paths"])
         assert isinstance(journey["owns_baseline"], bool)
 
 
