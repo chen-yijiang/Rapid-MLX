@@ -169,9 +169,13 @@ struct ChatAttachmentDraftTests {
             .stripCommentsAndWhitespace(source)
 
         #expect(stripped.contains("letimportID=attachmentDraft.beginFileImport()"))
+        #expect(stripped.contains("letimportConversationID=viewModel.activeConversationID"))
+        #expect(stripped.contains(
+            "guardviewModel.activeConversationID==importConversationIDelse{cancelFileImportAfterNavigation()"
+        ))
         #expect(stripped.contains("attachmentDraft.finishFileImport(id:importID"))
         #expect(stripped.contains(
-            ".onChange(of:viewModel.activeConversationID){_,_inletnotice=\"Fileimportcanceledbecauseyouswitchedconversations.\"ifattachmentDraft.cancelFileImport(notice:notice){VoiceOverAnnouncer.announce(notice)"
+            ".onChange(of:viewModel.activeConversationID){_,_incancelFileImportAfterNavigation()"
         ))
     }
 

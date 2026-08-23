@@ -297,10 +297,7 @@ struct ChatView: View {
         // Parsing runs off-main-thread. A completion started in conversation A
         // must not attach itself after the user has navigated to conversation B.
         .onChange(of: viewModel.activeConversationID) { _, _ in
-            let notice = "File import canceled because you switched conversations."
-            if attachmentDraft.cancelFileImport(notice: notice) {
-                VoiceOverAnnouncer.announce(notice)
-            }
+            cancelFileImportAfterNavigation()
         }
     }
 
@@ -1036,17 +1033,33 @@ struct ChatView: View {
             return false
         }
         guard let importID = attachmentDraft.beginFileImport() else { return false }
+        let importConversationID = viewModel.activeConversationID
         Task { @MainActor in
             let outcome = await Task.detached(priority: .userInitiated) {
                 Self.loadFileAttachments(selection.accepted)
             }.value
 
+            // Do not rely only on SwiftUI's onChange delivery: the observable
+            // ID can change before SwiftUI schedules that callback. Comparing
+            // ownership here closes the window where A's completion could be
+            // accepted into B's composer.
+            guard viewModel.activeConversationID == importConversationID else {
+                cancelFileImportAfterNavigation()
+                return
+            }
             let notice = selection.rejectedCount > 0
                 ? "Attach up to \(ChatFileAttachment.maxAttachmentsPerMessage) PDF, CSV, or TXT files per message."
                 : outcome.1
             attachmentDraft.finishFileImport(id: importID, outcome.0, notice: notice)
         }
         return true
+    }
+
+    private func cancelFileImportAfterNavigation() {
+        let notice = "File import canceled because you switched conversations."
+        if attachmentDraft.cancelFileImport(notice: notice) {
+            VoiceOverAnnouncer.announce(notice)
+        }
     }
 
     /// Parse candidates without losing which source produced each attachment.
