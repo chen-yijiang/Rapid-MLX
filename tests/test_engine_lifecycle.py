@@ -128,6 +128,23 @@ async def test_zero_timeout_atomically_pauses_an_idle_engine():
         engine.check_admission()
 
 
+@pytest.mark.asyncio
+async def test_resume_reopens_scheduler_before_outer_engine_gate():
+    engine, scheduler = _engine()
+    engine._generation_paused = True
+
+    def set_generation_paused(paused, *, add_allowance=0):
+        assert engine._generation_paused is True
+        scheduler.generation_paused = paused
+
+    scheduler.set_generation_paused = set_generation_paused
+
+    await engine.resume_generation()
+
+    assert scheduler.generation_paused is False
+    assert engine._generation_paused is False
+
+
 def test_text_scheduler_rejects_direct_add_while_paused():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler._generation_paused = True

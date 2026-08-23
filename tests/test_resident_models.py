@@ -710,7 +710,8 @@ async def test_resume_attempts_every_engine_after_one_resume_fails():
     for engine in engines:
         engine.paused = True
 
-    await manager._resume_engines(engines)  # noqa: SLF001
+    with pytest.raises(RuntimeError, match="resume failed"):
+        await manager._resume_engines(engines)  # noqa: SLF001
 
     assert engines[0].paused is False
     assert engines[2].paused is False

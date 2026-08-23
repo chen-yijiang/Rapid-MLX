@@ -1141,13 +1141,15 @@ class BatchedEngine(BaseEngine):
     async def resume_generation(self) -> dict[str, object]:
         """Reopen request admission after a lifecycle operation."""
 
-        with self._admission_lock:
-            self._generation_paused = False
-            self._generation_pause_mode = None
         scheduler = self._lifecycle_scheduler()
         set_paused = getattr(scheduler, "set_generation_paused", None)
         if callable(set_paused):
             set_paused(False)
+        # Keep the outer route gate closed until the scheduler is ready. A
+        # route can never reserve into the gap and hit a stale scheduler pause.
+        with self._admission_lock:
+            self._generation_paused = False
+            self._generation_pause_mode = None
         return self.lifecycle_status()
 
     @property

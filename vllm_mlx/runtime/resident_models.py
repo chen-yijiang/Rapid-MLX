@@ -771,6 +771,7 @@ class ResidentModelManager:
 
     async def _resume_engines(self, engines: list[object]) -> None:
         cancellation: asyncio.CancelledError | None = None
+        failure: Exception | None = None
         for engine in reversed(engines):
             resume = getattr(engine, "resume_generation", None)
             if callable(resume):
@@ -782,20 +783,29 @@ class ResidentModelManager:
                     try:
                         await asyncio.wait_for(task, timeout=5.0)
                     except (Exception, asyncio.CancelledError):
+                        failure = failure or RuntimeError(
+                            "failed to finish resuming a model engine after cancellation"
+                        )
                         logger.exception(
                             "Failed to finish resuming a model engine after cancellation"
                         )
                 except TimeoutError:
                     task.cancel()
+                    failure = failure or TimeoutError(
+                        "timed out resuming a model engine after replacement rollback"
+                    )
                     logger.error(
                         "Timed out resuming one model engine after replacement rollback"
                     )
-                except Exception:
+                except Exception as exc:
+                    failure = failure or exc
                     logger.exception(
                         "Failed to resume one model engine after replacement rollback"
                     )
         if cancellation is not None:
             raise cancellation
+        if failure is not None:
+            raise failure
 
     async def _commit_group_replacement_locked(
         self,
