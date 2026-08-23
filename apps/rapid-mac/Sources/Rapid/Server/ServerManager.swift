@@ -2380,6 +2380,9 @@ final class ServerManager {
             isBuiltinProfile: catalogEntry?.isBuiltinProfile,
             isTextOnly: catalogEntry?.isTextOnly
         )
+        let runtimeCapabilities = await ServerRuntimeCapabilities.probe(binary: binary)
+        if Task.isCancelled || didSignalShutdown { return }
+        guard !isOperating, child == nil else { return }
 
         // Codex round 1-4 finding (all 4 rounds): the previous shape
         // held ``isOperating = true`` for the entire health/download
@@ -2553,11 +2556,10 @@ final class ServerManager {
             userOverrides: safeUserOverrides
         )
         var extraFlags = performanceFlags
-        extraFlags.append(contentsOf: [
-            "--resident-memory-limit-gb",
-            String(format: "%.0f", ModelSizing.residentMemoryCeilingGB(on: hardware)),
-            "--resident-model-idle-ttl", "1800",
-        ])
+        extraFlags.append(contentsOf: Self.residentLaunchFlags(
+            memoryCeilingGB: ModelSizing.residentMemoryCeilingGB(on: hardware),
+            capabilities: runtimeCapabilities
+        ))
         let arguments = Self.serveArguments(
             alias: trimmedAlias,
             host: host,
@@ -2582,6 +2584,14 @@ final class ServerManager {
         if modelsFolderOverride == nil, ModelsFolderPreference.hasCustomFolder() {
             appendLogLines([
                 "Your chosen models folder isn't available right now — Rapid is using its default location until it's back."
+            ])
+        }
+        let unsupportedResidentFlags = Self.unsupportedResidentLaunchFlagNames(
+            capabilities: runtimeCapabilities
+        )
+        if !unsupportedResidentFlags.isEmpty {
+            appendLogLines([
+                "Rapid could not confirm that this engine runtime supports \(unsupportedResidentFlags.joined(separator: ", ")); starting without those residency flags."
             ])
         }
         let stdoutPipe = Pipe()
@@ -3970,6 +3980,39 @@ final class ServerManager {
             args.append(contentsOf: ["--mcp-config", mcpConfigPath])
         }
         return args
+    }
+
+    nonisolated internal static func residentLaunchFlags(
+        memoryCeilingGB: Double,
+        capabilities: ServerRuntimeCapabilities
+    ) -> [String] {
+        var flags: [String] = []
+        if capabilities.supportsResidentMemoryLimitGB {
+            flags.append(contentsOf: [
+                "--resident-memory-limit-gb",
+                String(format: "%.0f", memoryCeilingGB),
+            ])
+        }
+        if capabilities.supportsResidentModelIdleTTL {
+            flags.append(contentsOf: [
+                "--resident-model-idle-ttl",
+                "1800",
+            ])
+        }
+        return flags
+    }
+
+    nonisolated private static func unsupportedResidentLaunchFlagNames(
+        capabilities: ServerRuntimeCapabilities
+    ) -> [String] {
+        var names: [String] = []
+        if !capabilities.supportsResidentMemoryLimitGB {
+            names.append("--resident-memory-limit-gb")
+        }
+        if !capabilities.supportsResidentModelIdleTTL {
+            names.append("--resident-model-idle-ttl")
+        }
+        return names
     }
 
     /// Issue #272: the env we hand the bundled ``rapid-mlx`` child is
