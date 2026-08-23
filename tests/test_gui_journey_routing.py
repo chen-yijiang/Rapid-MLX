@@ -77,6 +77,7 @@ def test_logic_and_non_gui_paths_do_not_allocate_gui(path: str):
     "path",
     [
         "apps/rapid-mac/Sources/Rapid/UI/BrandNewSurface.swift",
+        "apps/rapid-mac/Sources/Rapid/UI/ChatView.swift.generated",
         "apps/rapid-mac/Sources/Rapid/UI/ContentView.swift",
         "apps/rapid-mac/scripts/gui-golden-flows.sh",
         "apps/rapid-mac/Tests/GUIGoldenFlows/journeys.yaml",

@@ -21,6 +21,12 @@ DEFAULT_MANIFEST = ROOT / "apps/rapid-mac/Tests/GUIGoldenFlows/journeys.yaml"
 
 
 def _matches(path: str, prefix: str) -> bool:
+    # Manifest entries ending in a filename extension are exact file rules.
+    # Stem/directory rules intentionally cover a family (for example the
+    # Onboarding*.swift surfaces); a file rule must never absorb an unknown
+    # sibling such as ChatView.swift.generated and bypass fail-closed routing.
+    if Path(prefix).suffix:
+        return path == prefix
     return path == prefix or path.startswith(prefix)
 
 
