@@ -336,6 +336,7 @@ class ResidentModelManager:
         # primary remains serviceable; shutdown retries these handles instead
         # of turning a cleanup failure into loss of the serving model.
         self._retired_engines: list[object] = []
+        self._retirement_tasks: set[asyncio.Task] = set()
         self.evictions_total = 0
         self.loads_total = 0
         self.registry.on_engine_access = self.touch
@@ -428,6 +429,9 @@ class ResidentModelManager:
                 pass
 
         async with self._lock:
+            retirement_tasks = tuple(self._retirement_tasks)
+            if retirement_tasks:
+                await asyncio.gather(*retirement_tasks, return_exceptions=True)
             dynamic = [
                 record for record in self._records.values() if not record.primary
             ]
@@ -803,43 +807,44 @@ class ResidentModelManager:
             retired.append((record, stop if callable(stop) else None))
             self.evictions_total += 1
 
-        cancellation: asyncio.CancelledError | None = None
-        for record, stop in retired:
-            if callable(stop):
-                try:
-                    result = stop()
-                    if asyncio.iscoroutine(result):
-                        task = asyncio.create_task(result)
-                        try:
-                            await asyncio.shield(task)
-                        except asyncio.CancelledError as exc:
-                            # Finish releasing the retired engine even though
-                            # the control-plane caller went away.  Re-propagate
-                            # cancellation only after all retirees have been
-                            # handled; the caller recognizes the committed
-                            # registry state and leaves the target active.
-                            cancellation = cancellation or exc
-                            try:
-                                await task
-                            except Exception:
-                                self._retired_engines.append(record.entry.engine)
-                                logger.exception(
-                                    "Failed to stop retired model %r after cancellation; "
-                                    "cleanup will retry during shutdown",
-                                    record.model_id,
-                                )
-                except Exception:
-                    self._retired_engines.append(record.entry.engine)
-                    logger.exception(
-                        "Failed to stop retired model %r after replacing %s; "
-                        "the replacement remains active and cleanup will retry "
-                        "during shutdown",
-                        record.model_id,
-                        group,
-                    )
+        async def stop_retired(record: ResidencyRecord, stop: object) -> None:
+            try:
+                result = stop()  # type: ignore[operator]
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                self._retired_engines.append(record.entry.engine)
+                logger.exception(
+                    "Failed to stop retired model %r after replacing %s; "
+                    "the replacement remains active and cleanup will retry "
+                    "during shutdown",
+                    record.model_id,
+                    group,
+                )
+
+        tasks = [
+            asyncio.create_task(stop_retired(record, stop))
+            for record, stop in retired
+            if callable(stop)
+        ]
+        self._retirement_tasks.update(tasks)
+        for task in tasks:
+            task.add_done_callback(self._on_retirement_done)
+
+        if tasks:
+            try:
+                await asyncio.shield(asyncio.gather(*tasks))
+            except asyncio.CancelledError as exc:
+                # Registry commit is complete and teardown tasks are strongly
+                # tracked by the manager. The cancelled control-plane caller
+                # must not wait for an unrelated old engine's slow/hung stop.
+                raise _CommittedReplacementCancelled from exc
         _release_allocator_cache()
-        if cancellation is not None:
-            raise _CommittedReplacementCancelled from cancellation
+
+    def _on_retirement_done(self, task: asyncio.Task) -> None:
+        self._retirement_tasks.discard(task)
+        if not self._retirement_tasks:
+            _release_allocator_cache()
 
     async def set_pinned(self, model_name: str, pinned: bool) -> ResidencyRecord:
         async with self._lock:
@@ -954,6 +959,7 @@ class ResidentModelManager:
             "idle_ttl_seconds": self.idle_ttl_seconds,
             "loads_total": self.loads_total,
             "evictions_total": self.evictions_total,
-            "retired_cleanup_pending": len(self._retired_engines),
+            "retired_cleanup_pending": len(self._retired_engines)
+            + len(self._retirement_tasks),
             "models": models,
         }

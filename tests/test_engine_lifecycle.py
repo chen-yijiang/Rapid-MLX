@@ -21,7 +21,7 @@ def _engine(*, reservations: int = 0, running: dict | None = None):
     engine._admission_reservations = reservations
     engine._admission_tokens = {f"reserved-{index}" for index in range(reservations)}
     if reservations:
-        _admission_token_context.set((id(engine), "reserved-0"))
+        _admission_token_context.set((id(engine), ("reserved-0",)))
     engine._generation_paused = False
     engine._generation_pause_mode = None
     scheduler = SimpleNamespace(
@@ -183,6 +183,32 @@ def test_unlimited_cap_still_tracks_lifecycle_reservation():
     assert engine._admission_reservations == 1
     engine.release_admission_reservation()
     assert engine._admission_reservations == 0
+
+
+def test_same_context_admissions_release_as_a_token_stack():
+    engine, _ = _engine()
+    engine._engine.engine.scheduler.config.max_concurrent_requests = None
+
+    engine.check_admission()
+    engine.check_admission()
+    assert engine._admission_reservations == 2
+
+    engine.release_admission_reservation()
+    assert engine._admission_reservations == 1
+    engine.release_admission_reservation()
+    assert engine._admission_reservations == 0
+
+
+def test_scheduler_transfer_releases_route_owned_reservation():
+    engine, _ = _engine()
+    engine.check_admission()
+    context = _admission_token_context.get()
+    assert context is not None
+
+    engine._transfer_admission_to_scheduler(context[1][-1])
+
+    assert engine._admission_reservations == 0
+    assert engine._admission_tokens == set()
 
 
 @pytest.mark.parametrize("scheduler_type", [Scheduler, MLLMScheduler])

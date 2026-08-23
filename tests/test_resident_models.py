@@ -567,17 +567,18 @@ async def test_cancellation_during_retired_stop_keeps_committed_new_primary():
     )
     await old_engine.stop_started.wait()
     replacement.cancel()
-    await asyncio.sleep(0)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(replacement, timeout=0.1)
 
     # Cancellation arrived after the registry commit.  The target must stay
     # routable while shielded retirement finishes.
     assert registry.default_name == "chat-new"
     assert "chat-old" not in registry
-    assert not replacement.done()
-
     old_engine.allow_stop.set()
-    with pytest.raises(asyncio.CancelledError):
-        await replacement
+    for _ in range(100):
+        if old_engine.stopped:
+            break
+        await asyncio.sleep(0)
 
     assert old_engine.stopped is True
     assert registry.default_name == "chat-new"

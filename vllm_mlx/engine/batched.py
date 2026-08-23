@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # appended. Replay a negligible suffix so non-trimmable caches never snapshot
 # an optimistic boundary that the next request cannot reuse.
 _PREFIX_BOUNDARY_REPLAY_TOKENS = 8
-_admission_token_context: contextvars.ContextVar[tuple[int, str] | None] = (
+_admission_token_context: contextvars.ContextVar[tuple[int, tuple[str, ...]] | None] = (
     contextvars.ContextVar("rapid_mlx_admission_token", default=None)
 )
 
@@ -991,7 +991,9 @@ class BatchedEngine(BaseEngine):
                 self._admission_tokens = tokens
             token = uuid.uuid4().hex
             tokens.add(token)
-            _admission_token_context.set((id(self), token))
+            context = _admission_token_context.get()
+            stack = context[1] if context is not None and context[0] == id(self) else ()
+            _admission_token_context.set((id(self), (*stack, token)))
 
     def release_admission_reservation(self) -> None:
         """Release a slot reserved by ``check_admission``.
@@ -1002,14 +1004,32 @@ class BatchedEngine(BaseEngine):
         """
         with self._admission_lock:
             context = _admission_token_context.get()
-            token = (
-                context[1] if context is not None and context[0] == id(self) else None
-            )
-            tokens = getattr(self, "_admission_tokens", set())
-            if token is not None and token in tokens:
-                tokens.remove(token)
-                self._admission_reservations -= 1
-                _admission_token_context.set(None)
+            stack = context[1] if context is not None and context[0] == id(self) else ()
+            token = stack[-1] if stack else None
+            self._consume_admission_token_locked(token, stack)
+
+    def _consume_admission_token_locked(
+        self, token: str | None, context_stack: tuple[str, ...]
+    ) -> None:
+        """Release one route reservation; caller holds `_admission_lock`."""
+
+        tokens = getattr(self, "_admission_tokens", set())
+        if token is not None and token in tokens:
+            tokens.remove(token)
+            self._admission_reservations -= 1
+        if token is not None and token in context_stack:
+            remaining = tuple(value for value in context_stack if value != token)
+            _admission_token_context.set((id(self), remaining) if remaining else None)
+
+    def _transfer_admission_to_scheduler(self, token: str | None) -> None:
+        """Drop route ownership once the scheduler owns the request."""
+
+        if token is None:
+            return
+        with self._admission_lock:
+            context = _admission_token_context.get()
+            stack = context[1] if context is not None and context[0] == id(self) else ()
+            self._consume_admission_token_locked(token, stack)
 
     def lifecycle_status(self) -> dict[str, object]:
         """Return scheduler-owned lifecycle state for control-plane clients."""
@@ -2144,8 +2164,10 @@ class BatchedEngine(BaseEngine):
         request_id_holder = kwargs.pop("request_id_holder", None)
         admission_context = _admission_token_context.get()
         admission_token = (
-            admission_context[1]
-            if admission_context is not None and admission_context[0] == id(self)
+            admission_context[1][-1]
+            if admission_context is not None
+            and admission_context[0] == id(self)
+            and admission_context[1]
             else None
         )
 
@@ -2171,6 +2193,7 @@ class BatchedEngine(BaseEngine):
                 lifecycle_admission_token=admission_token,
                 **_mllm_penalty_kwargs,
             )
+            self._transfer_admission_to_scheduler(admission_token)
             # C-01 force-abort: publish the scheduler request id so the
             # route's disconnect_guard can call abort_request directly.
             if request_id_holder is not None:
@@ -2262,6 +2285,7 @@ class BatchedEngine(BaseEngine):
             suppressed_tokens_logits_processor=suppressed_tokens_logits_processor,
             lifecycle_admission_token=admission_token,
         )
+        self._transfer_admission_to_scheduler(admission_token)
         # C-01 force-abort: publish the scheduler request id (text path)
         # so the route's disconnect_guard can call abort_request directly
         # on client disconnect.
