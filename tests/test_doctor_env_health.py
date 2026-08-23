@@ -24,6 +24,7 @@ import os
 import plistlib
 import time
 import urllib.error
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
@@ -444,11 +445,15 @@ def test_agent_integration_details_redact_url_secrets(tmp_path):
         '"https://user:password@localhost:8000/v1?token=secret#fragment"}}'
     )
 
-    section = eh.section_agent_integrations(
-        home=tmp_path,
-        open_url=lambda *_args, **_kwargs: _HTTPResponse(),
-    )
+    requested = []
+
+    def open_url(request, *, timeout):
+        requested.append(request.full_url)
+        return _HTTPResponse()
+
+    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
     detail = section.checks[0].detail
+    assert requested == ["https://localhost:8000/healthz"]
     assert "https://localhost:8000/v1" in detail
     assert all(
         secret not in detail for secret in ("user", "password", "token", "secret")
@@ -477,6 +482,27 @@ def test_agent_integration_config_read_is_size_bounded(tmp_path):
         Path, "read_text", side_effect=AssertionError("must not read")
     ):
         section = eh.section_agent_integrations(home=tmp_path)
+
+    assert section.checks[0].status is eh.CheckStatus.WARN
+    assert "no Rapid-MLX server" in section.checks[0].label
+
+
+def test_agent_integration_config_growth_during_read_is_size_bounded(
+    tmp_path, monkeypatch
+):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text("{}")
+    oversized = BytesIO(b" " * (eh._AGENT_CONFIG_MAX_BYTES + 1))
+    original_open = Path.open
+
+    def open_file(path, *args, **kwargs):
+        if path == claude:
+            return oversized
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    section = eh.section_agent_integrations(home=tmp_path)
 
     assert section.checks[0].status is eh.CheckStatus.WARN
     assert "no Rapid-MLX server" in section.checks[0].label

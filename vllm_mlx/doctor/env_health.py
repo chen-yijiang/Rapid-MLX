@@ -1318,10 +1318,12 @@ def _configured_agent_urls(
         if not path.is_file():
             continue
         try:
-            if path.stat().st_size > _AGENT_CONFIG_MAX_BYTES:
+            with path.open("rb") as config_file:
+                raw_config = config_file.read(_AGENT_CONFIG_MAX_BYTES + 1)
+            if len(raw_config) > _AGENT_CONFIG_MAX_BYTES:
                 configured.append((name, path, None, None))
                 continue
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(raw_config)
             url, api_key = extract(data) if isinstance(data, dict) else (None, None)
             configured.append(
                 (
@@ -1351,16 +1353,23 @@ def _agent_server_alive(
     timeout: float = 0.5,
 ) -> bool:
     """Probe Rapid-MLX liveness, authenticating from the client config."""
-    root = base_url.rstrip("/")
-    if root.endswith("/v1"):
-        root = root[:-3]
     try:
-        parsed = urllib.parse.urlsplit(root)
+        parsed = urllib.parse.urlsplit(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return False
+        path = parsed.path.rstrip("/")
+        if path.endswith("/v1"):
+            path = path[:-3]
+        host = parsed.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        health_url = urllib.parse.urlunsplit(
+            (parsed.scheme, host + port, path + "/healthz", "", "")
+        )
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         request = urllib.request.Request(  # noqa: S310
-            root + "/healthz", headers=headers, method="GET"
+            health_url, headers=headers, method="GET"
         )
     except ValueError:
         return False
