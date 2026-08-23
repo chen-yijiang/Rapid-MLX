@@ -296,8 +296,8 @@ struct ChatView: View {
         }
         // Parsing runs off-main-thread. A completion started in conversation A
         // must not attach itself after the user has navigated to conversation B.
-        .onChange(of: viewModel.activeConversationID) { _, _ in
-            cancelFileImportAfterNavigation()
+        .onChange(of: viewModel.activeConversationID) { _, newConversationID in
+            cancelFileImportAfterNavigation(activeConversationID: newConversationID)
         }
     }
 
@@ -1032,8 +1032,10 @@ struct ChatView: View {
             attachmentDraft.notice = "Attach up to \(ChatFileAttachment.maxAttachmentsPerMessage) PDF, CSV, or TXT files per message."
             return false
         }
-        guard let importID = attachmentDraft.beginFileImport() else { return false }
         let importConversationID = viewModel.activeConversationID
+        guard let importID = attachmentDraft.beginFileImport(
+            conversationID: importConversationID
+        ) else { return false }
         Task { @MainActor in
             let outcome = await Task.detached(priority: .userInitiated) {
                 Self.loadFileAttachments(selection.accepted)
@@ -1055,9 +1057,20 @@ struct ChatView: View {
         return true
     }
 
-    private func cancelFileImportAfterNavigation(importID: UUID? = nil) {
+    private func cancelFileImportAfterNavigation(
+        importID: UUID? = nil,
+        activeConversationID: UUID? = nil
+    ) {
         let notice = "File import canceled because you switched conversations."
-        if attachmentDraft.cancelFileImport(id: importID, notice: notice) {
+        let cancelled = if let activeConversationID {
+            attachmentDraft.cancelFileImport(
+                notOwnedBy: activeConversationID,
+                notice: notice
+            )
+        } else {
+            attachmentDraft.cancelFileImport(id: importID, notice: notice)
+        }
+        if cancelled {
             VoiceOverAnnouncer.announce(notice)
         }
     }

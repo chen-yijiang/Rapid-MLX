@@ -13,10 +13,10 @@ struct ChatAttachmentDraftTests {
         let fileURL = URL(fileURLWithPath: "/tmp/notes.txt")
         var draft = ChatAttachmentDraft()
         draft.appendImage(image, sourceURL: imageURL)
-        let startedImportID = draft.beginFileImport()
+        let startedImportID = draft.beginFileImport(conversationID: UUID())
         let importID = try #require(startedImportID)
         draft.finishFileImport(id: importID, [(file, fileURL)], notice: "old notice")
-        _ = draft.beginFileImport()
+        _ = draft.beginFileImport(conversationID: UUID())
 
         let payload = draft.takeSubmission()
 
@@ -37,7 +37,7 @@ struct ChatAttachmentDraftTests {
         var draft = ChatAttachmentDraft()
 
         draft.appendImage(firstImage)
-        let startedFirstImportID = draft.beginFileImport()
+        let startedFirstImportID = draft.beginFileImport(conversationID: UUID())
         let firstImportID = try #require(startedFirstImportID)
         draft.finishFileImport(
             id: firstImportID,
@@ -47,7 +47,7 @@ struct ChatAttachmentDraftTests {
         let first = draft.takeSubmission()
 
         draft.appendImage(secondImage)
-        let startedSecondImportID = draft.beginFileImport()
+        let startedSecondImportID = draft.beginFileImport(conversationID: UUID())
         let secondImportID = try #require(startedSecondImportID)
         draft.finishFileImport(
             id: secondImportID,
@@ -95,7 +95,7 @@ struct ChatAttachmentDraftTests {
         let staleFile = try makeFile(name: "old.txt", text: "old conversation")
         let staleURL = URL(fileURLWithPath: "/tmp/old.txt")
         var draft = ChatAttachmentDraft()
-        let startedStaleID = draft.beginFileImport()
+        let startedStaleID = draft.beginFileImport(conversationID: UUID())
         let staleID = try #require(startedStaleID)
 
         let cancelled = draft.cancelFileImport(notice: "Import canceled after navigation.")
@@ -118,11 +118,11 @@ struct ChatAttachmentDraftTests {
         let oldFile = try makeFile(name: "old.txt", text: "old")
         let newFile = try makeFile(name: "new.txt", text: "new")
         var draft = ChatAttachmentDraft()
-        let startedOldID = draft.beginFileImport()
+        let startedOldID = draft.beginFileImport(conversationID: UUID())
         let oldID = try #require(startedOldID)
         let cancelledOld = draft.cancelFileImport()
         #expect(cancelledOld)
-        let startedNewID = draft.beginFileImport()
+        let startedNewID = draft.beginFileImport(conversationID: UUID())
         let newID = try #require(startedNewID)
 
         let acceptedOld = draft.finishFileImport(
@@ -144,10 +144,10 @@ struct ChatAttachmentDraftTests {
     @Test("a stale generation cannot cancel the newer active import")
     func staleGenerationCannotCancelNewImport() throws {
         var draft = ChatAttachmentDraft()
-        let startedOldID = draft.beginFileImport()
+        let startedOldID = draft.beginFileImport(conversationID: UUID())
         let oldID = try #require(startedOldID)
         _ = draft.cancelFileImport(id: oldID)
-        let startedNewID = draft.beginFileImport()
+        let startedNewID = draft.beginFileImport(conversationID: UUID())
         let newID = try #require(startedNewID)
 
         let cancelled = draft.cancelFileImport(
@@ -156,7 +156,29 @@ struct ChatAttachmentDraftTests {
         )
 
         #expect(!cancelled)
-        #expect(draft.fileImportID == newID)
+        #expect(draft.fileImport?.id == newID)
+        #expect(draft.notice == nil)
+    }
+
+    @Test("delayed navigation callback preserves the new conversation's import")
+    func delayedNavigationPreservesNewConversationImport() throws {
+        let conversationA = UUID()
+        let conversationB = UUID()
+        var draft = ChatAttachmentDraft()
+        let startedA = draft.beginFileImport(conversationID: conversationA)
+        let importA = try #require(startedA)
+        _ = draft.cancelFileImport(id: importA)
+        let startedB = draft.beginFileImport(conversationID: conversationB)
+        let importB = try #require(startedB)
+
+        // Models SwiftUI delivering A -> B after B has already begun work.
+        let cancelled = draft.cancelFileImport(
+            notOwnedBy: conversationB,
+            notice: "Import canceled after navigation."
+        )
+
+        #expect(!cancelled)
+        #expect(draft.fileImport == .init(id: importB, conversationID: conversationB))
         #expect(draft.notice == nil)
     }
 
@@ -187,14 +209,16 @@ struct ChatAttachmentDraftTests {
         let stripped = CapabilityChipRenderGateSourceGuardTests
             .stripCommentsAndWhitespace(source)
 
-        #expect(stripped.contains("letimportID=attachmentDraft.beginFileImport()"))
         #expect(stripped.contains("letimportConversationID=viewModel.activeConversationID"))
+        #expect(stripped.contains(
+            "letimportID=attachmentDraft.beginFileImport(conversationID:importConversationID)"
+        ))
         #expect(stripped.contains(
             "guardviewModel.activeConversationID==importConversationIDelse{cancelFileImportAfterNavigation(importID:importID)"
         ))
         #expect(stripped.contains("attachmentDraft.finishFileImport(id:importID"))
         #expect(stripped.contains(
-            ".onChange(of:viewModel.activeConversationID){_,_incancelFileImportAfterNavigation()"
+            ".onChange(of:viewModel.activeConversationID){_,newConversationIDincancelFileImportAfterNavigation(activeConversationID:newConversationID)"
         ))
     }
 

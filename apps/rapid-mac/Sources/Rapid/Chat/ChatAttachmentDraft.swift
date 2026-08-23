@@ -6,6 +6,11 @@ import Foundation
 /// rules directly testable: every input method feeds the same draft, a send
 /// atomically consumes it, and a later turn cannot inherit stale attachments.
 struct ChatAttachmentDraft: Equatable {
+    struct FileImport: Equatable {
+        let id: UUID
+        let conversationID: UUID
+    }
+
     /// Immutable ownership transfer from the composer to one user turn.
     ///
     /// The arrays are captured before asynchronous chat work starts, so later
@@ -18,11 +23,11 @@ struct ChatAttachmentDraft: Equatable {
     private(set) var images: [ChatImageAttachment] = []
     private(set) var files: [ChatFileAttachment] = []
     private(set) var sourcePaths: [UUID: String] = [:]
-    private(set) var fileImportID: UUID?
+    private(set) var fileImport: FileImport?
     var notice: String?
 
     var hasAttachments: Bool { !images.isEmpty || !files.isEmpty }
-    var isImportingFiles: Bool { fileImportID != nil }
+    var isImportingFiles: Bool { fileImport != nil }
 
     mutating func appendImage(_ image: ChatImageAttachment, sourceURL: URL? = nil) {
         images.append(image)
@@ -37,10 +42,10 @@ struct ChatAttachmentDraft: Equatable {
 
     /// Starts one asynchronous import generation. A second source cannot race
     /// the first because every UI entry point funnels through this method.
-    mutating func beginFileImport() -> UUID? {
-        guard fileImportID == nil else { return nil }
+    mutating func beginFileImport(conversationID: UUID) -> UUID? {
+        guard fileImport == nil else { return nil }
         let id = UUID()
-        fileImportID = id
+        fileImport = FileImport(id: id, conversationID: conversationID)
         return id
     }
 
@@ -55,13 +60,13 @@ struct ChatAttachmentDraft: Equatable {
         _ imported: [(attachment: ChatFileAttachment, sourceURL: URL)],
         notice: String?
     ) -> Bool {
-        guard fileImportID == id else { return false }
+        guard fileImport?.id == id else { return false }
         files = ChatFileAttachment.fittedForMessage(files + imported.map(\.attachment))
         for item in imported {
             sourcePaths[item.attachment.id] = Self.attachmentKey(for: item.sourceURL)
         }
         self.notice = notice
-        fileImportID = nil
+        fileImport = nil
         return true
     }
 
@@ -70,11 +75,24 @@ struct ChatAttachmentDraft: Equatable {
     /// announcing navigation that had no attachment work in flight.
     @discardableResult
     mutating func cancelFileImport(id expectedID: UUID? = nil, notice: String? = nil) -> Bool {
-        guard let activeID = fileImportID else { return false }
-        guard expectedID == nil || expectedID == activeID else { return false }
-        fileImportID = nil
+        guard let activeImport = fileImport else { return false }
+        guard expectedID == nil || expectedID == activeImport.id else { return false }
+        fileImport = nil
         if let notice { self.notice = notice }
         return true
+    }
+
+    /// Cancels only work owned by a conversation other than the active one.
+    /// This remains correct even when SwiftUI delivers navigation after the new
+    /// conversation has already started its own import.
+    @discardableResult
+    mutating func cancelFileImport(
+        notOwnedBy conversationID: UUID,
+        notice: String? = nil
+    ) -> Bool {
+        guard let activeImport = fileImport else { return false }
+        guard activeImport.conversationID != conversationID else { return false }
+        return cancelFileImport(id: activeImport.id, notice: notice)
     }
 
     mutating func removeImage(id: UUID) {
@@ -96,7 +114,7 @@ struct ChatAttachmentDraft: Equatable {
         files = []
         sourcePaths = [:]
         notice = nil
-        fileImportID = nil
+        fileImport = nil
         return submission
     }
 
