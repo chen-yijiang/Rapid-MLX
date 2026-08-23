@@ -294,6 +294,11 @@ struct ChatView: View {
             guard request != 0 else { return }
             composeFocusToken &+= 1
         }
+        // Parsing runs off-main-thread. A completion started in conversation A
+        // must not attach itself after the user has navigated to conversation B.
+        .onChange(of: viewModel.activeConversationID) { _, _ in
+            attachmentDraft.cancelFileImport()
+        }
     }
 
     // MARK: - Transcript
@@ -858,14 +863,14 @@ struct ChatView: View {
         // tooltip carries.
         guard acknowledgeIfNotReady() else { return }
         draft = ""
-        let attachments = attachmentDraft.consume()
+        let submission = attachmentDraft.takeSubmission()
         composeFocusToken &+= 1
         viewModel.send(
             text,
             alias: alias,
             supportsImageInput: supportsImageInput,
-            imageAttachments: attachments.images,
-            fileAttachments: attachments.files
+            imageAttachments: submission.images,
+            fileAttachments: submission.files
         )
     }
 
@@ -1027,7 +1032,7 @@ struct ChatView: View {
             attachmentDraft.notice = "Attach up to \(ChatFileAttachment.maxAttachmentsPerMessage) PDF, CSV, or TXT files per message."
             return false
         }
-        attachmentDraft.isImportingFiles = true
+        guard let importID = attachmentDraft.beginFileImport() else { return false }
         Task { @MainActor in
             let outcome = await Task.detached(priority: .userInitiated) {
                 Self.loadFileAttachments(selection.accepted)
@@ -1036,7 +1041,7 @@ struct ChatView: View {
             let notice = selection.rejectedCount > 0
                 ? "Attach up to \(ChatFileAttachment.maxAttachmentsPerMessage) PDF, CSV, or TXT files per message."
                 : outcome.1
-            attachmentDraft.finishFileImport(outcome.0, notice: notice)
+            attachmentDraft.finishFileImport(id: importID, outcome.0, notice: notice)
         }
         return true
     }

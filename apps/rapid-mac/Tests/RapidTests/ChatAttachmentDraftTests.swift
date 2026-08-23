@@ -13,10 +13,12 @@ struct ChatAttachmentDraftTests {
         let fileURL = URL(fileURLWithPath: "/tmp/notes.txt")
         var draft = ChatAttachmentDraft()
         draft.appendImage(image, sourceURL: imageURL)
-        draft.finishFileImport([(file, fileURL)], notice: "old notice")
-        draft.isImportingFiles = true
+        let startedImportID = draft.beginFileImport()
+        let importID = try #require(startedImportID)
+        draft.finishFileImport(id: importID, [(file, fileURL)], notice: "old notice")
+        _ = draft.beginFileImport()
 
-        let payload = draft.consume()
+        let payload = draft.takeSubmission()
 
         #expect(payload.images == [image])
         #expect(payload.files == [file])
@@ -35,12 +37,24 @@ struct ChatAttachmentDraftTests {
         var draft = ChatAttachmentDraft()
 
         draft.appendImage(firstImage)
-        draft.finishFileImport([(firstFile, URL(fileURLWithPath: "/tmp/first.txt"))], notice: nil)
-        let first = draft.consume()
+        let startedFirstImportID = draft.beginFileImport()
+        let firstImportID = try #require(startedFirstImportID)
+        draft.finishFileImport(
+            id: firstImportID,
+            [(firstFile, URL(fileURLWithPath: "/tmp/first.txt"))],
+            notice: nil
+        )
+        let first = draft.takeSubmission()
 
         draft.appendImage(secondImage)
-        draft.finishFileImport([(secondFile, URL(fileURLWithPath: "/tmp/second.txt"))], notice: nil)
-        let second = draft.consume()
+        let startedSecondImportID = draft.beginFileImport()
+        let secondImportID = try #require(startedSecondImportID)
+        draft.finishFileImport(
+            id: secondImportID,
+            [(secondFile, URL(fileURLWithPath: "/tmp/second.txt"))],
+            notice: nil
+        )
+        let second = draft.takeSubmission()
 
         #expect(first.images.map(\.filename) == ["first.png"])
         #expect(first.files.map(\.filename) == ["first.txt"])
@@ -74,6 +88,89 @@ struct ChatAttachmentDraftTests {
 
         #expect(result.fresh == [fresh])
         #expect(result.duplicates == 2)
+    }
+
+    @Test("a cancelled import cannot resurrect attachments when it completes late")
+    func staleImportCompletionIsIgnored() throws {
+        let staleFile = try makeFile(name: "old.txt", text: "old conversation")
+        let staleURL = URL(fileURLWithPath: "/tmp/old.txt")
+        var draft = ChatAttachmentDraft()
+        let startedStaleID = draft.beginFileImport()
+        let staleID = try #require(startedStaleID)
+
+        draft.cancelFileImport()
+        let accepted = draft.finishFileImport(
+            id: staleID,
+            [(staleFile, staleURL)],
+            notice: "stale notice"
+        )
+
+        #expect(!accepted)
+        #expect(draft.files.isEmpty)
+        #expect(draft.notice == nil)
+        #expect(!draft.isImportingFiles)
+        #expect(draft.filteringAlreadyAttached([staleURL]).fresh == [staleURL])
+    }
+
+    @Test("a late old generation cannot overwrite a newer import")
+    func importGenerationsDoNotCross() throws {
+        let oldFile = try makeFile(name: "old.txt", text: "old")
+        let newFile = try makeFile(name: "new.txt", text: "new")
+        var draft = ChatAttachmentDraft()
+        let startedOldID = draft.beginFileImport()
+        let oldID = try #require(startedOldID)
+        draft.cancelFileImport()
+        let startedNewID = draft.beginFileImport()
+        let newID = try #require(startedNewID)
+
+        let acceptedOld = draft.finishFileImport(
+            id: oldID,
+            [(oldFile, URL(fileURLWithPath: "/tmp/old.txt"))],
+            notice: nil
+        )
+        #expect(!acceptedOld)
+        #expect(draft.isImportingFiles)
+        let acceptedNew = draft.finishFileImport(
+            id: newID,
+            [(newFile, URL(fileURLWithPath: "/tmp/new.txt"))],
+            notice: nil
+        )
+        #expect(acceptedNew)
+        #expect(draft.files == [newFile])
+    }
+
+    @Test("submission is an immutable snapshot of one composer turn")
+    func submissionDoesNotFollowLaterDraftMutations() throws {
+        let first = try makeImage(name: "first.png")
+        let second = try makeImage(name: "second.png")
+        var draft = ChatAttachmentDraft()
+        draft.appendImage(first)
+
+        let submission = draft.takeSubmission()
+        draft.appendImage(second)
+
+        #expect(submission.images == [first])
+        #expect(draft.images == [second])
+    }
+
+    @Test("ChatView carries the import generation through async work and cancels on navigation")
+    func lifecycleIsWiredIntoChatView() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/Rapid/UI/ChatView.swift"),
+            encoding: .utf8
+        )
+        let stripped = CapabilityChipRenderGateSourceGuardTests
+            .stripCommentsAndWhitespace(source)
+
+        #expect(stripped.contains("letimportID=attachmentDraft.beginFileImport()"))
+        #expect(stripped.contains("attachmentDraft.finishFileImport(id:importID"))
+        #expect(stripped.contains(
+            ".onChange(of:viewModel.activeConversationID){_,_inattachmentDraft.cancelFileImport()"
+        ))
     }
 
     private func makeImage(name: String) throws -> ChatImageAttachment {
