@@ -819,6 +819,19 @@ class ResidentModelManager:
                     cancellation = cancellation or exc
                     try:
                         await asyncio.wait_for(task, timeout=5.0)
+                    except TimeoutError:
+                        task.cancel()
+                        _, pending = await asyncio.wait({task}, timeout=1.0)
+                        force_resume = getattr(engine, "force_resume_generation", None)
+                        if callable(force_resume):
+                            force_resume()
+                        if pending:
+                            self._rollback_tasks.add(task)
+                            self._rollback_task_engines[task] = engine
+                            task.add_done_callback(self._on_rollback_done)
+                        failure = failure or TimeoutError(
+                            "timed out resuming a model engine after cancellation"
+                        )
                     except (Exception, asyncio.CancelledError):
                         failure = failure or RuntimeError(
                             "failed to finish resuming a model engine after cancellation"

@@ -2068,6 +2068,9 @@ class MLLMScheduler:
         with self._cancel_counter_lock:
             self._cancelled_request_ids.clear()
             self._disconnect_abort_ids.clear()
+            self._generation_paused = False
+            self._paused_add_allowance = 0
+            self._paused_admission_tokens = set()
 
         if self.batch_generator is not None:
             self.batch_generator.close()
