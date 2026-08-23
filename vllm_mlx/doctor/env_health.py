@@ -1246,21 +1246,28 @@ def section_optional_tools(
 # ---------------------------------------------------------------------------
 
 
-def _configured_agent_urls(home: Path) -> list[tuple[str, Path, str | None]]:
+def _configured_agent_urls(
+    home: Path,
+) -> list[tuple[str, Path, str | None, str | None]]:
     """Return configured Rapid-MLX endpoints from supported agent clients.
 
     Missing files are intentionally omitted: agent integrations are optional,
     and installing Rapid-MLX must not make ``doctor`` warn about clients the
     user has never used.
     """
-    candidates: list[tuple[str, Path, Callable[[dict[str, Any]], str | None]]] = [
+    candidates: list[
+        tuple[str, Path, Callable[[dict[str, Any]], tuple[str | None, str | None]]]
+    ] = [
         (
             "Claude Code",
             home / ".claude/settings.json",
             lambda data: (
-                data.get("env", {}).get("ANTHROPIC_BASE_URL")
+                (
+                    data.get("env", {}).get("ANTHROPIC_BASE_URL"),
+                    data.get("env", {}).get("ANTHROPIC_API_KEY"),
+                )
                 if isinstance(data.get("env"), dict)
-                else None
+                else (None, None)
             ),
         ),
         (
@@ -1269,16 +1276,16 @@ def _configured_agent_urls(home: Path) -> list[tuple[str, Path, str | None]]:
             lambda data: (
                 next(
                     (
-                        entry.get("apiBase")
+                        (entry.get("apiBase"), entry.get("apiKey"))
                         for entry in data.get("models", [])
                         if isinstance(entry, dict)
                         and entry.get("title") == "rapid-mlx"
                         and entry.get("provider") == "openai"
                     ),
-                    None,
+                    (None, None),
                 )
                 if isinstance(data.get("models"), list)
-                else None
+                else (None, None)
             ),
         ),
     ]
@@ -1299,36 +1306,44 @@ def _configured_agent_urls(home: Path) -> list[tuple[str, Path, str | None]]:
                     "Cline",
                     path,
                     lambda data: (
-                        data.get("openAiBaseUrl")
+                        (data.get("openAiBaseUrl"), data.get("openAiApiKey"))
                         if data.get("apiProvider") == "openai"
-                        else None
+                        else (None, None)
                     ),
                 )
             )
 
-    configured: list[tuple[str, Path, str | None]] = []
+    configured: list[tuple[str, Path, str | None, str | None]] = []
     for name, path, extract in candidates:
         if not path.is_file():
             continue
         try:
             if path.stat().st_size > _AGENT_CONFIG_MAX_BYTES:
-                configured.append((name, path, None))
+                configured.append((name, path, None, None))
                 continue
             data = json.loads(path.read_text(encoding="utf-8"))
-            url = extract(data) if isinstance(data, dict) else None
-            configured.append((name, path, url if isinstance(url, str) else None))
+            url, api_key = extract(data) if isinstance(data, dict) else (None, None)
+            configured.append(
+                (
+                    name,
+                    path,
+                    url if isinstance(url, str) else None,
+                    api_key if isinstance(api_key, str) else None,
+                )
+            )
         except (OSError, UnicodeError, json.JSONDecodeError):
-            configured.append((name, path, None))
+            configured.append((name, path, None, None))
     return configured
 
 
 def _agent_server_alive(
     base_url: str,
     *,
+    api_key: str | None = None,
     open_url: Callable[..., Any] | None = None,
     timeout: float = 0.5,
 ) -> bool:
-    """Probe the unauthenticated Rapid-MLX liveness endpoint."""
+    """Probe Rapid-MLX liveness, authenticating from the client config."""
     root = base_url.rstrip("/")
     if root.endswith("/v1"):
         root = root[:-3]
@@ -1336,7 +1351,10 @@ def _agent_server_alive(
         parsed = urllib.parse.urlsplit(root)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return False
-        request = urllib.request.Request(root + "/healthz", method="GET")  # noqa: S310
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        request = urllib.request.Request(  # noqa: S310
+            root + "/healthz", headers=headers, method="GET"
+        )
     except ValueError:
         return False
     opener = open_url or urllib.request.urlopen
@@ -1379,11 +1397,11 @@ def _agent_server_alive(
 
 
 def _probe_agent_urls(
-    urls: list[str],
+    endpoints: list[tuple[str, str | None]],
     *,
     open_url: Callable[..., Any] | None = None,
     deadline: float = 0.75,
-) -> dict[str, bool]:
+) -> dict[tuple[str, str | None], bool]:
     """Probe endpoints concurrently without ever waiting past ``deadline``.
 
     ``urlopen(timeout=...)`` does not cover DNS resolution on every platform.
@@ -1391,17 +1409,19 @@ def _probe_agent_urls(
     if libc's resolver remains blocked. Late results only mutate this function's
     private dictionary and are discarded.
     """
-    unique_urls = list(dict.fromkeys(urls))
-    results: dict[str, bool] = {}
+    unique_endpoints = list(dict.fromkeys(endpoints))
+    results: dict[tuple[str, str | None], bool] = {}
     lock = threading.Lock()
 
-    def probe(url: str) -> None:
-        alive = _agent_server_alive(url, open_url=open_url)
+    def probe(endpoint: tuple[str, str | None]) -> None:
+        url, api_key = endpoint
+        alive = _agent_server_alive(url, api_key=api_key, open_url=open_url)
         with lock:
-            results[url] = alive
+            results[endpoint] = alive
 
     workers = [
-        threading.Thread(target=probe, args=(url,), daemon=True) for url in unique_urls
+        threading.Thread(target=probe, args=(endpoint,), daemon=True)
+        for endpoint in unique_endpoints
     ]
     expires = time.monotonic() + deadline
     for worker in workers:
@@ -1410,7 +1430,7 @@ def _probe_agent_urls(
         worker.join(timeout=max(0.0, expires - time.monotonic()))
 
     with lock:
-        return {url: results.get(url, False) for url in unique_urls}
+        return {endpoint: results.get(endpoint, False) for endpoint in unique_endpoints}
 
 
 def _redacted_server_url(url: str) -> str:
@@ -1440,17 +1460,17 @@ def section_agent_integrations(
         s.add("No Claude Code, Cline, or Continue.dev config found", CheckStatus.OK)
         return s
 
-    urls = [url for _, _, url in integrations if url]
-    alive_by_url = _probe_agent_urls(urls, open_url=open_url)
+    endpoints = [(url, api_key) for _, _, url, api_key in integrations if url]
+    alive_by_endpoint = _probe_agent_urls(endpoints, open_url=open_url)
 
-    for name, path, url in integrations:
+    for name, path, url, api_key in integrations:
         if not url:
             s.add(
                 f"{name} config found, but no Rapid-MLX server is configured",
                 CheckStatus.WARN,
                 detail=f"path={path}",
             )
-        elif alive_by_url[url]:
+        elif alive_by_endpoint[(url, api_key)]:
             s.add(
                 f"{name} config points to a live server",
                 CheckStatus.OK,

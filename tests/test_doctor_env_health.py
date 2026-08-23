@@ -340,7 +340,27 @@ def test_doctor_discovers_the_exact_config_written_by_cline_launcher(
     doctor_path.write_bytes(launcher_path.read_bytes())
 
     configured = eh._configured_agent_urls(tmp_path)
-    assert configured == [("Cline", doctor_path, "http://127.0.0.1:8000/v1")]
+    assert configured == [("Cline", doctor_path, "http://127.0.0.1:8000/v1", "sk-noop")]
+
+
+def test_agent_integration_authenticates_ddtree_health_probe(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text(
+        '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000/v1",'
+        '"ANTHROPIC_API_KEY":"secret-key"}}'
+    )
+
+    def open_url(request, *, timeout):
+        assert request.get_header("Authorization") == "Bearer secret-key"
+        return _HTTPResponse(
+            payload={"engine": "ddtree", "status": "ok", "ready": True}
+        )
+
+    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
+
+    assert section.checks[0].status is eh.CheckStatus.OK
+    assert "secret-key" not in section.checks[0].detail
 
 
 def test_stale_inactive_provider_urls_are_not_probed(tmp_path):
@@ -442,12 +462,11 @@ def test_agent_integration_probe_has_a_shared_hard_deadline():
         return _HTTPResponse()
 
     started = time.monotonic()
-    result = eh._probe_agent_urls(
-        ["http://slow.invalid:8000"], open_url=open_url, deadline=0.1
-    )
+    endpoint = ("http://slow.invalid:8000", None)
+    result = eh._probe_agent_urls([endpoint], open_url=open_url, deadline=0.1)
     elapsed = time.monotonic() - started
 
-    assert result == {"http://slow.invalid:8000": False}
+    assert result == {endpoint: False}
     assert elapsed < 0.3, f"probe exceeded its deadline in {elapsed:.3f}s"
 
 
