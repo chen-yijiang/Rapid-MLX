@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -147,6 +151,34 @@ def test_result_evidence_records_timing_and_artifact_location():
     assert '--argjson exit_code "$exit_code"' in writer
     assert 'write_result fail "$status"' in finish
     assert "write_result pass 0" in dispatch_tail
+
+
+def test_early_precondition_failure_writes_typed_result_evidence(tmp_path: Path):
+    output = tmp_path / "not-created-yet"
+    missing_app = tmp_path / "missing.app"
+    result = subprocess.run(
+        ["bash", str(HARNESS), "--flow", "fresh-install"],
+        env={
+            **os.environ,
+            "HOME": str(tmp_path),
+            "RAPID_GUI_GOLDEN_OUT": str(output),
+            "RAPID_GUI_SOURCE_APP": str(missing_app),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    payload = json.loads((output / "result.json").read_text())
+    assert payload["status"] == "fail"
+    assert payload["flow"] == "fresh-install"
+    assert payload["app"] == str(missing_app)
+    assert payload["exit_code"] == result.returncode
+    assert isinstance(payload["duration_seconds"], int)
+    assert payload["duration_seconds"] >= 0
+    assert payload["artifact_path"] == str(output)
+    datetime.strptime(payload["started_at"], "%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_failure_diagnostic_regenerates_every_ci_baseline_and_nothing_else():

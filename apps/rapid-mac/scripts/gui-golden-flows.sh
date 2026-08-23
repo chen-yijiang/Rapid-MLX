@@ -46,7 +46,7 @@ BUNDLE_ID=""
 AX_DRIVER=""
 RESULT_WRITTEN=0
 RUN_STARTED_EPOCH="$(date +%s)"
-RUN_STARTED_AT="$(date -u -r "$RUN_STARTED_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
+RUN_STARTED_AT="$(python3 -c 'from datetime import datetime, timezone; import sys; print(datetime.fromtimestamp(int(sys.argv[1]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$RUN_STARTED_EPOCH")"
 PERSONA_ENV=()
 
 usage() {
@@ -197,8 +197,11 @@ cleanup_operator_server() {
 finish() {
     local status=$?
     set +e
-    if [[ "$status" -ne 0 && "$RESULT_WRITTEN" == 0 && -d "$OUT_ROOT" ]]; then
-        write_result fail "$status" 2>/dev/null || true
+    if [[ "$status" -ne 0 && "$RESULT_WRITTEN" == 0 ]]; then
+        mkdir -p "$OUT_ROOT" 2>/dev/null || true
+        if [[ -d "$OUT_ROOT" ]]; then
+            write_result fail "$status" 2>/dev/null || true
+        fi
     fi
     cleanup_persona
     cleanup_operator_server
