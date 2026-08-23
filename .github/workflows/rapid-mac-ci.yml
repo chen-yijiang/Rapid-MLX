@@ -58,20 +58,24 @@ jobs:
           FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "merge_group" ] || [ "$FULL_CI" = true ]; then
-            # Empty input deliberately fails closed to every product lane.
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            # A future merge queue candidate may combine independently scoped
+            # PRs, so validate both product lanes.
             python scripts/classify_ci_changes.py --github-output "$GITHUB_OUTPUT"
             {
               echo 'full_gate=true'
             } >> "$GITHUB_OUTPUT"
           else
+            # Keep full-ci promotion scoped to the lanes selected by the real
+            # PR diff. An engine-only PR must not allocate a full GUI run, and
+            # a Desktop-only PR must not allocate model runners.
             # Disable rename folding so both the removed source path and the
             # new destination participate in classification.
             git diff --no-renames --name-only "$PR_BASE_SHA" "$GITHUB_SHA" > /tmp/changed-paths
             python scripts/classify_ci_changes.py \
               --paths-file /tmp/changed-paths \
               --github-output "$GITHUB_OUTPUT"
-            echo 'full_gate=false' >> "$GITHUB_OUTPUT"
+            echo "full_gate=$FULL_CI" >> "$GITHUB_OUTPUT"
           fi
 
   # Pure text lint over the diff — no Swift toolchain, no simulator, no app
@@ -675,13 +679,13 @@ jobs:
           GOLDEN_FLOWS: ${{ needs.gui-golden-flows.result }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = pull_request ] && [ "$FULL_GATE" != true ]; then
-            echo "PR gate passed; apply the full-ci label when this PR is ready to merge"
-            exit 1
-          fi
           if [ "$DESKTOP_EXPECTED" != true ]; then
             echo "Desktop lane not required for this PR"
             exit 0
+          fi
+          if [ "${{ github.event_name }}" = pull_request ] && [ "$FULL_GATE" != true ]; then
+            echo "Desktop PR gate passed; apply the full-ci label when this PR is ready to merge"
+            exit 1
           fi
           for result in "$IDENTIFIERS" "$IDENTIFIER_TESTS" "$HARNESS_CONTRACTS" "$BUILD"; do
             if [ "$result" != success ]; then
