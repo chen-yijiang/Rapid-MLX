@@ -7,7 +7,8 @@ optional dev tools. The user runs ``rapid-mlx doctor`` to answer one question
 — "is my install/env broken?" — so every probe must:
 
 * run in well under a second (no model load, no engine init, no server boot);
-* never escalate to sudo or read user data outside ``~/.cache/huggingface``;
+* never escalate to sudo; only read the documented cache, shell, and supported
+  agent-integration config paths needed to diagnose the user's setup;
 * report a deterministic status (✓ / ⚠ / ✗) with a one-line label.
 
 Total wall-clock for ``rapid-mlx doctor`` ≤ 5 s on a warm cache, dominated by
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import importlib.metadata as _im
 import importlib.util as _iu
+import json
 import os
 import platform
 import plistlib
@@ -29,11 +31,13 @@ import shutil
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -1233,6 +1237,128 @@ def section_optional_tools(
 
 
 # ---------------------------------------------------------------------------
+# Section: Agent Integrations
+# ---------------------------------------------------------------------------
+
+
+def _configured_agent_urls(home: Path) -> list[tuple[str, Path, str | None]]:
+    """Return configured Rapid-MLX endpoints from supported agent clients.
+
+    Missing files are intentionally omitted: agent integrations are optional,
+    and installing Rapid-MLX must not make ``doctor`` warn about clients the
+    user has never used.
+    """
+    candidates: list[tuple[str, Path, Callable[[dict[str, Any]], str | None]]] = [
+        (
+            "Claude Code",
+            home / ".claude/settings.json",
+            lambda data: data.get("env", {}).get("ANTHROPIC_BASE_URL")
+            if isinstance(data.get("env"), dict)
+            else None,
+        ),
+        (
+            "Continue.dev",
+            home / ".continue/config.json",
+            lambda data: next(
+                (
+                    entry.get("apiBase")
+                    for entry in data.get("models", [])
+                    if isinstance(entry, dict) and entry.get("title") == "rapid-mlx"
+                ),
+                None,
+            )
+            if isinstance(data.get("models"), list)
+            else None,
+        ),
+    ]
+
+    cline_roots = (
+        home / "Library/Application Support/Code/User/globalStorage",
+        home / "Library/Application Support/Code - Insiders/User/globalStorage",
+        home / "Library/Application Support/VSCodium/User/globalStorage",
+        home / ".config/Code/User/globalStorage",
+        home / ".config/Code - Insiders/User/globalStorage",
+        home / ".config/VSCodium/User/globalStorage",
+    )
+    for root in cline_roots:
+        path = root / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+        if path.exists():
+            candidates.append(("Cline", path, lambda data: data.get("openAiBaseUrl")))
+            break
+
+    configured: list[tuple[str, Path, str | None]] = []
+    for name, path, extract in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            url = extract(data) if isinstance(data, dict) else None
+            configured.append((name, path, url if isinstance(url, str) else None))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            configured.append((name, path, None))
+    return configured
+
+
+def _agent_server_alive(
+    base_url: str,
+    *,
+    open_url: Callable[..., Any] | None = None,
+    timeout: float = 0.5,
+) -> bool:
+    """Probe the unauthenticated Rapid-MLX liveness endpoint."""
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3]
+    try:
+        parsed = urllib.parse.urlsplit(root)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return False
+        request = urllib.request.Request(root + "/healthz", method="GET")  # noqa: S310
+    except ValueError:
+        return False
+    opener = open_url or urllib.request.urlopen
+    try:
+        with opener(request, timeout=timeout) as response:  # noqa: S310
+            return 200 <= int(response.status) < 300
+    except (OSError, TypeError, urllib.error.URLError, ValueError):
+        return False
+
+
+def section_agent_integrations(
+    *,
+    home: Path | None = None,
+    open_url: Callable[..., Any] | None = None,
+) -> Section:
+    """Show configured IDE/agent clients and verify their target is alive."""
+    s = Section("Agent Integrations")
+    integrations = _configured_agent_urls(home or Path.home())
+    if not integrations:
+        s.add("No Claude Code, Cline, or Continue.dev config found", CheckStatus.OK)
+        return s
+
+    for name, path, url in integrations:
+        if not url:
+            s.add(
+                f"{name} config found, but no Rapid-MLX server is configured",
+                CheckStatus.WARN,
+                detail=f"path={path}",
+            )
+        elif _agent_server_alive(url, open_url=open_url):
+            s.add(
+                f"{name} config points to a live server",
+                CheckStatus.OK,
+                detail=f"path={path} server={url}",
+            )
+        else:
+            s.add(
+                f"{name} config points to a server that is not responding",
+                CheckStatus.WARN,
+                detail=f"path={path} server={url}",
+            )
+    return s
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1250,6 +1376,7 @@ _SECTION_BUILDERS = (
     section_network,
     section_shell_integration,
     section_optional_tools,
+    section_agent_integrations,
 )
 
 

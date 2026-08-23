@@ -20,12 +20,24 @@ from __future__ import annotations
 import importlib
 import os
 import plistlib
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from vllm_mlx.doctor import env_health as eh
+
+
+class _HTTPResponse:
+    def __init__(self, status: int = 200):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
 
 # ---------------------------------------------------------------------------
 # Section: System
@@ -139,6 +151,71 @@ def test_install_location_reported():
     # Second row is always the install-location classifier.
     loc_row = section.checks[1]
     assert "Install location" in loc_row.label
+
+
+# ---------------------------------------------------------------------------
+# Section: Agent integrations
+# ---------------------------------------------------------------------------
+
+
+def test_agent_integrations_are_quiet_when_no_client_is_configured(tmp_path):
+    section = eh.section_agent_integrations(home=tmp_path)
+    assert len(section.checks) == 1
+    assert section.checks[0].status is eh.CheckStatus.OK
+    assert "No Claude Code" in section.checks[0].label
+
+
+def test_agent_integrations_probe_each_configured_server(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text(
+        '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}'
+    )
+    cline = (
+        tmp_path
+        / "Library/Application Support/Code/User/globalStorage"
+        / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+    )
+    cline.parent.mkdir(parents=True)
+    cline.write_text('{"openAiBaseUrl":"http://localhost:8001/v1"}')
+    cont = tmp_path / ".continue/config.json"
+    cont.parent.mkdir(parents=True)
+    cont.write_text(
+        '{"models":[{"title":"rapid-mlx","apiBase":"http://localhost:8002/v1"}]}'
+    )
+
+    requested = []
+
+    def open_url(request, *, timeout):
+        requested.append((request.full_url, timeout))
+        if ":8001/" in request.full_url:
+            raise urllib.error.URLError("offline")
+        return _HTTPResponse()
+
+    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
+    by_name = {check.label.split()[0]: check for check in section.checks}
+    assert by_name["Claude"].status is eh.CheckStatus.OK
+    assert by_name["Cline"].status is eh.CheckStatus.WARN
+    assert by_name["Continue.dev"].status is eh.CheckStatus.OK
+    assert {url for url, _ in requested} == {
+        "http://127.0.0.1:8000/healthz",
+        "http://localhost:8001/healthz",
+        "http://localhost:8002/healthz",
+    }
+
+
+def test_agent_integration_malformed_or_unrelated_config_warns(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text("not json")
+    cont = tmp_path / ".continue/config.json"
+    cont.parent.mkdir(parents=True)
+    cont.write_text('{"models":[{"title":"cloud","apiBase":"https://example.com"}]}')
+
+    section = eh.section_agent_integrations(home=tmp_path)
+    assert len(section.checks) == 2
+    assert all(check.status is eh.CheckStatus.WARN for check in section.checks)
+    assert all("no Rapid-MLX server" in check.label for check in section.checks)
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +918,7 @@ def test_run_all_returns_all_sections():
         "Network",
         "Shell Integration",
         "Optional Tools",
+        "Agent Integrations",
     ]
     assert titles == expected, (
         f"sections drifted from spec order. got {titles}, expected {expected}"
