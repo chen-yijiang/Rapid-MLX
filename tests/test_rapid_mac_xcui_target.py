@@ -27,7 +27,10 @@ def test_xcui_target_is_checked_in_and_runs_in_gui_ci():
     assert xcui["id"] == "xcui"
     assert xcui["continue-on-error"] is True
     assert upload["if"] == "steps.xcui.outcome == 'failure'"
-    assert verdict["if"] == "always()"
+    condition = str(verdict["if"])
+    assert "always()" in condition
+    assert "needs.changes.outputs.gui_flows" in condition
+    assert "image-generation" in condition
     assert "steps.xcui.outcome" in verdict["env"]["XCUI_OUTCOME"]
     assert xcui_index < upload_index < verdict_index
 

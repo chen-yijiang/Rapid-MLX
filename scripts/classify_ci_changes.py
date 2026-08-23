@@ -47,6 +47,7 @@ _DESKTOP_PREFIX = "apps/rapid-mac/"
 _DESKTOP_SUPPORT_PREFIXES = ("tests/fixtures/ax_baseline/",)
 _DESKTOP_SUPPORT = {
     "scripts/check_rapid_mac_ax_identifiers.py",
+    "scripts/route_gui_journeys.py",
     "tests/test_rapid_mac_ax_identifiers.py",
     "tests/test_rapid_mac_xcui_target.py",
     "tests/test_ax_baseline.py",
@@ -56,6 +57,7 @@ _DESKTOP_SUPPORT = {
     "tests/test_gui_golden_ci_coverage.py",
     "tests/test_gui_walk_completeness.py",
     "tests/test_fake_sidecar_image_catalog.py",
+    "tests/test_gui_journey_routing.py",
 }
 _DOC_ROOTS = {"docs"}
 _DOC_FILES = {

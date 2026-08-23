@@ -101,6 +101,17 @@ Each journey execution writes a `result.json` containing its outcome, UTC start
 time, execution duration in seconds, and artifact directory. This makes per-journey
 timing and failure evidence machine-readable without parsing Actions logs.
 
+### PR routing
+
+The same manifest owns fail-closed PR routing. Non-rendering Swift logic relies
+on unit tests plus the app build and allocates no GUI runner. Known SwiftUI
+surfaces select the smallest matching journey group; mixed-domain diffs take
+the union. Shared navigation, GUI infrastructure, an unknown path below a GUI
+root, `full-ci`, and merge-queue candidates select every group. The classifier
+prints the reason, selected groups, and exact flow list as machine-readable
+outputs so the workflow's final verdict can reject both missing and unexpected
+results.
+
 ### Current baseline
 
 **2026-08-09** — the whole suite (`gui-golden-flows.sh`, no `--flow`) passes on

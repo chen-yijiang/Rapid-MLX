@@ -25,6 +25,7 @@ def test_engine_only_does_not_select_desktop():
     "path",
     [
         "scripts/check_rapid_mac_ax_identifiers.py",
+        "scripts/route_gui_journeys.py",
         "tests/test_rapid_mac_ax_identifiers.py",
         "tests/test_rapid_mac_xcui_target.py",
         "tests/test_ax_baseline.py",
@@ -34,6 +35,7 @@ def test_engine_only_does_not_select_desktop():
         "tests/test_gui_golden_ci_coverage.py",
         "tests/test_gui_walk_completeness.py",
         "tests/test_fake_sidecar_image_catalog.py",
+        "tests/test_gui_journey_routing.py",
         "tests/fixtures/ax_baseline/macos.txt",
     ],
 )

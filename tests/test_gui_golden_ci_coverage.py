@@ -261,6 +261,11 @@ def test_all_named_flows_run_before_one_blocking_verdict():
     ]
     assert len(flow_steps) == len(workflow_flows())
     assert all(step.get("continue-on-error") is True for step in flow_steps)
+    for step in flow_steps:
+        flow = str(step["name"]).removeprefix("Golden flow: ")
+        assert step.get("if") == (
+            f"contains(fromJSON(needs.changes.outputs.gui_flows), '{flow}')"
+        )
 
     verdicts = [
         step for step in steps if step.get("name") == "Require every named golden flow"
@@ -268,7 +273,10 @@ def test_all_named_flows_run_before_one_blocking_verdict():
     assert len(verdicts) == 1
     verdict = verdicts[0]
     assert verdict.get("if") == "always()"
-    assert f"expected = {len(workflow_flows())}" in str(verdict.get("run", ""))
+    run = str(verdict.get("run", ""))
+    assert 'json.loads(os.environ["GUI_FLOWS"])' in run
+    assert "expected_flows - observed_flows" in run
+    assert "observed_flows - expected_flows" in run
 
 
 def test_golden_job_builds_the_release_ui_surface():

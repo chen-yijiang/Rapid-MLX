@@ -1,5 +1,57 @@
 version: 1
 
+routing:
+  # Infrastructure and shared navigation can affect every journey. Any match
+  # here selects all groups, as does an unknown path under `gui_roots`.
+  shared_paths:
+    - .github/workflows/rapid-mac-ci.yml
+    - scripts/route_gui_journeys.py
+    - tests/test_gui_journey_routing.py
+    - tests/test_gui_golden_ci_coverage.py
+    - apps/rapid-mac/scripts/gui-golden-flows.sh
+    - apps/rapid-mac/Tests/GUIGoldenFlows/journeys.yaml
+    - apps/rapid-mac/Tests/GUIGoldenFlows/__Snapshots__/
+    - apps/rapid-mac/Tests/RapidUITests/
+    - apps/rapid-mac/Sources/Rapid/UI/ContentView.swift
+    - apps/rapid-mac/Sources/Rapid/UI/SidebarView.swift
+  gui_roots:
+    - apps/rapid-mac/Sources/Rapid/UI/
+  group_paths:
+    chat:
+      - apps/rapid-mac/Sources/Rapid/UI/ChatView.swift
+      - apps/rapid-mac/Sources/Rapid/UI/ConversationSearchView.swift
+      - apps/rapid-mac/Sources/Rapid/UI/ConversationExportPanel.swift
+      - apps/rapid-mac/Sources/Rapid/UI/SelectTextSheet.swift
+      - apps/rapid-mac/Sources/Rapid/UI/Markdown/
+    audio:
+      - apps/rapid-mac/Sources/Rapid/UI/AudioView.swift
+      - apps/rapid-mac/Sources/Rapid/UI/DictationView.swift
+    models:
+      - apps/rapid-mac/Sources/Rapid/UI/SettingsModelManagementPanel.swift
+      - apps/rapid-mac/Sources/Rapid/UI/ModelPickerBar.swift
+      - apps/rapid-mac/Sources/Rapid/UI/ReadinessBanner.swift
+      - apps/rapid-mac/Sources/Rapid/UI/ModelReadiness.swift
+    onboarding-settings:
+      - apps/rapid-mac/Sources/Rapid/UI/QuickstartView.swift
+      - apps/rapid-mac/Sources/Rapid/UI/Onboarding
+      - apps/rapid-mac/Sources/Rapid/UI/SettingsView.swift
+      - apps/rapid-mac/Sources/Rapid/UI/SettingsToolsPanel.swift
+      - apps/rapid-mac/Sources/Rapid/UI/SettingsPerformancePanel.swift
+      - apps/rapid-mac/Sources/Rapid/UI/SettingsConnectorsPanel.swift
+      - apps/rapid-mac/Sources/Rapid/UI/SettingsRouter.swift
+      - apps/rapid-mac/Sources/Rapid/UI/AppearanceConfig.swift
+      - apps/rapid-mac/Sources/Rapid/UI/TelemetryConsentView.swift
+    images:
+      - apps/rapid-mac/Sources/Rapid/UI/ImagesView.swift
+      - apps/rapid-mac/Sources/Rapid/UI/InstructionTextEditor.swift
+    app-lifecycle:
+      - apps/rapid-mac/Sources/Rapid/RapidApp.swift
+      - apps/rapid-mac/Sources/Rapid/UI/MainWindowCloseInterceptor.swift
+      - apps/rapid-mac/Sources/Rapid/UI/DockVisibilityPrompt
+      - apps/rapid-mac/Sources/Rapid/UI/CampaignBanner.swift
+      - apps/rapid-mac/Sources/Rapid/UI/MenuBar
+      - apps/rapid-mac/Sources/Rapid/Window
+
 # Machine-readable inventory for GUI coverage and future source-based routing.
 # `source_paths` are intentionally conservative product-area prefixes, not a
 # promise that every edit below them requires this journey. Routing will be a

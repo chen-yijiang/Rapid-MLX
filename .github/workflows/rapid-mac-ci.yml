@@ -17,11 +17,10 @@
 # no `.accessibilityIdentifier(...)` — see the script's module docstring for the
 # rationale, the escape hatch, and the shapes it deliberately does not detect.
 #
-# Third gate: `gui-golden-flows` actually RUNS that harness. The identifier gate
-# only ensures new controls are reachable; nothing was checking that the
-# journeys still pass or that the committed AX baselines still describe the app.
-# They did not — #1705 shipped a new sidebar button and left all 12 baselines
-# stale. See the job's own comment for why a hosted runner can drive it.
+# Third gate: `gui-golden-flows` actually RUNS the routed part of that harness.
+# The identifier gate only ensures new controls are reachable; known UI surfaces
+# select their journey groups, while shared or unknown UI changes fail closed to
+# the full suite. See the job's own comment for why a hosted runner can drive it.
 name: rapid-mac CI
 
 on:
@@ -45,6 +44,9 @@ jobs:
     outputs:
       desktop: ${{ steps.policy.outputs.desktop }}
       full_gate: ${{ steps.policy.outputs.full_gate }}
+      gui_required: ${{ steps.gui.outputs.gui_required }}
+      gui_groups: ${{ steps.gui.outputs.gui_groups }}
+      gui_flows: ${{ steps.gui.outputs.gui_flows }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -76,6 +78,34 @@ jobs:
               --paths-file /tmp/changed-paths \
               --github-output "$GITHUB_OUTPUT"
             echo "full_gate=$FULL_CI" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python for GUI routing
+        if: steps.policy.outputs.desktop == 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install routing dependency
+        if: steps.policy.outputs.desktop == 'true'
+        run: pip install PyYAML
+
+      - name: Route GUI journeys
+        if: steps.policy.outputs.desktop == 'true'
+        id: gui
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "merge_group" ] || [ "$FULL_CI" = true ]; then
+            python scripts/route_gui_journeys.py \
+              --force-all \
+              --github-output "$GITHUB_OUTPUT"
+          else
+            python scripts/route_gui_journeys.py \
+              --paths-file /tmp/changed-paths \
+              --github-output "$GITHUB_OUTPUT"
           fi
 
   # Pure text lint over the diff — no Swift toolchain, no simulator, no app
@@ -281,7 +311,7 @@ jobs:
     needs: changes
     if: >-
       needs.changes.outputs.desktop == 'true' &&
-      needs.changes.outputs.full_gate == 'true'
+      needs.changes.outputs.gui_required == 'true'
     # macos-15 for the same reason as the build job: Package.swift is
     # swift-tools-version 6.0, and macos-14 still defaults to Swift 5.x.
     runs-on: macos-15
@@ -338,6 +368,7 @@ jobs:
       # which closes the one gap AX structurally cannot: prove two gallery
       # records actually draw different pixels rather than the same bitmap.
       - name: 'XCUITest: image-generation pixels'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'image-generation')
         id: xcui
         continue-on-error: true
         env:
@@ -372,42 +403,49 @@ jobs:
       # named flow. `test_gui_golden_ci_coverage.py` fails if any other flow is
       # absent from this job, or if this exception silently grows.
       - name: 'Golden flow: fresh-install'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'fresh-install')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow fresh-install
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/fresh-install
 
       - name: 'Golden flow: cached-quickstart'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'cached-quickstart')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow cached-quickstart
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/cached-quickstart
 
       - name: 'Golden flow: cached-curated-tradeup'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'cached-curated-tradeup')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow cached-curated-tradeup
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/cached-curated-tradeup
 
       - name: 'Golden flow: cached-variant-collapse'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'cached-variant-collapse')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow cached-variant-collapse
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/cached-variant-collapse
 
       - name: 'Golden flow: download-progress'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'download-progress')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow download-progress
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/download-progress
 
       - name: 'Golden flow: settings-persistence'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'settings-persistence')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow settings-persistence
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/settings-persistence
 
       - name: 'Golden flow: chat-restore'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'chat-restore')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow chat-restore
         env:
@@ -417,132 +455,154 @@ jobs:
       # launches below can create artificial cold-start pressure on the hosted
       # Mac. Payload correctness is still asserted by the flow itself.
       - name: 'Golden flow: chat-multimodal-attachments'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'chat-multimodal-attachments')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow chat-multimodal-attachments
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/chat-multimodal-attachments
 
       - name: 'Golden flow: message-actions'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'message-actions')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow message-actions
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/message-actions
 
       - name: 'Golden flow: restored-tools'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'restored-tools')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow restored-tools
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/restored-tools
 
       - name: 'Golden flow: tool-loop-budget'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'tool-loop-budget')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow tool-loop-budget
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/tool-loop-budget
 
       - name: 'Golden flow: math-rendering'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'math-rendering')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow math-rendering
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/math-rendering
 
       - name: 'Golden flow: slow-stream-stop'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'slow-stream-stop')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow slow-stream-stop
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/slow-stream-stop
 
       - name: 'Golden flow: model-crash-recovery'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'model-crash-recovery')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow model-crash-recovery
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/model-crash-recovery
 
       - name: 'Golden flow: low-memory-choice'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'low-memory-choice')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow low-memory-choice
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/low-memory-choice
 
       - name: 'Golden flow: image-generation'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'image-generation')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow image-generation
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/image-generation
 
       - name: 'Golden flow: audio-readiness'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'audio-readiness')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow audio-readiness
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/audio-readiness
 
       - name: 'Golden flow: dictation'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'dictation')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow dictation
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/dictation
 
       - name: 'Golden flow: settings-mtp'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'settings-mtp')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow settings-mtp
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/settings-mtp
 
       - name: 'Golden flow: window-close-prompt'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'window-close-prompt')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow window-close-prompt
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/window-close-prompt
 
       - name: 'Golden flow: resident-load-rejected'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'resident-load-rejected')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow resident-load-rejected
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/resident-load-rejected
 
       - name: 'Golden flow: no-dead-controls'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'no-dead-controls')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow no-dead-controls
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/no-dead-controls
 
       - name: 'Golden flow: catalog-integrity'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'catalog-integrity')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow catalog-integrity
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/catalog-integrity
 
       - name: 'Golden flow: browse-all-destination'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'browse-all-destination')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow browse-all-destination
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/browse-all-destination
 
       - name: 'Golden flow: chat-document-attachment'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'chat-document-attachment')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow chat-document-attachment
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/chat-document-attachment
 
       - name: 'Golden flow: update-state'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'update-state')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow update-state
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/update-state
 
       - name: 'Golden flow: update-busy'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'update-busy')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow update-busy
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/update-busy
 
       - name: 'Golden flow: campaign-banner'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'campaign-banner')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow campaign-banner
         env:
           RAPID_GUI_GOLDEN_OUT: ${{ runner.temp }}/golden/campaign-banner
 
       - name: 'Golden flow: launch-integrations'
+        if: contains(fromJSON(needs.changes.outputs.gui_flows), 'launch-integrations')
         continue-on-error: true
         run: ./scripts/gui-golden-flows.sh --flow launch-integrations
         env:
@@ -555,6 +615,7 @@ jobs:
         if: always()
         env:
           GOLDEN_ROOT: ${{ runner.temp }}/golden
+          GUI_FLOWS: ${{ needs.changes.outputs.gui_flows }}
         run: |
           python3 - <<'PY'
           import json
@@ -562,8 +623,9 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ["GOLDEN_ROOT"])
-          expected = 29
+          expected_flows = set(json.loads(os.environ["GUI_FLOWS"]))
           results = sorted(root.glob("*/result.json"))
+          observed_flows = {path.parent.name for path in results}
           failures = []
           for path in results:
               try:
@@ -575,11 +637,15 @@ jobs:
                   failures.append(
                       f"{path.parent.name}: {payload.get('status', 'missing status')}"
                   )
-          if len(results) != expected:
-              failures.append(f"expected {expected} result files, found {len(results)}")
+          missing = sorted(expected_flows - observed_flows)
+          unexpected = sorted(observed_flows - expected_flows)
+          if missing:
+              failures.append(f"missing result files: {', '.join(missing)}")
+          if unexpected:
+              failures.append(f"unexpected result files: {', '.join(unexpected)}")
           if failures:
               raise SystemExit("Golden flow gate failed:\n- " + "\n- ".join(failures))
-          print(f"All {expected} named GUI golden flows passed")
+          print(f"All {len(expected_flows)} selected GUI golden flows passed")
           PY
 
       # Each harness invocation stops at its FIRST mismatched baseline, so one
@@ -601,6 +667,7 @@ jobs:
         env:
           GOLDEN_ROOT: ${{ runner.temp }}/golden
           SCRATCH: ${{ runner.temp }}/os-baselines
+          GUI_FLOWS: ${{ needs.changes.outputs.gui_flows }}
         run: |
           set -uo pipefail
           structural_failure=0
@@ -618,6 +685,8 @@ jobs:
           mkdir -p "$SCRATCH/snapshots"
           cp Tests/GUIGoldenFlows/__Snapshots__/*.txt "$SCRATCH/snapshots/"
           for flow in fresh-install settings-persistence settings-mtp chat-restore slow-stream-stop model-crash-recovery update-state update-busy campaign-banner image-generation audio-readiness launch-integrations; do
+            jq -e --arg flow "$flow" 'index($flow) != null' \
+              <<<"$GUI_FLOWS" >/dev/null || continue
             RAPID_GUI_BASELINE_DIR="$SCRATCH/snapshots" \
             RAPID_GUI_GOLDEN_OUT="$SCRATCH/run/$flow" \
               ./scripts/gui-golden-flows.sh --flow "$flow" --update-baselines || true
@@ -647,7 +716,9 @@ jobs:
       # the blocking verdict after AX diagnostics: placing it last keeps an
       # XCUITest-only failure from needlessly regenerating every AX baseline.
       - name: Require native XCUITest
-        if: always()
+        if: >-
+          always() &&
+          contains(fromJSON(needs.changes.outputs.gui_flows), 'image-generation')
         env:
           XCUI_OUTCOME: ${{ steps.xcui.outcome }}
         run: |
@@ -673,7 +744,7 @@ jobs:
       - name: Check desktop results
         env:
           DESKTOP_EXPECTED: ${{ needs.changes.outputs.desktop }}
-          FULL_GATE: ${{ needs.changes.outputs.full_gate }}
+          GUI_REQUIRED: ${{ needs.changes.outputs.gui_required }}
           IDENTIFIERS: ${{ needs.accessibility-identifiers.result }}
           IDENTIFIER_TESTS: ${{ needs.accessibility-identifier-tests.result }}
           HARNESS_CONTRACTS: ${{ needs.gui-harness-contracts.result }}
@@ -689,17 +760,13 @@ jobs:
             echo "Desktop lane not required for this PR"
             exit 0
           fi
-          if [ "${{ github.event_name }}" = pull_request ] && [ "$FULL_GATE" != true ]; then
-            echo "Desktop PR gate passed; apply the full-ci label when this PR is ready to merge"
-            exit 1
-          fi
           for result in "$IDENTIFIERS" "$IDENTIFIER_TESTS" "$HARNESS_CONTRACTS" "$BUILD"; do
             if [ "$result" != success ]; then
               echo "A desktop PR gate failed: $result"
               exit 1
             fi
           done
-          if [ "$FULL_GATE" = true ] && [ "$GOLDEN_FLOWS" != success ]; then
+          if [ "$GUI_REQUIRED" = true ] && [ "$GOLDEN_FLOWS" != success ]; then
             echo "GUI golden-flow merge gate failed: $GOLDEN_FLOWS"
             exit 1
           fi

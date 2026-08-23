@@ -49,18 +49,53 @@ def test_non_engine_change_exits_before_full_ci_requirement():
     assert classifier_gate < common_gate < no_lane < engine_gate < promotion
 
 
-def test_non_desktop_change_exits_before_full_ci_requirement():
+def test_non_desktop_change_exits_before_desktop_results():
     run = _step_run(DESKTOP_WORKFLOW, "desktop-tests", "Check desktop results")
     classifier_gate = run.index("needs.changes.result")
     no_lane = run.index('if [ "$DESKTOP_EXPECTED" != true ]')
-    promotion = run.index('if [ "${{ github.event_name }}" = pull_request ]')
-    assert classifier_gate < no_lane < promotion
+    build_gate = run.index('for result in "$IDENTIFIERS"')
+    gui_gate = run.index('if [ "$GUI_REQUIRED" = true ]')
+    assert classifier_gate < no_lane < build_gate < gui_gate
 
 
-def test_gui_golden_job_requires_both_desktop_lane_and_full_promotion():
+def test_gui_golden_job_requires_desktop_lane_and_routed_gui_work():
     condition = str(_job(DESKTOP_WORKFLOW, "gui-golden-flows")["if"])
     assert "needs.changes.outputs.desktop == 'true'" in condition
-    assert "needs.changes.outputs.full_gate == 'true'" in condition
+    assert "needs.changes.outputs.gui_required == 'true'" in condition
+    assert "needs.changes.outputs.full_gate" not in condition
+
+
+def test_full_ci_is_an_all_gui_override_not_a_merge_prerequisite():
+    route_run = _step_run(DESKTOP_WORKFLOW, "changes", "Route GUI journeys")
+    assert '[ "$FULL_CI" = true ]' in route_run
+    assert "--force-all" in route_run
+
+    aggregate = _step_run(DESKTOP_WORKFLOW, "desktop-tests", "Check desktop results")
+    assert "apply the full-ci label" not in aggregate
+    assert 'if [ "$GUI_REQUIRED" = true ]' in aggregate
+
+
+def test_gui_router_dependencies_are_desktop_scoped():
+    changes = _job(DESKTOP_WORKFLOW, "changes")
+    scoped_steps = {
+        step["name"]: step
+        for step in changes["steps"]
+        if step.get("name")
+        in {
+            "Set up Python for GUI routing",
+            "Install routing dependency",
+            "Route GUI journeys",
+        }
+    }
+    assert set(scoped_steps) == {
+        "Set up Python for GUI routing",
+        "Install routing dependency",
+        "Route GUI journeys",
+    }
+    assert all(
+        step.get("if") == "steps.policy.outputs.desktop == 'true'"
+        for step in scoped_steps.values()
+    )
 
 
 def test_engine_only_contracts_are_not_universal_pr_guards():
