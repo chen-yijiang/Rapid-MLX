@@ -65,8 +65,15 @@ struct ChatAttachmentDraft: Equatable {
         return true
     }
 
-    mutating func cancelFileImport() {
+    /// Invalidates the active generation and leaves a visible explanation.
+    /// Returns whether an import was actually cancelled so callers can avoid
+    /// announcing navigation that had no attachment work in flight.
+    @discardableResult
+    mutating func cancelFileImport(notice: String? = nil) -> Bool {
+        guard fileImportID != nil else { return false }
         fileImportID = nil
+        if let notice { self.notice = notice }
+        return true
     }
 
     mutating func removeImage(id: UUID) {

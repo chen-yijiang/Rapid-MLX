@@ -297,7 +297,10 @@ struct ChatView: View {
         // Parsing runs off-main-thread. A completion started in conversation A
         // must not attach itself after the user has navigated to conversation B.
         .onChange(of: viewModel.activeConversationID) { _, _ in
-            attachmentDraft.cancelFileImport()
+            let notice = "File import canceled because you switched conversations."
+            if attachmentDraft.cancelFileImport(notice: notice) {
+                VoiceOverAnnouncer.announce(notice)
+            }
         }
     }
 

@@ -98,7 +98,7 @@ struct ChatAttachmentDraftTests {
         let startedStaleID = draft.beginFileImport()
         let staleID = try #require(startedStaleID)
 
-        draft.cancelFileImport()
+        let cancelled = draft.cancelFileImport(notice: "Import canceled after navigation.")
         let accepted = draft.finishFileImport(
             id: staleID,
             [(staleFile, staleURL)],
@@ -107,7 +107,8 @@ struct ChatAttachmentDraftTests {
 
         #expect(!accepted)
         #expect(draft.files.isEmpty)
-        #expect(draft.notice == nil)
+        #expect(cancelled)
+        #expect(draft.notice == "Import canceled after navigation.")
         #expect(!draft.isImportingFiles)
         #expect(draft.filteringAlreadyAttached([staleURL]).fresh == [staleURL])
     }
@@ -119,7 +120,8 @@ struct ChatAttachmentDraftTests {
         var draft = ChatAttachmentDraft()
         let startedOldID = draft.beginFileImport()
         let oldID = try #require(startedOldID)
-        draft.cancelFileImport()
+        let cancelledOld = draft.cancelFileImport()
+        #expect(cancelledOld)
         let startedNewID = draft.beginFileImport()
         let newID = try #require(startedNewID)
 
@@ -169,7 +171,7 @@ struct ChatAttachmentDraftTests {
         #expect(stripped.contains("letimportID=attachmentDraft.beginFileImport()"))
         #expect(stripped.contains("attachmentDraft.finishFileImport(id:importID"))
         #expect(stripped.contains(
-            ".onChange(of:viewModel.activeConversationID){_,_inattachmentDraft.cancelFileImport()"
+            ".onChange(of:viewModel.activeConversationID){_,_inletnotice=\"Fileimportcanceledbecauseyouswitchedconversations.\"ifattachmentDraft.cancelFileImport(notice:notice){VoiceOverAnnouncer.announce(notice)"
         ))
     }
 
