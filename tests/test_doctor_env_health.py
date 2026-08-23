@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import http.client
 import importlib
+import json
 import os
 import plistlib
 import time
@@ -33,14 +34,22 @@ from vllm_mlx.launch import cline
 
 
 class _HTTPResponse:
-    def __init__(self, status: int = 200):
+    def __init__(self, status: int = 200, payload: dict | None = None):
         self.status = status
+        self.payload = payload or {
+            "status": "healthy",
+            "ready": True,
+            "model_loaded": True,
+        }
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_args):
         return None
+
+    def read(self, _limit: int = -1):
+        return json.dumps(self.payload).encode()
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +233,9 @@ def test_agent_integration_malformed_or_unrelated_config_warns(tmp_path):
 
 
 @pytest.mark.parametrize("status", [401, 403])
-def test_agent_integration_auth_response_proves_server_is_alive(tmp_path, status):
+def test_agent_integration_auth_response_is_not_mistaken_for_rapid_mlx(
+    tmp_path, status
+):
     claude = tmp_path / ".claude/settings.json"
     claude.parent.mkdir(parents=True)
     claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}')
@@ -233,6 +244,33 @@ def test_agent_integration_auth_response_proves_server_is_alive(tmp_path, status
         raise urllib.error.HTTPError(request.full_url, status, "auth", {}, None)
 
     section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
+    assert section.checks[0].status is eh.CheckStatus.WARN
+    assert "could not be verified" in section.checks[0].label
+
+
+def test_agent_integration_rejects_unrelated_2xx_health_payload(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8000"}}')
+
+    section = eh.section_agent_integrations(
+        home=tmp_path,
+        open_url=lambda *_args, **_kwargs: _HTTPResponse(payload={"status": "ok"}),
+    )
+    assert section.checks[0].status is eh.CheckStatus.WARN
+
+
+def test_agent_integration_accepts_ddtree_health_payload(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8000"}}')
+
+    section = eh.section_agent_integrations(
+        home=tmp_path,
+        open_url=lambda *_args, **_kwargs: _HTTPResponse(
+            payload={"status": "loading", "engine": "ddtree", "ready": False}
+        ),
+    )
     assert section.checks[0].status is eh.CheckStatus.OK
 
 
@@ -340,7 +378,7 @@ def test_agent_integration_non_http_service_is_reported_unresponsive(tmp_path):
 
     section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
     assert section.checks[0].status is eh.CheckStatus.WARN
-    assert "not responding" in section.checks[0].label
+    assert "could not be verified" in section.checks[0].label
 
 
 def test_agent_integration_config_read_is_size_bounded(tmp_path):

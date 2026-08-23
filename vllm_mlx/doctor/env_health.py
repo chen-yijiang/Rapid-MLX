@@ -1342,11 +1342,26 @@ def _agent_server_alive(
     opener = open_url or urllib.request.urlopen
     try:
         with opener(request, timeout=timeout) as response:  # noqa: S310
-            return 200 <= int(response.status) < 300
-    except urllib.error.HTTPError as error:
-        # Authentication proves that a server answered. Some supported
-        # serving modes intentionally protect even their health endpoint.
-        return error.code in {401, 403}
+            if not 200 <= int(response.status) < 300:
+                return False
+            payload = json.loads(response.read(_AGENT_CONFIG_MAX_BYTES + 1))
+            if not isinstance(payload, dict):
+                return False
+            standard = (
+                payload.get("status") == "healthy"
+                and isinstance(payload.get("ready"), bool)
+                and isinstance(payload.get("model_loaded"), bool)
+            )
+            ddtree = (
+                payload.get("engine") == "ddtree"
+                and payload.get("status") in {"ok", "loading", "error"}
+                and isinstance(payload.get("ready"), bool)
+            )
+            return standard or ddtree
+    except urllib.error.HTTPError:
+        # An auth challenge proves that *something* answered, but not that it
+        # was Rapid-MLX. Without a health payload the identity is unverifiable.
+        return False
     except (
         OSError,
         TypeError,
@@ -1437,7 +1452,7 @@ def section_agent_integrations(
             )
         else:
             s.add(
-                f"{name} config points to a server that is not responding",
+                f"{name} config server could not be verified as Rapid-MLX",
                 CheckStatus.WARN,
                 detail=f"path={path} server={_redacted_server_url(url)}",
             )
