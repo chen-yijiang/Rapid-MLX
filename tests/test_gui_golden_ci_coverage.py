@@ -135,9 +135,18 @@ def test_manifest_baseline_ownership_matches_harness_usage():
 
 def test_result_evidence_records_timing_and_artifact_location():
     source = HARNESS.read_text()
-    assert source.count("duration_seconds: $duration_seconds") == 2
-    assert source.count("artifact_path: $artifact_path") == 2
-    assert source.count("started_at: $started_at") == 2
+    writer = source.split("write_result() {", 1)[1].split("\n}", 1)[0]
+    finish = source.split("finish() {", 1)[1].split("\n}", 1)[0]
+    dispatch_tail = source.rsplit('case "$FLOW" in', 1)[1].split(
+        'log "PASS — $FLOW"', 1
+    )[0]
+
+    assert "started_at: $started_at" in writer
+    assert "duration_seconds: $duration_seconds" in writer
+    assert "artifact_path: $artifact_path" in writer
+    assert '--argjson exit_code "$exit_code"' in writer
+    assert 'write_result fail "$status"' in finish
+    assert "write_result pass 0" in dispatch_tail
 
 
 def test_failure_diagnostic_regenerates_every_ci_baseline_and_nothing_else():

@@ -46,7 +46,7 @@ BUNDLE_ID=""
 AX_DRIVER=""
 RESULT_WRITTEN=0
 RUN_STARTED_EPOCH="$(date +%s)"
-RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RUN_STARTED_AT="$(date -u -r "$RUN_STARTED_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
 PERSONA_ENV=()
 
 usage() {
@@ -91,6 +91,18 @@ done
 log() { printf '[gui-golden] %s\n' "$*"; }
 die() { printf '[gui-golden] FAIL: %s\n' "$*" >&2; exit 1; }
 pb() { peekaboo "$@" --bridge-socket "$BRIDGE"; }
+write_result() {
+    local status="$1" exit_code="$2" finished_epoch duration_seconds
+    finished_epoch="$(date +%s)"
+    duration_seconds=$((finished_epoch - RUN_STARTED_EPOCH))
+    jq -n --arg status "$status" --arg flow "$FLOW" --arg app "$APP_SOURCE" \
+        --arg started_at "$RUN_STARTED_AT" --arg artifact_path "$OUT_ROOT" \
+        --argjson duration_seconds "$duration_seconds" \
+        --argjson exit_code "$exit_code" \
+        '{status: $status, flow: $flow, app: $app, started_at: $started_at,
+          duration_seconds: $duration_seconds, artifact_path: $artifact_path,
+          exit_code: $exit_code}' > "$OUT_ROOT/result.json"
+}
 flow_requires_screen_recording() {
     case "$FLOW" in
         all) return 0 ;;
@@ -186,17 +198,7 @@ finish() {
     local status=$?
     set +e
     if [[ "$status" -ne 0 && "$RESULT_WRITTEN" == 0 && -d "$OUT_ROOT" ]]; then
-        local finished_epoch duration_seconds
-        finished_epoch="$(date +%s)"
-        duration_seconds=$((finished_epoch - RUN_STARTED_EPOCH))
-        jq -n --arg status fail --arg flow "$FLOW" --arg app "$APP_SOURCE" \
-            --arg started_at "$RUN_STARTED_AT" --arg artifact_path "$OUT_ROOT" \
-            --argjson duration_seconds "$duration_seconds" \
-            --argjson exit_code "$status" \
-            '{status: $status, flow: $flow, app: $app, started_at: $started_at,
-              duration_seconds: $duration_seconds, artifact_path: $artifact_path,
-              exit_code: $exit_code}' \
-            > "$OUT_ROOT/result.json" 2>/dev/null || true
+        write_result fail "$status" 2>/dev/null || true
     fi
     cleanup_persona
     cleanup_operator_server
@@ -4785,14 +4787,7 @@ case "$FLOW" in
     *) die "unknown flow: $FLOW" ;;
 esac
 
-FINISHED_EPOCH="$(date +%s)"
-DURATION_SECONDS=$((FINISHED_EPOCH - RUN_STARTED_EPOCH))
-jq -n --arg status pass --arg flow "$FLOW" --arg app "$APP_SOURCE" \
-    --arg started_at "$RUN_STARTED_AT" --arg artifact_path "$OUT_ROOT" \
-    --argjson duration_seconds "$DURATION_SECONDS" \
-    '{status: $status, flow: $flow, app: $app, started_at: $started_at,
-      duration_seconds: $duration_seconds, artifact_path: $artifact_path}' \
-    > "$OUT_ROOT/result.json"
+write_result pass 0
 RESULT_WRITTEN=1
 log "PASS — $FLOW"
 log "artifacts: $OUT_ROOT"
