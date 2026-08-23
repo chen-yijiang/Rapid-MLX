@@ -208,3 +208,24 @@ def test_mllm_abort_delivers_terminal_error_instead_of_empty_success():
     assert terminal.finished is True
     assert terminal.error_kind == "lifecycle"
     assert "cancellation" in terminal.error
+
+
+@pytest.mark.asyncio
+async def test_mllm_abort_unblocks_consumer_as_inference_error():
+    from vllm_mlx.request import InferenceAbortedError, RequestOutput
+
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler.output_queues = {"active": asyncio.Queue()}
+    scheduler.output_queues["active"].put_nowait(
+        RequestOutput(
+            request_id="active",
+            finished=True,
+            finish_reason="length",
+            error="Inference aborted by a cancellation request",
+            error_kind="lifecycle",
+        )
+    )
+
+    with pytest.raises(InferenceAbortedError, match="cancellation"):
+        await anext(scheduler.stream_outputs("active"))
+    assert "active" not in scheduler.output_queues
