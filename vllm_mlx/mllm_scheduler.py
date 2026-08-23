@@ -525,15 +525,20 @@ class MLLMScheduler:
         Returns:
             Request ID for tracking
         """
-        if getattr(self, "_generation_paused", False):
+        pause_allowance_consumed = False
+        with self._request_state_lock():
+            paused = getattr(self, "_generation_paused", False)
+        if paused:
             from .scheduler import BackpressureError
 
-            allowance = getattr(self, "_paused_add_allowance", 0)
-            if allowance <= 0:
-                raise BackpressureError(
-                    "generation is paused for an engine lifecycle operation"
-                )
-            self._paused_add_allowance = allowance - 1
+            with self._request_state_lock():
+                allowance = getattr(self, "_paused_add_allowance", 0)
+                if allowance <= 0:
+                    raise BackpressureError(
+                        "generation is paused for an engine lifecycle operation"
+                    )
+                self._paused_add_allowance = allowance - 1
+                pause_allowance_consumed = True
         if request_id is None:
             request_id = str(uuid.uuid4())
 
@@ -601,6 +606,18 @@ class MLLMScheduler:
         # ``Scheduler.remove_finished_request`` docstring for the
         # multi-branch race repro the persistence plugs.
         with self._cancel_counter_lock:
+            if (
+                getattr(self, "_generation_paused", False)
+                and not pause_allowance_consumed
+            ):
+                from .scheduler import BackpressureError
+
+                allowance = getattr(self, "_paused_add_allowance", 0)
+                if allowance <= 0:
+                    raise BackpressureError(
+                        "generation is paused for an engine lifecycle operation"
+                    )
+                self._paused_add_allowance = allowance - 1
             self._cancelled_request_ids.discard(request_id)
             self._disconnect_abort_ids.discard(request_id)
             self.requests[request_id] = request
@@ -625,8 +642,20 @@ class MLLMScheduler:
     def set_generation_paused(self, paused: bool, *, add_allowance: int = 0) -> None:
         """Close or reopen scheduler admission for model mutation."""
 
-        self._generation_paused = bool(paused)
-        self._paused_add_allowance = max(0, int(add_allowance)) if paused else 0
+        with self._request_state_lock():
+            self._generation_paused = bool(paused)
+            self._paused_add_allowance = max(0, int(add_allowance)) if paused else 0
+
+    def pause_generation_admission(self, admitted_reservations: int, mode: str) -> None:
+        """Atomically close admission and account for pre-pause reservations."""
+
+        with self._request_state_lock():
+            self._generation_paused = True
+            self._paused_add_allowance = (
+                max(0, int(admitted_reservations) - len(self.requests))
+                if mode == "wait"
+                else 0
+            )
 
     def request_ids_snapshot(self) -> tuple[str, ...]:
         """Return an atomic snapshot of all queued/running request ids."""

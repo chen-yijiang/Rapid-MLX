@@ -141,6 +141,24 @@ def test_mllm_scheduler_rejects_direct_add_while_paused():
         scheduler.add_request("prompt", request_id="direct")
 
 
+@pytest.mark.parametrize("scheduler_type", [Scheduler, MLLMScheduler])
+def test_scheduler_pause_atomically_accounts_for_already_owned_requests(
+    scheduler_type,
+):
+    scheduler = scheduler_type.__new__(scheduler_type)
+    scheduler._cancel_counter_lock = threading.Lock()
+    scheduler.requests = {"already-owned": object()}
+
+    scheduler.pause_generation_admission(2, "wait")
+
+    assert scheduler._generation_paused is True
+    assert scheduler._paused_add_allowance == 1
+
+    scheduler.set_generation_paused(False)
+    assert scheduler._generation_paused is False
+    assert scheduler._paused_add_allowance == 0
+
+
 def test_paused_engine_rejects_even_when_concurrency_cap_is_unlimited():
     engine, scheduler = _engine()
     scheduler.config.max_concurrent_requests = None
@@ -148,6 +166,17 @@ def test_paused_engine_rejects_even_when_concurrency_cap_is_unlimited():
 
     with pytest.raises(BackpressureError, match="paused"):
         engine.check_admission()
+
+
+def test_unlimited_cap_still_tracks_lifecycle_reservation():
+    engine, _ = _engine()
+    engine._engine.engine.scheduler.config.max_concurrent_requests = None
+
+    engine.check_admission()
+
+    assert engine._admission_reservations == 1
+    engine.release_admission_reservation()
+    assert engine._admission_reservations == 0
 
 
 @pytest.mark.parametrize("scheduler_type", [Scheduler, MLLMScheduler])

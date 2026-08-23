@@ -971,13 +971,14 @@ class BatchedEngine(BaseEngine):
                 raise BackpressureError(
                     "generation is paused for an engine lifecycle operation"
                 )
-            if cap is None or cap <= 0:
-                return
-            if self._admission_reservations >= cap:
+            if cap is not None and cap > 0 and self._admission_reservations >= cap:
                 raise BackpressureError(
                     f"max_concurrent_requests={cap} reached "
                     f"(currently {self._admission_reservations} in-flight)"
                 )
+            # The counter is also lifecycle ownership, not only a concurrency
+            # cap. Unlimited-cap deployments must still reserve so a model
+            # pause can distinguish pre-boundary routes from late callers.
             self._admission_reservations += 1
 
     def release_admission_reservation(self) -> None:
@@ -1040,20 +1041,32 @@ class BatchedEngine(BaseEngine):
 
         if mode not in {"wait", "abort"}:
             raise ValueError("pause mode must be 'wait' or 'abort'")
+        scheduler = self._lifecycle_scheduler()
         with self._admission_lock:
             self._generation_paused = True
             self._generation_pause_mode = mode
             admitted_at_pause = self._admission_reservations
-        scheduler = self._lifecycle_scheduler()
-        set_paused = getattr(scheduler, "set_generation_paused", None)
-        if callable(set_paused):
-            scheduler_owned = len(self._lifecycle_request_ids())
-            set_paused(
-                True,
-                add_allowance=(
-                    max(0, admitted_at_pause - scheduler_owned) if mode == "wait" else 0
-                ),
-            )
+            pause_admission = getattr(scheduler, "pause_generation_admission", None)
+            if callable(pause_admission):
+                # The scheduler method takes its request-state lock around the
+                # ownership count and pause flag. A pre-pause route may be
+                # between engine reservation and scheduler insertion, but it
+                # can no longer slip between those two scheduler operations
+                # and leave a stale allowance behind.
+                pause_admission(admitted_at_pause, mode)
+            else:
+                # Compatibility path for lightweight/third-party schedulers.
+                set_paused = getattr(scheduler, "set_generation_paused", None)
+                if callable(set_paused):
+                    scheduler_owned = len(self._lifecycle_request_ids())
+                    set_paused(
+                        True,
+                        add_allowance=(
+                            max(0, admitted_at_pause - scheduler_owned)
+                            if mode == "wait"
+                            else 0
+                        ),
+                    )
 
         async def _drain() -> dict[str, object]:
             while True:

@@ -5858,13 +5858,16 @@ class Scheduler:
                 above ``config.max_concurrent_requests``. Routes catch
                 this and return 503 with Retry-After.
         """
-        if getattr(self, "_generation_paused", False):
-            allowance = getattr(self, "_paused_add_allowance", 0)
-            if allowance <= 0:
-                raise BackpressureError(
-                    "generation is paused for an engine lifecycle operation"
-                )
-            self._paused_add_allowance = allowance - 1
+        pause_allowance_consumed = False
+        with self._request_state_lock():
+            if getattr(self, "_generation_paused", False):
+                allowance = getattr(self, "_paused_add_allowance", 0)
+                if allowance <= 0:
+                    raise BackpressureError(
+                        "generation is paused for an engine lifecycle operation"
+                    )
+                self._paused_add_allowance = allowance - 1
+                pause_allowance_consumed = True
         if request.request_id in self.requests:
             raise ValueError(f"Request {request.request_id} already exists")
 
@@ -6079,6 +6082,19 @@ class Scheduler:
         # the ledger intact and the prior lifetime's dedupe
         # stays effective.
         with self._cancel_counter_lock:
+            # Admission may have closed while tokenization/cache preparation
+            # ran. A route reserved before the pause edge can consume one of
+            # the exact allowances; an unrelated late caller is rejected.
+            if (
+                getattr(self, "_generation_paused", False)
+                and not pause_allowance_consumed
+            ):
+                allowance = getattr(self, "_paused_add_allowance", 0)
+                if allowance <= 0:
+                    raise BackpressureError(
+                        "generation is paused for an engine lifecycle operation"
+                    )
+                self._paused_add_allowance = allowance - 1
             self._cancelled_request_ids.discard(request.request_id)
             self._disconnect_abort_ids.discard(request.request_id)
             self._orphaned_running_candidates.pop(request.request_id, None)
@@ -6092,14 +6108,35 @@ class Scheduler:
     def set_generation_paused(self, paused: bool, *, add_allowance: int = 0) -> None:
         """Close or reopen scheduler admission for model mutation."""
 
-        self._generation_paused = bool(paused)
-        self._paused_add_allowance = max(0, int(add_allowance)) if paused else 0
+        with self._cancel_counter_lock:
+            self._generation_paused = bool(paused)
+            self._paused_add_allowance = max(0, int(add_allowance)) if paused else 0
+
+    def pause_generation_admission(self, admitted_reservations: int, mode: str) -> None:
+        """Atomically close admission and account for pre-pause reservations."""
+
+        with self._cancel_counter_lock:
+            self._generation_paused = True
+            self._paused_add_allowance = (
+                max(0, int(admitted_reservations) - len(self.requests))
+                if mode == "wait"
+                else 0
+            )
 
     def request_ids_snapshot(self) -> tuple[str, ...]:
         """Return an atomic snapshot of all queued/running request ids."""
 
         with self._cancel_counter_lock:
             return tuple(self.requests)
+
+    def _request_state_lock(self):
+        """Return the request lock, lazily supporting ``__new__`` test stubs."""
+
+        lock = getattr(self, "_cancel_counter_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._cancel_counter_lock = lock
+        return lock
 
     def abort_request(self, request_id: str) -> bool:
         """
