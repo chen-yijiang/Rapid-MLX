@@ -168,25 +168,20 @@ struct ChatAttachmentDraftTests {
         let fileB = try makeFile(name: "b.txt", text: "owned by B")
         var store = ChatAttachmentDraftStore()
 
-        var draftA = store[conversationA]
-        let startedA = draftA.beginFileImport()
+        let startedA = store.beginFileImport(conversationID: conversationA)
         let importA = try #require(startedA)
-        store[conversationA] = draftA
 
-        var draftB = store[conversationB]
-        let startedB = draftB.beginFileImport()
+        let startedB = store.beginFileImport(conversationID: conversationB)
         let importB = try #require(startedB)
-        draftB.finishFileImport(
-            id: importB,
+        store.finishFileImport(
+            request: importB,
             [(fileB, URL(fileURLWithPath: "/tmp/b.txt"))],
             notice: nil
         )
-        store[conversationB] = draftB
 
         // A may finish while B is visible; it writes only through A's key.
         let acceptedA = store.finishFileImport(
-            conversationID: conversationA,
-            id: importA,
+            request: importA,
             [(fileA, URL(fileURLWithPath: "/tmp/a.txt"))],
             notice: nil
         )
@@ -202,15 +197,12 @@ struct ChatAttachmentDraftTests {
         let survivingConversation = UUID()
         let file = try makeFile(name: "late.txt", text: "late")
         var store = ChatAttachmentDraftStore()
-        var deletedDraft = store[deletedConversation]
-        let startedImport = deletedDraft.beginFileImport()
+        let startedImport = store.beginFileImport(conversationID: deletedConversation)
         let importID = try #require(startedImport)
-        store[deletedConversation] = deletedDraft
 
         store.retainDrafts(for: [survivingConversation])
         let accepted = store.finishFileImport(
-            conversationID: deletedConversation,
-            id: importID,
+            request: importID,
             [(file, URL(fileURLWithPath: "/tmp/late.txt"))],
             notice: nil
         )
@@ -247,12 +239,14 @@ struct ChatAttachmentDraftTests {
         let stripped = CapabilityChipRenderGateSourceGuardTests
             .stripCommentsAndWhitespace(source)
 
-        #expect(stripped.contains("letimportConversationID=viewModel.activeConversationID"))
-        #expect(stripped.contains("letimportID=attachmentDraft.beginFileImport()"))
         #expect(stripped.contains(
-            "attachmentDrafts.finishFileImport(conversationID:importConversationID,id:importID,outcome.0,notice:notice)"
+            "letimportRequest=attachmentDrafts.beginFileImport(conversationID:viewModel.activeConversationID)"
         ))
-        #expect(stripped.contains("attachmentDrafts.retainDrafts("))
+        #expect(stripped.contains(
+            "attachmentDrafts.finishFileImport(request:importRequest,outcome.0,notice:notice)"
+        ))
+        #expect(stripped.contains(".onChange(of:viewModel.activeConversationID){_,_inpruneAttachmentDrafts()}"))
+        #expect(stripped.contains(".onChange(of:viewModel.conversations.map(\\.id)){_,_inpruneAttachmentDrafts()}"))
     }
 
     private func makeImage(name: String) throws -> ChatImageAttachment {

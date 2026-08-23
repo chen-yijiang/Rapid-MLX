@@ -298,11 +298,8 @@ struct ChatView: View {
             guard request != 0 else { return }
             composeFocusToken &+= 1
         }
-        .onChange(of: viewModel.conversations.map(\.id)) { _, conversationIDs in
-            attachmentDrafts.retainDrafts(
-                for: Set(conversationIDs).union([viewModel.activeConversationID])
-            )
-        }
+        .onChange(of: viewModel.conversations.map(\.id)) { _, _ in pruneAttachmentDrafts() }
+        .onChange(of: viewModel.activeConversationID) { _, _ in pruneAttachmentDrafts() }
     }
 
     // MARK: - Transcript
@@ -1036,8 +1033,9 @@ struct ChatView: View {
             attachmentDraft.notice = "Attach up to \(ChatFileAttachment.maxAttachmentsPerMessage) PDF, CSV, or TXT files per message."
             return false
         }
-        let importConversationID = viewModel.activeConversationID
-        guard let importID = attachmentDraft.beginFileImport() else { return false }
+        guard let importRequest = attachmentDrafts.beginFileImport(
+            conversationID: viewModel.activeConversationID
+        ) else { return false }
         Task { @MainActor in
             let outcome = await Task.detached(priority: .userInitiated) {
                 Self.loadFileAttachments(selection.accepted)
@@ -1047,13 +1045,18 @@ struct ChatView: View {
                 ? "Attach up to \(ChatFileAttachment.maxAttachmentsPerMessage) PDF, CSV, or TXT files per message."
                 : outcome.1
             attachmentDrafts.finishFileImport(
-                conversationID: importConversationID,
-                id: importID,
+                request: importRequest,
                 outcome.0,
                 notice: notice
             )
         }
         return true
+    }
+
+    private func pruneAttachmentDrafts() {
+        attachmentDrafts.retainDrafts(
+            for: Set(viewModel.conversations.map(\.id)).union([viewModel.activeConversationID])
+        )
     }
 
     /// Parse candidates without losing which source produced each attachment.

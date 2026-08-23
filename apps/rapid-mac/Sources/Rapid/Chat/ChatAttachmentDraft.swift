@@ -127,6 +127,11 @@ struct ChatAttachmentDraft: Equatable {
 /// conversation therefore neither exposes the old draft nor cancels the new
 /// conversation's work; returning restores the original draft and results.
 struct ChatAttachmentDraftStore: Equatable {
+    struct ImportRequest: Equatable {
+        let conversationID: UUID
+        let generationID: UUID
+    }
+
     private var drafts: [UUID: ChatAttachmentDraft] = [:]
 
     subscript(conversationID: UUID) -> ChatAttachmentDraft {
@@ -134,18 +139,28 @@ struct ChatAttachmentDraftStore: Equatable {
         set { drafts[conversationID] = newValue }
     }
 
+    mutating func beginFileImport(conversationID: UUID) -> ImportRequest? {
+        var draft = self[conversationID]
+        guard let generationID = draft.beginFileImport() else { return nil }
+        drafts[conversationID] = draft
+        return ImportRequest(conversationID: conversationID, generationID: generationID)
+    }
+
     /// Completes only an import whose owning conversation still exists in the
     /// store. In particular, a late task cannot recreate a deleted draft.
     @discardableResult
     mutating func finishFileImport(
-        conversationID: UUID,
-        id: UUID,
+        request: ImportRequest,
         _ imported: [(attachment: ChatFileAttachment, sourceURL: URL)],
         notice: String?
     ) -> Bool {
-        guard var draft = drafts[conversationID] else { return false }
-        guard draft.finishFileImport(id: id, imported, notice: notice) else { return false }
-        drafts[conversationID] = draft
+        guard var draft = drafts[request.conversationID] else { return false }
+        guard draft.finishFileImport(
+            id: request.generationID,
+            imported,
+            notice: notice
+        ) else { return false }
+        drafts[request.conversationID] = draft
         return true
     }
 
