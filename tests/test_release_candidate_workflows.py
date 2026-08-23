@@ -5,6 +5,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DESKTOP_WORKFLOW = ROOT / ".github/workflows/rapid-mac-release.yml"
 PREFLIGHT_WORKFLOW = ROOT / ".github/workflows/release-preflight.yml"
+PUBLISH_WORKFLOWS = [
+    ROOT / ".github/workflows/publish.yml",
+    ROOT / ".github/workflows/release-artifact-matrix.yml",
+]
 
 
 def _step(workflow: str, name: str) -> str:
@@ -40,3 +44,11 @@ def test_rc_github_release_is_still_created_as_prerelease():
     release = _step(workflow, "Create the GitHub Release (last — nothing ships before the pointer)")
     assert '[[ "$VERSION" == *-* ]] && PRERELEASE="--prerelease"' in release
     assert "gh release create" in release
+
+
+def test_privileged_publish_verifiers_use_pep440_rc_filenames():
+    for path in PUBLISH_WORKFLOWS:
+        workflow = path.read_text(encoding="utf-8")
+        assert 'artifact_version = version.replace("-rc", "rc")' in workflow
+        assert 'f"rapid_mlx-{artifact_version}-"' in workflow
+        assert 'f"rapid_mlx-{artifact_version}.tar.gz"' in workflow
