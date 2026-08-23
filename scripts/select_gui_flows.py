@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "apps/rapid-mac/Tests/GUIGoldenFlows/journeys.yaml"
 DESKTOP_ROOT = "apps/rapid-mac/"
 SOURCE_ROOT = f"{DESKTOP_ROOT}Sources/Rapid/"
+UNSAFE_BROAD_PREFIXES = {f"{SOURCE_ROOT}UI/"}
 
 # These inputs influence every journey or the routing policy itself. Keep this
 # list intentionally broad: an unnecessary full run is cheaper than a false
@@ -85,6 +86,13 @@ def all_flows() -> list[str]:
 
 
 def _matches(path: str, declared: str) -> bool:
+    # UI is a mixed-responsibility directory. A new file under it cannot
+    # inherit ownership from the broad inventory prefix: only an explicit file
+    # or a narrower declared subdirectory may route narrowly. Cohesive domain
+    # folders such as Chat/, Audio/, and Images/ intentionally allow new files
+    # to inherit their journey ownership.
+    if declared in UNSAFE_BROAD_PREFIXES:
+        return False
     return path == declared.rstrip("/") or path.startswith(declared)
 
 

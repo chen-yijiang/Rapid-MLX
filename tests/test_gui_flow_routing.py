@@ -60,6 +60,13 @@ def test_unknown_desktop_path_fails_closed():
     assert select(["apps/rapid-mac/Sources/NewSurface.swift"]) == all_flows()
 
 
+def test_new_file_cannot_inherit_ownership_from_mixed_ui_directory():
+    assert (
+        select(["apps/rapid-mac/Sources/Rapid/UI/NewImagesToolbar.swift"])
+        == all_flows()
+    )
+
+
 def test_empty_or_invalid_diff_fails_closed():
     assert select([]) == all_flows()
     assert select(["docs/readme.md"]) == all_flows()

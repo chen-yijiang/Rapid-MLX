@@ -50,6 +50,9 @@ GUI routing expands a changed source to its complete journey group, so sibling
 flows around the same user workflow remain covered. It fails closed: empty or
 invalid diffs, new unmapped Desktop paths, shared UI components, packaging
 inputs, the harness, its manifest, and the CI workflow select every PR journey.
+Broad mixed-responsibility directories such as `Sources/Rapid/UI/` never grant
+narrow ownership to a new file; that requires an explicit file or cohesive
+domain-directory mapping in the manifest.
 Each named workflow step remains visible but an unselected journey exits before
 preflight, app launch, or artifact creation. The final verdict requires exactly
 the number of result records selected by the classifier, so a selected journey
