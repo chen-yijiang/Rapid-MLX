@@ -594,14 +594,17 @@ class ResidentModelManager:
                 self.registry.add(entry)
                 self._index_record(record)
                 self.loads_total += 1
-                await self._evict_for_locked(0, exclude={record.model_id})
+                await self._evict_for_locked(
+                    0,
+                    exclude={record.model_id, *(item.model_id for item in candidates)},
+                )
                 if group is not None:
                     await self._commit_group_replacement_locked(
                         record, group, candidates
                     )
             except _CommittedReplacementCancelled as exc:
                 raise asyncio.CancelledError from exc
-            except BaseException:
+            except BaseException as original:
                 # Once the loader returns, this manager owns the engine.  A
                 # later admission/replacement failure must not leave a model
                 # resident even though the control-plane request was rejected.
@@ -624,7 +627,7 @@ class ResidentModelManager:
                         "old-engine admission will still be resumed"
                     )
                 finally:
-                    await self._resume_engines(paused_engines)
+                    await self._resume_after_failure(paused_engines, original)
                 raise
             return record
 
@@ -729,8 +732,8 @@ class ResidentModelManager:
             await self._commit_group_replacement_locked(target, group, candidates)
         except _CommittedReplacementCancelled as exc:
             raise asyncio.CancelledError from exc
-        except BaseException:
-            await self._resume_engines(paused_engines)
+        except BaseException as original:
+            await self._resume_after_failure(paused_engines, original)
             raise
 
     async def _quiesce_group_locked(
@@ -778,8 +781,8 @@ class ResidentModelManager:
                         ) from exc
                 elif not _engine_is_idle(record.entry.engine):
                     raise ResidentModelBusyError("model is serving an active request")
-        except BaseException:
-            await self._resume_engines(paused_engines)
+        except BaseException as original:
+            await self._resume_after_failure(paused_engines, original)
             raise
         return candidates, paused_engines
 
@@ -820,6 +823,17 @@ class ResidentModelManager:
             raise cancellation
         if failure is not None:
             raise failure
+
+    async def _resume_after_failure(
+        self, engines: list[object], original: BaseException
+    ) -> None:
+        """Run bounded rollback without replacing the operation's root error."""
+
+        try:
+            await self._resume_engines(engines)
+        except BaseException as cleanup:
+            original.add_note(f"rollback resume also failed: {cleanup!r}")
+            raise original from cleanup
 
     async def _commit_group_replacement_locked(
         self,

@@ -145,6 +145,18 @@ async def test_resume_reopens_scheduler_before_outer_engine_gate():
     assert engine._generation_paused is False
 
 
+@pytest.mark.asyncio
+async def test_pause_timeout_automatically_reopens_both_gates():
+    running = {"busy": SimpleNamespace(request_id="busy")}
+    engine, scheduler = _engine(running=running)
+
+    with pytest.raises(TimeoutError):
+        await engine.pause_generation("wait", timeout=0)
+
+    assert engine._generation_paused is False
+    assert scheduler.generation_paused is False
+
+
 def test_text_scheduler_rejects_direct_add_while_paused():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler._generation_paused = True

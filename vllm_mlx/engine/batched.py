@@ -1127,16 +1127,28 @@ class BatchedEngine(BaseEngine):
                     return status
                 await asyncio.sleep(0.01)
 
-        initial = self.lifecycle_status()
-        if (
-            initial["active_requests"] == 0
-            and initial["running_requests"] == 0
-            and initial["queued_requests"] == 0
-        ):
-            return initial
-        if timeout is None:
-            return await _drain()
-        return await asyncio.wait_for(_drain(), timeout=max(0.0, timeout))
+        try:
+            initial = self.lifecycle_status()
+            if (
+                initial["active_requests"] == 0
+                and initial["running_requests"] == 0
+                and initial["queued_requests"] == 0
+            ):
+                return initial
+            if timeout is None:
+                return await _drain()
+            return await asyncio.wait_for(_drain(), timeout=max(0.0, timeout))
+        except BaseException as original:
+            # `pause_generation` is a safe public transaction boundary: a
+            # timed-out or cancelled direct caller cannot leave both gates
+            # permanently closed. Manager callers may resume again during
+            # their own rollback; resume is idempotent.
+            try:
+                resume_task = asyncio.create_task(self.resume_generation())
+                await asyncio.shield(resume_task)
+            except BaseException as cleanup:
+                original.add_note(f"lifecycle pause rollback also failed: {cleanup!r}")
+            raise
 
     async def resume_generation(self) -> dict[str, object]:
         """Reopen request admission after a lifecycle operation."""
