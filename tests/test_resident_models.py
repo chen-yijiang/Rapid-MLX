@@ -586,6 +586,38 @@ async def test_cancellation_during_retired_stop_keeps_committed_new_primary():
 
 
 @pytest.mark.asyncio
+async def test_primary_callback_failure_restores_old_primary():
+    registry = ModelRegistry()
+    old_primary = entry("chat-old", FakeLifecycleEngine())
+    registry.add(old_primary, is_default=True)
+    callbacks = []
+
+    def change_primary(value):
+        callbacks.append(value.model_name)
+        if value.model_name == "chat-new":
+            raise RuntimeError("callback failed")
+
+    async def loader(name: str, path: str | None, performance=None):
+        return entry(name)
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_reader=lambda: 0,
+        on_primary_changed=change_primary,
+    )
+    old_record = manager.register_primary(old_primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        await manager.load("chat-new", replace_group="assistant", replace_mode="wait")
+
+    assert registry.default_name == "chat-old"
+    assert old_record.primary is True
+    assert "chat-new" not in registry
+    assert callbacks == ["chat-new", "chat-old"]
+
+
+@pytest.mark.asyncio
 async def test_wait_mode_does_not_reject_legacy_active_counter_before_engine_drain():
     registry = ModelRegistry()
     old_engine = FakeLifecycleEngine()

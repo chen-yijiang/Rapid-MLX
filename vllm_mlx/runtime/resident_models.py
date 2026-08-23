@@ -431,7 +431,14 @@ class ResidentModelManager:
         async with self._lock:
             retirement_tasks = tuple(self._retirement_tasks)
             if retirement_tasks:
-                await asyncio.gather(*retirement_tasks, return_exceptions=True)
+                _, pending = await asyncio.wait(retirement_tasks, timeout=5.0)
+                if pending:
+                    logger.warning(
+                        "Timed out waiting for %d retired model engine(s) during shutdown",
+                        len(pending),
+                    )
+                    for retirement_task in pending:
+                        retirement_task.cancel()
             dynamic = [
                 record for record in self._records.values() if not record.primary
             ]
@@ -521,6 +528,8 @@ class ResidentModelManager:
         model_name = model_name.strip()
         if not model_name:
             raise ResidentModelError("model must not be empty")
+        if replace_mode not in {"reject", "wait", "abort"}:
+            raise ResidentModelError(f"unsupported replacement mode {replace_mode!r}")
         estimate = max(1, estimated_bytes or estimate_model_bytes(model_name))
 
         async with self._lock:
@@ -787,13 +796,32 @@ class ResidentModelManager:
 
         old_primary = next((record for record in candidates if record.primary), None)
         if old_primary is not None:
+            old_primary_was_pinned = old_primary.pinned
             old_primary.primary = False
             old_primary.pinned = False
             target.primary = True
             target.pinned = True
             self.registry.set_default(target.model_id)
             if self._on_primary_changed is not None:
-                self._on_primary_changed(target.entry)
+                try:
+                    self._on_primary_changed(target.entry)
+                except BaseException:
+                    # No predecessor has been removed or stopped yet, so the
+                    # primary handoff remains fully reversible. Restore both
+                    # registry and record flags before outer rollback evicts
+                    # the unpublished target.
+                    target.primary = False
+                    target.pinned = False
+                    old_primary.primary = True
+                    old_primary.pinned = old_primary_was_pinned
+                    self.registry.set_default(old_primary.model_id)
+                    try:
+                        self._on_primary_changed(old_primary.entry)
+                    except BaseException:
+                        logger.exception(
+                            "Failed to restore primary callback after rejected handoff"
+                        )
+                    raise
 
         # Establish the commit point completely before the first teardown
         # await.  This makes cancellation state unambiguous: after this loop
