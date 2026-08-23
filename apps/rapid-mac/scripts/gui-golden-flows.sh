@@ -1533,9 +1533,14 @@ flow_download_progress() {
         "$OUT/downloading.json" >/dev/null; then
         die "download progress still shows observed bytes above its displayed total"
     fi
-    jq -e -s 'any(.[]; .event == "command" and .subcommand == "pull")' \
-        "$OUT/fake-events.jsonl" >/dev/null \
-        || die "download-progress flow never exercised the pull subprocess"
+    # The progress pipe can become AX-visible a few milliseconds before the
+    # separately opened JSONL witness is observable after several personas
+    # have run back-to-back. Poll the independent witness like the image/audio
+    # flows do instead of treating that filesystem scheduling window as a
+    # product failure.
+    wait_fake_event \
+        '.event == "command" and .subcommand == "pull"' \
+        "download-progress flow never exercised the pull subprocess"
 
     # Onboarding covers the global DownloadStrip, so Step 3 must provide its
     # own reachable cancellation path. Exercise the live process rather than
