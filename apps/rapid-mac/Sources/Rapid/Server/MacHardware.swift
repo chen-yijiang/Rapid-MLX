@@ -56,8 +56,9 @@ struct MacHardware: Sendable, Equatable {
     /// picker).
     ///
     /// ``RAPID_HARDWARE_RAM_GB`` and ``RAPID_HARDWARE_BRAND`` override
-    /// the corresponding probes when valid. Production launches never set
-    /// them; golden flows pin both so AX output is host-independent.
+    /// the corresponding probes only with ``RAPID_GUI_HARDWARE_FIXTURE=1``.
+    /// Production launches never set that gate; golden flows pin the complete
+    /// identity so AX output is host-independent.
     static func detect() -> MacHardware {
         let environment = ProcessInfo.processInfo.environment
         let brand = Self.brandString(environment: environment)
@@ -86,9 +87,11 @@ struct MacHardware: Sendable, Equatable {
         environment: [String: String],
         fallback: () -> UInt64?
     ) -> UInt64 {
-        if let override = environment["RAPID_HARDWARE_RAM_GB"],
+        if environment["RAPID_GUI_HARDWARE_FIXTURE"] == "1",
+           let override = environment["RAPID_HARDWARE_RAM_GB"],
            let gb = Double(override), gb.isFinite, gb > 0, gb <= 1024 {
-            return UInt64((gb * Double(1 << 30)).rounded())
+            let bytes = UInt64((gb * Double(1 << 30)).rounded())
+            if bytes > 0 { return bytes }
         }
         return fallback() ?? 0
     }
@@ -96,11 +99,21 @@ struct MacHardware: Sendable, Equatable {
     /// The golden harness pins the displayed chip together with RAM so AX
     /// output remains identical across CI and release-validation Macs.
     static func brandString(environment: [String: String]) -> String {
-        if let override = environment["RAPID_HARDWARE_BRAND"],
+        brandString(environment: environment) {
+            sysctlString("machdep.cpu.brand_string")
+        }
+    }
+
+    static func brandString(
+        environment: [String: String],
+        fallback: () -> String?
+    ) -> String {
+        if environment["RAPID_GUI_HARDWARE_FIXTURE"] == "1",
+           let override = environment["RAPID_HARDWARE_BRAND"],
            !override.isEmpty, override.utf8.count <= 128 {
             return override
         }
-        return sysctlString("machdep.cpu.brand_string") ?? "Apple Silicon"
+        return fallback() ?? "Apple Silicon"
     }
 
     // MARK: - Display helpers
