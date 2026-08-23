@@ -230,6 +230,13 @@ def test_help_does_not_require_harness_runtime_dependencies():
     assert "Usage: gui-golden-flows.sh" in result.stdout
 
 
+def test_interrupt_and_termination_flow_through_exit_evidence_handler():
+    source = HARNESS.read_text()
+    assert "trap finish EXIT" in source
+    assert "trap 'exit 130' INT" in source
+    assert "trap 'exit 143' TERM" in source
+
+
 def test_failure_diagnostic_regenerates_every_ci_baseline_and_nothing_else():
     assert diagnostic_flows() == workflow_flows() & baseline_flows()
 

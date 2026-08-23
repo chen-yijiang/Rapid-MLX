@@ -207,8 +207,11 @@ finish() {
     fi
 }
 trap finish EXIT
-trap 'cleanup_persona; cleanup_operator_server; exit 130' INT
-trap 'cleanup_persona; cleanup_operator_server; exit 143' TERM
+# Signal handlers only select the conventional exit code. The EXIT handler is
+# the single owner of cleanup and final evidence, avoiding double-cleanup and
+# ensuring cancellation/timeout failures receive the same result schema.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # The preconditions every flow depends on and none of them can observe:
 # permission to read another process's AX tree, and a session that can actually
