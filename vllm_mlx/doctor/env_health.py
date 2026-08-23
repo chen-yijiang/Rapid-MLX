@@ -31,11 +31,12 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -1344,6 +1345,41 @@ def _agent_server_alive(
         return False
 
 
+def _probe_agent_urls(
+    urls: list[str],
+    *,
+    open_url: Callable[..., Any] | None = None,
+    deadline: float = 0.75,
+) -> dict[str, bool]:
+    """Probe endpoints concurrently without ever waiting past ``deadline``.
+
+    ``urlopen(timeout=...)`` does not cover DNS resolution on every platform.
+    Daemon workers let the short-lived doctor process return its diagnosis even
+    if libc's resolver remains blocked. Late results only mutate this function's
+    private dictionary and are discarded.
+    """
+    unique_urls = list(dict.fromkeys(urls))
+    results: dict[str, bool] = {}
+    lock = threading.Lock()
+
+    def probe(url: str) -> None:
+        alive = _agent_server_alive(url, open_url=open_url)
+        with lock:
+            results[url] = alive
+
+    workers = [
+        threading.Thread(target=probe, args=(url,), daemon=True) for url in unique_urls
+    ]
+    expires = time.monotonic() + deadline
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=max(0.0, expires - time.monotonic()))
+
+    with lock:
+        return {url: results.get(url, False) for url in unique_urls}
+
+
 def section_agent_integrations(
     *,
     home: Path | None = None,
@@ -1357,13 +1393,7 @@ def section_agent_integrations(
         return s
 
     urls = [url for _, _, url in integrations if url]
-    with ThreadPoolExecutor(max_workers=min(len(urls), 8) or 1) as pool:
-        alive_by_url = dict(
-            zip(
-                urls,
-                pool.map(lambda url: _agent_server_alive(url, open_url=open_url), urls),
-            )
-        )
+    alive_by_url = _probe_agent_urls(urls, open_url=open_url)
 
     for name, path, url in integrations:
         if not url:

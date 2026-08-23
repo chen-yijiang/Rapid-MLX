@@ -306,6 +306,21 @@ def test_agent_integration_probes_run_concurrently(tmp_path):
     assert elapsed < 0.25, f"probes ran serially in {elapsed:.3f}s"
 
 
+def test_agent_integration_probe_has_a_shared_hard_deadline():
+    def open_url(request, *, timeout):
+        time.sleep(2)
+        return _HTTPResponse()
+
+    started = time.monotonic()
+    result = eh._probe_agent_urls(
+        ["http://slow.invalid:8000"], open_url=open_url, deadline=0.1
+    )
+    elapsed = time.monotonic() - started
+
+    assert result == {"http://slow.invalid:8000": False}
+    assert elapsed < 0.3, f"probe exceeded its deadline in {elapsed:.3f}s"
+
+
 # ---------------------------------------------------------------------------
 # Section: Required + optional packages
 # ---------------------------------------------------------------------------

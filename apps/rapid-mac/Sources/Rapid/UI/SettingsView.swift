@@ -755,7 +755,8 @@ struct SettingsView: View {
         ) {
             Button("Restart into setup", role: .destructive) { restartIntoSetup() }
                 .accessibilityIdentifier("Settings.App.ConfirmRunSetupAgain")
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { confirmingSetupRestart = false }
+                .accessibilityIdentifier("Settings.App.CancelRunSetupAgain")
         } message: {
             Text(ReonboardingReset.confirmation(for: .onboarding).message)
         }
