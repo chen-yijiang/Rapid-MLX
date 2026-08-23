@@ -276,8 +276,8 @@ final class AudioViewModel {
         case "parakeet-v3", "parakeet-tdt-0.6b-v3":
             return .init(
                 displayName: "Parakeet TDT v3",
-                badge: "25 languages",
-                summary: "Highest accuracy for 25 European languages, with punctuation and timestamps.",
+                badge: "English",
+                summary: "Fast English transcription with improved accuracy over v2 and automatic punctuation.",
                 isRecommended: false
             )
         case "parakeet", "parakeet-tdt-0.6b", "parakeet-tdt-0.6b-v2":

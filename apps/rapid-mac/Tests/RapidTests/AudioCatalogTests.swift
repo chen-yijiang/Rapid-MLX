@@ -61,7 +61,9 @@ struct AudioCatalogTests {
             family: "parakeet"
         )
         #expect(parakeet.displayName == "Parakeet TDT v3")
-        #expect(parakeet.badge == "25 languages")
+        #expect(parakeet.badge == "English")
+        #expect(parakeet.summary.contains("English"))
+        #expect(!parakeet.summary.contains("25"))
         #expect(parakeet.summary.contains("punctuation"))
 
         let qwen = AudioViewModel.transcriptionDetails(
