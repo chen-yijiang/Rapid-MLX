@@ -6119,9 +6119,7 @@ class Scheduler:
                 for request in self.requests.values()
                 if getattr(request, "lifecycle_admission_token", None) is not None
             }
-            self._paused_admission_tokens = (
-                set(admission_tokens) - owned if mode == "wait" else set()
-            )
+            self._paused_admission_tokens = set(admission_tokens) - owned
             self._paused_add_allowance = len(self._paused_admission_tokens)
 
     def request_ids_snapshot(self) -> tuple[str, ...]:

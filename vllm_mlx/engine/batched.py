@@ -1018,6 +1018,13 @@ class BatchedEngine(BaseEngine):
         if token is not None and token in tokens:
             tokens.remove(token)
             self._admission_reservations -= 1
+        elif token is None and tokens:
+            # Backward-compatible cross-task release: older callers hand the
+            # response to a task that may not inherit this ContextVar and the
+            # public API never required carrying a token. Preserve its
+            # "release one outstanding reservation" contract.
+            tokens.pop()
+            self._admission_reservations -= 1
         if token is not None and token in context_stack:
             remaining = tuple(value for value in context_stack if value != token)
             _admission_token_context.set((id(self), remaining) if remaining else None)

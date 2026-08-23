@@ -190,14 +190,16 @@ def test_mllm_scheduler_rejects_direct_add_while_paused():
 
 
 @pytest.mark.parametrize("scheduler_type", [Scheduler, MLLMScheduler])
+@pytest.mark.parametrize("mode", ["wait", "abort"])
 def test_scheduler_pause_atomically_accounts_for_already_owned_requests(
     scheduler_type,
+    mode,
 ):
     scheduler = scheduler_type.__new__(scheduler_type)
     scheduler._cancel_counter_lock = threading.Lock()
     scheduler.requests = {"already-owned": SimpleNamespace(lifecycle_admission_token=1)}
 
-    scheduler.pause_generation_admission({1, 2}, "wait")
+    scheduler.pause_generation_admission({1, 2}, mode)
 
     assert scheduler._generation_paused is True
     assert scheduler._paused_add_allowance == 1
@@ -249,6 +251,17 @@ def test_scheduler_transfer_releases_route_owned_reservation():
     assert context is not None
 
     engine._transfer_admission_to_scheduler(context[1][-1])
+
+    assert engine._admission_reservations == 0
+    assert engine._admission_tokens == set()
+
+
+def test_cross_context_release_preserves_legacy_release_contract():
+    engine, _ = _engine()
+    engine.check_admission()
+    _admission_token_context.set(None)
+
+    engine.release_admission_reservation()
 
     assert engine._admission_reservations == 0
     assert engine._admission_tokens == set()
