@@ -582,8 +582,8 @@ class ResidentModelManager:
 
             candidates: list[ResidencyRecord] = []
             paused_engines: list[object] = []
-            reject_preflight = replace_mode == "reject" and replace_group is not None
-            if reject_preflight:
+            group_preflight = replace_group is not None
+            if group_preflight:
                 candidates, paused_engines = await self._quiesce_group_name_locked(
                     replace_group, replace_mode
                 )
@@ -614,7 +614,7 @@ class ResidentModelManager:
             group = _effective_replace_group(record.entry, replace_group)
             try:
                 if group is not None:
-                    if reject_preflight:
+                    if group_preflight:
                         if group != replace_group:
                             raise ResidentModelError(
                                 f"model {record.model_id!r} does not belong to "

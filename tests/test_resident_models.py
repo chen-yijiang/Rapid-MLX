@@ -464,7 +464,7 @@ async def test_cancelled_replacement_resumes_old_engine_and_discards_target():
     assert old_engine.paused is False
     assert old_engine.stopped is False
     assert "chat-new" not in registry
-    assert loaded is not None and loaded.engine.stopped is True
+    assert loaded is None
 
 
 @pytest.mark.asyncio

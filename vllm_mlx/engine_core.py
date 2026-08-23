@@ -291,6 +291,7 @@ class EngineCore:
         self._output_collectors: dict[str, RequestOutputCollector] = {}
         self._stream_states: dict[str, RequestStreamState] = {}
         self._finished_events: dict[str, asyncio.Event] = {}
+        self._abort_cleanup_handles: dict[str, asyncio.TimerHandle] = {}
         # Per-request accumulator for stream_interval > 1: each step's
         # new_text/new_token_ids delta is merged here regardless of
         # should_send(); the buffer is flushed in one shot when should_send()
@@ -1331,17 +1332,40 @@ class EngineCore:
                 event.set()
             if self._idle_event is not None:
                 self._idle_event.set()
+            handles = getattr(self, "_abort_cleanup_handles", None)
+            if handles is None:
+                handles = {}
+                self._abort_cleanup_handles = handles
+            old_handle = handles.pop(request_id, None)
+            if old_handle is not None:
+                old_handle.cancel()
+            handles[request_id] = asyncio.get_running_loop().call_later(
+                60.0, self._cleanup_aborted_if_unconsumed, request_id
+            )
         return result
+
+    def _cleanup_aborted_if_unconsumed(self, request_id: str) -> None:
+        """Bound terminal retention when a request has lost its consumer."""
+
+        getattr(self, "_abort_cleanup_handles", {}).pop(request_id, None)
+        event = self._finished_events.get(request_id)
+        if event is not None and event.is_set():
+            self._cleanup_request(request_id)
 
     def _cleanup_request(self, request_id: str) -> None:
         """Clean up request tracking."""
+        handle = getattr(self, "_abort_cleanup_handles", {}).pop(request_id, None)
+        if handle is not None:
+            handle.cancel()
         collector = self._output_collectors.pop(request_id, None)
         if collector:
             collector.clear()
-        self._stream_states.pop(request_id, None)
-        self._stream_buffers.pop(request_id, None)
+        getattr(self, "_stream_states", {}).pop(request_id, None)
+        getattr(self, "_stream_buffers", {}).pop(request_id, None)
         self._finished_events.pop(request_id, None)
-        self.scheduler.remove_finished_request(request_id)
+        remove_finished = getattr(self.scheduler, "remove_finished_request", None)
+        if callable(remove_finished):
+            remove_finished(request_id)
 
     def _cleanup_request_safe(self, request_id: str) -> None:
         """``_cleanup_request`` + wake the engine idle event.

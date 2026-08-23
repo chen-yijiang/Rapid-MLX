@@ -326,6 +326,10 @@ async def test_text_abort_wakes_non_streaming_consumer_with_terminal_error():
     assert "active" in engine._output_collectors
     assert "active" in engine._finished_events
 
+    engine._cleanup_aborted_if_unconsumed("active")
+    assert "active" not in engine._output_collectors
+    assert "active" not in engine._finished_events
+
 
 def test_mllm_abort_delivers_terminal_error_instead_of_empty_success():
     scheduler = MLLMScheduler.__new__(MLLMScheduler)
