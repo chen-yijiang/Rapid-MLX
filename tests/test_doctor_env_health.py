@@ -17,9 +17,11 @@ mutation) so the suite runs identically on every Python and every OS.
 
 from __future__ import annotations
 
+import http.client
 import importlib
 import os
 import plistlib
+import time
 import urllib.error
 from pathlib import Path
 from unittest import mock
@@ -253,6 +255,55 @@ def test_agent_integrations_probe_every_existing_cline_config(tmp_path):
     ]
     assert roots[0].as_posix() in cline[0].detail
     assert roots[1].as_posix() in cline[1].detail
+
+
+def test_agent_integration_non_http_service_is_reported_unresponsive(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}')
+
+    def open_url(request, *, timeout):
+        raise http.client.BadStatusLine("SSH-2.0")
+
+    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
+    assert section.checks[0].status is eh.CheckStatus.WARN
+    assert "not responding" in section.checks[0].label
+
+
+def test_agent_integration_config_read_is_size_bounded(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_bytes(b" " * (eh._AGENT_CONFIG_MAX_BYTES + 1))
+
+    with mock.patch.object(
+        Path, "read_text", side_effect=AssertionError("must not read")
+    ):
+        section = eh.section_agent_integrations(home=tmp_path)
+
+    assert section.checks[0].status is eh.CheckStatus.WARN
+    assert "no Rapid-MLX server" in section.checks[0].label
+
+
+def test_agent_integration_probes_run_concurrently(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}')
+    cont = tmp_path / ".continue/config.json"
+    cont.parent.mkdir(parents=True)
+    cont.write_text(
+        '{"models":[{"title":"rapid-mlx","apiBase":"http://localhost:8001/v1"}]}'
+    )
+
+    def open_url(request, *, timeout):
+        time.sleep(0.15)
+        raise urllib.error.URLError("timeout")
+
+    started = time.monotonic()
+    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
+    elapsed = time.monotonic() - started
+
+    assert len(section.checks) == 2
+    assert elapsed < 0.25, f"probes ran serially in {elapsed:.3f}s"
 
 
 # ---------------------------------------------------------------------------

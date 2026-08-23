@@ -21,6 +21,7 @@ Tests in ``tests/test_doctor_env_health.py`` cover each section's probe.
 
 from __future__ import annotations
 
+import http.client
 import importlib.metadata as _im
 import importlib.util as _iu
 import json
@@ -34,6 +35,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -123,6 +125,8 @@ OPTIONAL_PACKAGES: list[tuple[str, str, str]] = [
         "pip install 'rapid-mlx[embeddings]'",
     ),
 ]
+
+_AGENT_CONFIG_MAX_BYTES = 1024 * 1024
 
 # ``find_spec`` checks discoverability without importing heavyweight audio
 # packages such as scipy, numba, and spaCy.  Keep this aligned with the
@@ -1294,6 +1298,9 @@ def _configured_agent_urls(home: Path) -> list[tuple[str, Path, str | None]]:
         if not path.is_file():
             continue
         try:
+            if path.stat().st_size > _AGENT_CONFIG_MAX_BYTES:
+                configured.append((name, path, None))
+                continue
             data = json.loads(path.read_text(encoding="utf-8"))
             url = extract(data) if isinstance(data, dict) else None
             configured.append((name, path, url if isinstance(url, str) else None))
@@ -1327,7 +1334,13 @@ def _agent_server_alive(
         # Authentication proves that a server answered. Some supported
         # serving modes intentionally protect even their health endpoint.
         return error.code in {401, 403}
-    except (OSError, TypeError, urllib.error.URLError, ValueError):
+    except (
+        OSError,
+        TypeError,
+        http.client.HTTPException,
+        urllib.error.URLError,
+        ValueError,
+    ):
         return False
 
 
@@ -1343,6 +1356,15 @@ def section_agent_integrations(
         s.add("No Claude Code, Cline, or Continue.dev config found", CheckStatus.OK)
         return s
 
+    urls = [url for _, _, url in integrations if url]
+    with ThreadPoolExecutor(max_workers=min(len(urls), 8) or 1) as pool:
+        alive_by_url = dict(
+            zip(
+                urls,
+                pool.map(lambda url: _agent_server_alive(url, open_url=open_url), urls),
+            )
+        )
+
     for name, path, url in integrations:
         if not url:
             s.add(
@@ -1350,7 +1372,7 @@ def section_agent_integrations(
                 CheckStatus.WARN,
                 detail=f"path={path}",
             )
-        elif _agent_server_alive(url, open_url=open_url):
+        elif alive_by_url[url]:
             s.add(
                 f"{name} config points to a live server",
                 CheckStatus.OK,
