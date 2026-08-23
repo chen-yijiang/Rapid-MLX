@@ -133,4 +133,25 @@ struct ChatAttachmentDraftStore: Equatable {
         get { drafts[conversationID] ?? ChatAttachmentDraft() }
         set { drafts[conversationID] = newValue }
     }
+
+    /// Completes only an import whose owning conversation still exists in the
+    /// store. In particular, a late task cannot recreate a deleted draft.
+    @discardableResult
+    mutating func finishFileImport(
+        conversationID: UUID,
+        id: UUID,
+        _ imported: [(attachment: ChatFileAttachment, sourceURL: URL)],
+        notice: String?
+    ) -> Bool {
+        guard var draft = drafts[conversationID] else { return false }
+        guard draft.finishFileImport(id: id, imported, notice: notice) else { return false }
+        drafts[conversationID] = draft
+        return true
+    }
+
+    /// Releases attachment data for deleted conversations while retaining the
+    /// unsaved active conversation, which is not present in history yet.
+    mutating func retainDrafts(for conversationIDs: Set<UUID>) {
+        drafts = drafts.filter { conversationIDs.contains($0.key) }
+    }
 }

@@ -298,6 +298,11 @@ struct ChatView: View {
             guard request != 0 else { return }
             composeFocusToken &+= 1
         }
+        .onChange(of: viewModel.conversations.map(\.id)) { _, conversationIDs in
+            attachmentDrafts.retainDrafts(
+                for: Set(conversationIDs).union([viewModel.activeConversationID])
+            )
+        }
     }
 
     // MARK: - Transcript
@@ -1041,9 +1046,12 @@ struct ChatView: View {
             let notice = selection.rejectedCount > 0
                 ? "Attach up to \(ChatFileAttachment.maxAttachmentsPerMessage) PDF, CSV, or TXT files per message."
                 : outcome.1
-            var originDraft = attachmentDrafts[importConversationID]
-            originDraft.finishFileImport(id: importID, outcome.0, notice: notice)
-            attachmentDrafts[importConversationID] = originDraft
+            attachmentDrafts.finishFileImport(
+                conversationID: importConversationID,
+                id: importID,
+                outcome.0,
+                notice: notice
+            )
         }
         return true
     }

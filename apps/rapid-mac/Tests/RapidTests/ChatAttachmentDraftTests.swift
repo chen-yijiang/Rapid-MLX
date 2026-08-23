@@ -184,16 +184,40 @@ struct ChatAttachmentDraftTests {
         store[conversationB] = draftB
 
         // A may finish while B is visible; it writes only through A's key.
-        draftA = store[conversationA]
-        draftA.finishFileImport(
+        let acceptedA = store.finishFileImport(
+            conversationID: conversationA,
             id: importA,
             [(fileA, URL(fileURLWithPath: "/tmp/a.txt"))],
             notice: nil
         )
-        store[conversationA] = draftA
 
+        #expect(acceptedA)
         #expect(store[conversationA].files == [fileA])
         #expect(store[conversationB].files == [fileB])
+    }
+
+    @Test("deleted conversations release drafts and reject late imports")
+    func deletedConversationCannotBeRecreatedByCompletion() throws {
+        let deletedConversation = UUID()
+        let survivingConversation = UUID()
+        let file = try makeFile(name: "late.txt", text: "late")
+        var store = ChatAttachmentDraftStore()
+        var deletedDraft = store[deletedConversation]
+        let startedImport = deletedDraft.beginFileImport()
+        let importID = try #require(startedImport)
+        store[deletedConversation] = deletedDraft
+
+        store.retainDrafts(for: [survivingConversation])
+        let accepted = store.finishFileImport(
+            conversationID: deletedConversation,
+            id: importID,
+            [(file, URL(fileURLWithPath: "/tmp/late.txt"))],
+            notice: nil
+        )
+
+        #expect(!accepted)
+        #expect(!store[deletedConversation].hasAttachments)
+        #expect(!store[deletedConversation].isImportingFiles)
     }
 
     @Test("submission is an immutable snapshot of one composer turn")
@@ -225,10 +249,10 @@ struct ChatAttachmentDraftTests {
 
         #expect(stripped.contains("letimportConversationID=viewModel.activeConversationID"))
         #expect(stripped.contains("letimportID=attachmentDraft.beginFileImport()"))
-        #expect(stripped.contains("varoriginDraft=attachmentDrafts[importConversationID]"))
         #expect(stripped.contains(
-            "originDraft.finishFileImport(id:importID,outcome.0,notice:notice)attachmentDrafts[importConversationID]=originDraft"
+            "attachmentDrafts.finishFileImport(conversationID:importConversationID,id:importID,outcome.0,notice:notice)"
         ))
+        #expect(stripped.contains("attachmentDrafts.retainDrafts("))
     }
 
     private func makeImage(name: String) throws -> ChatImageAttachment {
