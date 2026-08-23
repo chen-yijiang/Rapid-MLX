@@ -156,7 +156,7 @@ class MLLMRequest:
     # Token counts
     num_prompt_tokens: int = 0
     num_output_tokens: int = 0
-    lifecycle_admission_token: str | None = None
+    lifecycle_admission_token: int | None = None
 
 
 def _find_stop_match_in_new_window(
@@ -642,7 +642,7 @@ class MLLMScheduler:
             self._paused_add_allowance = max(0, int(add_allowance)) if paused else 0
             self._paused_admission_tokens = set()
 
-    def pause_generation_admission(self, admission_tokens: set[str], mode: str) -> None:
+    def pause_generation_admission(self, admission_tokens: set[int], mode: str) -> None:
         """Atomically close admission and account for pre-pause reservations."""
 
         with self._request_state_lock():

@@ -19,9 +19,9 @@ def _engine(*, reservations: int = 0, running: dict | None = None):
     engine._mllm_scheduler = None
     engine._admission_lock = threading.Lock()
     engine._admission_reservations = reservations
-    engine._admission_tokens = {f"reserved-{index}" for index in range(reservations)}
+    engine._admission_tokens = {index + 1 for index in range(reservations)}
     if reservations:
-        _admission_token_context.set((id(engine), ("reserved-0",)))
+        _admission_token_context.set((id(engine), (1,)))
     engine._generation_paused = False
     engine._generation_pause_mode = None
     scheduler = SimpleNamespace(
@@ -179,15 +179,13 @@ def test_scheduler_pause_atomically_accounts_for_already_owned_requests(
 ):
     scheduler = scheduler_type.__new__(scheduler_type)
     scheduler._cancel_counter_lock = threading.Lock()
-    scheduler.requests = {
-        "already-owned": SimpleNamespace(lifecycle_admission_token="owned")
-    }
+    scheduler.requests = {"already-owned": SimpleNamespace(lifecycle_admission_token=1)}
 
-    scheduler.pause_generation_admission({"owned", "pending"}, "wait")
+    scheduler.pause_generation_admission({1, 2}, "wait")
 
     assert scheduler._generation_paused is True
     assert scheduler._paused_add_allowance == 1
-    assert scheduler._paused_admission_tokens == {"pending"}
+    assert scheduler._paused_admission_tokens == {2}
 
     scheduler.set_generation_paused(False)
     assert scheduler._generation_paused is False

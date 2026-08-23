@@ -6109,7 +6109,7 @@ class Scheduler:
             self._paused_add_allowance = max(0, int(add_allowance)) if paused else 0
             self._paused_admission_tokens = set()
 
-    def pause_generation_admission(self, admission_tokens: set[str], mode: str) -> None:
+    def pause_generation_admission(self, admission_tokens: set[int], mode: str) -> None:
         """Atomically close admission and account for pre-pause reservations."""
 
         with self._cancel_counter_lock:

@@ -338,6 +338,7 @@ class ResidentModelManager:
         self._retired_engines: list[object] = []
         self._retirement_tasks: set[asyncio.Task] = set()
         self._retirement_task_engines: dict[asyncio.Task, object] = {}
+        self._rollback_tasks: set[asyncio.Task] = set()
         self.evictions_total = 0
         self.loads_total = 0
         self.registry.on_engine_access = self.touch
@@ -430,7 +431,7 @@ class ResidentModelManager:
                 pass
 
         async with self._lock:
-            retirement_tasks = tuple(self._retirement_tasks)
+            retirement_tasks = tuple(self._retirement_tasks | self._rollback_tasks)
             stuck_engines: list[object] = []
             if retirement_tasks:
                 _, pending = await asyncio.wait(retirement_tasks, timeout=5.0)
@@ -464,8 +465,24 @@ class ResidentModelManager:
                     try:
                         result = stop()
                         if asyncio.iscoroutine(result):
-                            await result
+                            stop_task = asyncio.create_task(result)
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.shield(stop_task), timeout=5.0
+                                )
+                            except TimeoutError:
+                                stop_task.cancel()
+                                _, still_pending = await asyncio.wait(
+                                    {stop_task}, timeout=1.0
+                                )
+                                if still_pending:
+                                    self._retired_engines.append(engine)
+                                logger.error(
+                                    "Timed out stopping a retired model engine "
+                                    "during shutdown"
+                                )
                     except Exception:
+                        self._retired_engines.append(engine)
                         logger.exception("Failed to stop a retired model engine")
             self._retired_engines.extend(stuck_engines)
 
@@ -808,6 +825,10 @@ class ResidentModelManager:
                         )
                 except TimeoutError:
                     task.cancel()
+                    _, pending = await asyncio.wait({task}, timeout=1.0)
+                    if pending:
+                        self._rollback_tasks.add(task)
+                        task.add_done_callback(self._rollback_tasks.discard)
                     failure = failure or TimeoutError(
                         "timed out resuming a model engine after replacement rollback"
                     )

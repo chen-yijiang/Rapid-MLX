@@ -1090,7 +1090,7 @@ class EngineCore:
         grammar_logits_processor: Any | None = None,
         reasoning_budget_logits_processor: Any | None = None,
         suppressed_tokens_logits_processor: Any | None = None,
-        lifecycle_admission_token: str | None = None,
+        lifecycle_admission_token: int | None = None,
     ) -> str:
         """
         Add a request for processing.

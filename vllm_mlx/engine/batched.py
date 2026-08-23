@@ -18,7 +18,6 @@ import json
 import logging
 import threading
 import time
-import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
@@ -35,7 +34,7 @@ logger = logging.getLogger(__name__)
 # appended. Replay a negligible suffix so non-trimmable caches never snapshot
 # an optimistic boundary that the next request cannot reuse.
 _PREFIX_BOUNDARY_REPLAY_TOKENS = 8
-_admission_token_context: contextvars.ContextVar[tuple[int, tuple[str, ...]] | None] = (
+_admission_token_context: contextvars.ContextVar[tuple[int, tuple[int, ...]] | None] = (
     contextvars.ContextVar("rapid_mlx_admission_token", default=None)
 )
 
@@ -989,7 +988,8 @@ class BatchedEngine(BaseEngine):
             if tokens is None:
                 tokens = set()
                 self._admission_tokens = tokens
-            token = uuid.uuid4().hex
+            token = getattr(self, "_admission_token_seq", 0) + 1
+            self._admission_token_seq = token
             tokens.add(token)
             context = _admission_token_context.get()
             stack = context[1] if context is not None and context[0] == id(self) else ()
@@ -1009,7 +1009,7 @@ class BatchedEngine(BaseEngine):
             self._consume_admission_token_locked(token, stack)
 
     def _consume_admission_token_locked(
-        self, token: str | None, context_stack: tuple[str, ...]
+        self, token: int | None, context_stack: tuple[int, ...]
     ) -> None:
         """Release one route reservation; caller holds `_admission_lock`."""
 
@@ -1021,7 +1021,7 @@ class BatchedEngine(BaseEngine):
             remaining = tuple(value for value in context_stack if value != token)
             _admission_token_context.set((id(self), remaining) if remaining else None)
 
-    def _transfer_admission_to_scheduler(self, token: str | None) -> None:
+    def _transfer_admission_to_scheduler(self, token: int | None) -> None:
         """Drop route ownership once the scheduler owns the request."""
 
         if token is None:
