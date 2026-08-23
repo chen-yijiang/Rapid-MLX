@@ -138,17 +138,13 @@ def test_shards_partition_every_selected_flow_once_by_manifest_group():
     assert [shard["group"] for shard in shards] == sorted(_groups())
 
     flattened = [
-        flow
-        for shard in shards
-        for flow in json.loads(str(shard["gui_flows"]))
+        flow for shard in shards for flow in json.loads(str(shard["gui_flows"]))
     ]
     assert set(flattened) == set(selected)
     assert len(flattened) == len(set(flattened))
     assert all(
         group_flows == sorted(group_flows, key=selected.index)
-        for group_flows in (
-            json.loads(str(shard["gui_flows"])) for shard in shards
-        )
+        for group_flows in (json.loads(str(shard["gui_flows"])) for shard in shards)
     )
     assert all(
         shard["flow_count"] == len(json.loads(str(shard["gui_flows"])))
