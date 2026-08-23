@@ -197,6 +197,7 @@ jobs:
       - name: GUI golden-flow coverage contract
         run: |
           pytest \
+            tests/test_gui_app_artifact.py \
             tests/test_gui_golden_ci_coverage.py \
             tests/test_gui_flow_routing.py \
             -q

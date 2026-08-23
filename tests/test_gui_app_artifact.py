@@ -79,3 +79,9 @@ def test_workflow_builds_once_and_consumes_verified_artifact():
     assert '--expected-source-sha "$GITHUB_SHA"' in verify_step["run"]
     assert "./scripts/build.sh" not in consumer_source
     assert "codesign --verify --deep --strict" in consumer_source
+
+
+def test_required_gui_contract_job_runs_artifact_tests():
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    contract_source = json.dumps(jobs["gui-harness-contracts"])
+    assert "tests/test_gui_app_artifact.py" in contract_source
