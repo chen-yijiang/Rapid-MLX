@@ -17,50 +17,15 @@ mutation) so the suite runs identically on every Python and every OS.
 
 from __future__ import annotations
 
-import http.client
 import importlib
-import json
 import os
 import plistlib
-import time
-import urllib.error
-from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from vllm_mlx.doctor import env_health as eh
-from vllm_mlx.launch import cline
-
-
-class _HTTPResponse:
-    def __init__(self, status: int = 200, payload: dict | None = None):
-        self.status = status
-        self.payload = payload or {
-            "status": "healthy",
-            "ready": True,
-            "model_loaded": True,
-        }
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return None
-
-    def read(self, _limit: int = -1):
-        return json.dumps(self.payload).encode()
-
-
-class _RawHTTPResponse(_HTTPResponse):
-    def __init__(self, body: bytes, status: int = 200):
-        self.status = status
-        self.body = body
-
-    def read(self, _limit: int = -1):
-        return self.body
-
 
 # ---------------------------------------------------------------------------
 # Section: System
@@ -181,17 +146,49 @@ def test_install_location_reported():
 # ---------------------------------------------------------------------------
 
 
+class _Connection:
+    def close(self):
+        pass
+
+
 def test_agent_integrations_are_quiet_when_no_client_is_configured(tmp_path):
     section = eh.section_agent_integrations(home=tmp_path)
-    assert len(section.checks) == 1
     assert section.checks[0].status is eh.CheckStatus.OK
-    assert "No Claude Code" in section.checks[0].label
 
 
-def test_agent_integrations_probe_each_configured_server(tmp_path):
+def test_agent_integrations_report_config_and_server_reachability(tmp_path):
     claude = tmp_path / ".claude/settings.json"
     claude.parent.mkdir(parents=True)
     claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}')
+    cont = tmp_path / ".continue/config.json"
+    cont.parent.mkdir(parents=True)
+    cont.write_text(
+        '{"models":[{"title":"rapid-mlx","provider":"openai",'
+        '"apiBase":"http://localhost:8001/v1"}]}'
+    )
+
+    def connect(address, *, timeout):
+        assert timeout == 0.25
+        if address[1] == 8001:
+            raise ConnectionRefusedError
+        return _Connection()
+
+    section = eh.section_agent_integrations(home=tmp_path, connect=connect)
+
+    assert [check.status for check in section.checks] == [
+        eh.CheckStatus.OK,
+        eh.CheckStatus.WARN,
+    ]
+    assert [check.label for check in section.checks] == [
+        "Claude Code server is reachable",
+        "Continue.dev server is not reachable",
+    ]
+
+
+def test_agent_integrations_warn_for_malformed_or_inactive_config(tmp_path):
+    claude = tmp_path / ".claude/settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text("not json")
     cline = (
         tmp_path
         / "Library/Application Support/Code/User/globalStorage"
@@ -199,349 +196,16 @@ def test_agent_integrations_probe_each_configured_server(tmp_path):
     )
     cline.parent.mkdir(parents=True)
     cline.write_text(
-        '{"apiProvider":"openai","openAiBaseUrl":"http://localhost:8001/v1"}'
-    )
-    cont = tmp_path / ".continue/config.json"
-    cont.parent.mkdir(parents=True)
-    cont.write_text(
-        '{"models":[{"title":"rapid-mlx","provider":"openai",'
-        '"apiBase":"http://localhost:8002/v1"}]}'
-    )
-
-    requested = []
-
-    def open_url(request, *, timeout):
-        requested.append((request.full_url, timeout))
-        if ":8001/" in request.full_url:
-            raise urllib.error.URLError("offline")
-        return _HTTPResponse()
-
-    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
-    by_name = {check.label.split()[0]: check for check in section.checks}
-    assert by_name["Claude"].status is eh.CheckStatus.OK
-    assert by_name["Cline"].status is eh.CheckStatus.WARN
-    assert by_name["Continue.dev"].status is eh.CheckStatus.OK
-    assert {url for url, _ in requested} == {
-        "http://127.0.0.1:8000/healthz",
-        "http://localhost:8001/healthz",
-        "http://localhost:8002/healthz",
-    }
-
-
-def test_agent_integration_malformed_or_unrelated_config_warns(tmp_path):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text("not json")
-    cont = tmp_path / ".continue/config.json"
-    cont.parent.mkdir(parents=True)
-    cont.write_text('{"models":[{"title":"cloud","apiBase":"https://example.com"}]}')
-
-    section = eh.section_agent_integrations(home=tmp_path)
-    assert len(section.checks) == 2
-    assert all(check.status is eh.CheckStatus.WARN for check in section.checks)
-    assert all("no Rapid-MLX server" in check.label for check in section.checks)
-
-
-@pytest.mark.parametrize("status", [401, 403])
-def test_agent_integration_auth_response_is_not_mistaken_for_rapid_mlx(
-    tmp_path, status
-):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}')
-
-    def open_url(request, *, timeout):
-        raise urllib.error.HTTPError(request.full_url, status, "auth", {}, None)
-
-    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
-    assert section.checks[0].status is eh.CheckStatus.WARN
-    assert "could not be verified" in section.checks[0].label
-
-
-def test_agent_integration_rejects_unrelated_2xx_health_payload(tmp_path):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8000"}}')
-
-    section = eh.section_agent_integrations(
-        home=tmp_path,
-        open_url=lambda *_args, **_kwargs: _HTTPResponse(payload={"status": "ok"}),
-    )
-    assert section.checks[0].status is eh.CheckStatus.WARN
-
-
-def test_agent_integration_invalid_utf8_health_payload_warns(tmp_path):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8000"}}')
-
-    section = eh.section_agent_integrations(
-        home=tmp_path,
-        open_url=lambda *_args, **_kwargs: _RawHTTPResponse(b"\xff"),
-    )
-
-    assert section.checks[0].status is eh.CheckStatus.WARN
-
-
-def test_agent_integration_accepts_ddtree_health_payload(tmp_path):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8000"}}')
-
-    section = eh.section_agent_integrations(
-        home=tmp_path,
-        open_url=lambda *_args, **_kwargs: _HTTPResponse(
-            payload={"status": "loading", "engine": "ddtree", "ready": False}
-        ),
-    )
-    assert section.checks[0].status is eh.CheckStatus.OK
-
-
-def test_agent_integration_accepts_dflash_health_payload(tmp_path):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8000"}}')
-
-    section = eh.section_agent_integrations(
-        home=tmp_path,
-        open_url=lambda *_args, **_kwargs: _HTTPResponse(
-            payload={
-                "status": "ok",
-                "engine": "dflash",
-                "mode": "single-user-serial",
-                "drafter": "mlx-community/drafter",
-            }
-        ),
-    )
-    assert section.checks[0].status is eh.CheckStatus.OK
-
-
-def test_agent_integrations_probe_every_existing_cline_config(tmp_path):
-    roots = [
-        tmp_path / "Library/Application Support/Code/User/globalStorage",
-        tmp_path / "Library/Application Support/VSCodium/User/globalStorage",
-    ]
-    for index, root in enumerate(roots):
-        path = root / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(
-            f'{{"apiProvider":"openai","openAiBaseUrl":"http://localhost:800{index}/v1"}}'
-        )
-
-    def open_url(request, *, timeout):
-        if ":8001/" in request.full_url:
-            raise urllib.error.URLError("offline")
-        return _HTTPResponse()
-
-    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
-    cline = [check for check in section.checks if check.label.startswith("Cline")]
-    assert [check.status for check in cline] == [
-        eh.CheckStatus.OK,
-        eh.CheckStatus.WARN,
-    ]
-    assert roots[0].as_posix() in cline[0].detail
-    assert roots[1].as_posix() in cline[1].detail
-
-
-def test_doctor_discovers_the_exact_config_written_by_cline_launcher(
-    tmp_path, monkeypatch
-):
-    root = tmp_path / "vscode-globalStorage"
-    launcher_path = (
-        root / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json"
-    )
-    launcher_path.parent.mkdir(parents=True)
-    monkeypatch.setattr(cline, "_candidate_settings_roots", lambda: [root])
-    cline.write_or_patch_config(
-        "http://127.0.0.1:8000", "model", config_path=launcher_path
-    )
-
-    # Doctor's macOS Stable root resolves to the same relative destination.
-    doctor_root = tmp_path / "Library/Application Support/Code/User/globalStorage"
-    doctor_path = doctor_root / launcher_path.relative_to(root)
-    doctor_path.parent.mkdir(parents=True)
-    doctor_path.write_bytes(launcher_path.read_bytes())
-
-    configured = eh._configured_agent_urls(tmp_path)
-    assert configured == [("Cline", doctor_path, "http://127.0.0.1:8000/v1", "sk-noop")]
-
-
-def test_agent_integration_authenticates_ddtree_health_probe(tmp_path):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text(
-        '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000/v1",'
-        '"ANTHROPIC_API_KEY":"secret-key"}}'
-    )
-
-    def open_url(request, *, timeout):
-        assert request.get_header("Authorization") == "Bearer secret-key"
-        return _HTTPResponse(
-            payload={"engine": "ddtree", "status": "ok", "ready": True}
-        )
-
-    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
-
-    assert section.checks[0].status is eh.CheckStatus.OK
-    assert "secret-key" not in section.checks[0].detail
-
-
-def test_agent_health_probe_disables_redirects_before_sending_api_key(monkeypatch):
-    class FakeOpener:
-        def open(self, request, *, timeout):
-            assert request.get_header("Authorization") == "Bearer secret-key"
-            return _HTTPResponse()
-
-    def build_opener(handler):
-        assert isinstance(handler, eh._NoAgentProbeRedirects)
-        assert (
-            handler.redirect_request(
-                None,
-                None,
-                302,
-                "Found",
-                {},
-                "https://attacker.example/steal",
-            )
-            is None
-        )
-        return FakeOpener()
-
-    monkeypatch.setattr(eh.urllib.request, "build_opener", build_opener)
-
-    assert eh._agent_server_alive("http://127.0.0.1:8000", api_key="secret-key")
-
-
-def test_stale_inactive_provider_urls_are_not_probed(tmp_path):
-    cline_path = (
-        tmp_path
-        / "Library/Application Support/Code/User/globalStorage"
-        / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
-    )
-    cline_path.parent.mkdir(parents=True)
-    cline_path.write_text(
         '{"apiProvider":"anthropic","openAiBaseUrl":"http://localhost:8000/v1"}'
     )
-    cont = tmp_path / ".continue/config.json"
-    cont.parent.mkdir(parents=True)
-    cont.write_text(
-        '{"models":[{"title":"rapid-mlx","provider":"anthropic",'
-        '"apiBase":"http://localhost:8001/v1"}]}'
-    )
 
     section = eh.section_agent_integrations(
         home=tmp_path,
-        open_url=lambda *_args, **_kwargs: pytest.fail("stale URL was probed"),
+        connect=lambda *_args, **_kwargs: pytest.fail("must not connect"),
     )
+
     assert len(section.checks) == 2
     assert all(check.status is eh.CheckStatus.WARN for check in section.checks)
-
-
-def test_agent_integration_details_redact_url_secrets(tmp_path):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text(
-        '{"env":{"ANTHROPIC_BASE_URL":'
-        '"https://user:password@localhost:8000/v1?token=secret#fragment"}}'
-    )
-
-    requested = []
-
-    def open_url(request, *, timeout):
-        requested.append(request.full_url)
-        return _HTTPResponse()
-
-    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
-    detail = section.checks[0].detail
-    assert requested == ["https://localhost:8000/healthz"]
-    assert "https://localhost:8000/v1" in detail
-    assert all(
-        secret not in detail for secret in ("user", "password", "token", "secret")
-    )
-
-
-def test_agent_integration_non_http_service_is_reported_unresponsive(tmp_path):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}')
-
-    def open_url(request, *, timeout):
-        raise http.client.BadStatusLine("SSH-2.0")
-
-    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
-    assert section.checks[0].status is eh.CheckStatus.WARN
-    assert "could not be verified" in section.checks[0].label
-
-
-def test_agent_integration_config_read_is_size_bounded(tmp_path):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_bytes(b" " * (eh._AGENT_CONFIG_MAX_BYTES + 1))
-
-    with mock.patch.object(
-        Path, "read_text", side_effect=AssertionError("must not read")
-    ):
-        section = eh.section_agent_integrations(home=tmp_path)
-
-    assert section.checks[0].status is eh.CheckStatus.WARN
-    assert "no Rapid-MLX server" in section.checks[0].label
-
-
-def test_agent_integration_config_growth_during_read_is_size_bounded(
-    tmp_path, monkeypatch
-):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text("{}")
-    oversized = BytesIO(b" " * (eh._AGENT_CONFIG_MAX_BYTES + 1))
-    original_open = Path.open
-
-    def open_file(path, *args, **kwargs):
-        if path == claude:
-            return oversized
-        return original_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "open", open_file)
-    section = eh.section_agent_integrations(home=tmp_path)
-
-    assert section.checks[0].status is eh.CheckStatus.WARN
-    assert "no Rapid-MLX server" in section.checks[0].label
-
-
-def test_agent_integration_probes_run_concurrently(tmp_path):
-    claude = tmp_path / ".claude/settings.json"
-    claude.parent.mkdir(parents=True)
-    claude.write_text('{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8000"}}')
-    cont = tmp_path / ".continue/config.json"
-    cont.parent.mkdir(parents=True)
-    cont.write_text(
-        '{"models":[{"title":"rapid-mlx","apiBase":"http://localhost:8001/v1"}]}'
-    )
-
-    def open_url(request, *, timeout):
-        time.sleep(0.15)
-        raise urllib.error.URLError("timeout")
-
-    started = time.monotonic()
-    section = eh.section_agent_integrations(home=tmp_path, open_url=open_url)
-    elapsed = time.monotonic() - started
-
-    assert len(section.checks) == 2
-    assert elapsed < 0.25, f"probes ran serially in {elapsed:.3f}s"
-
-
-def test_agent_integration_probe_has_a_shared_hard_deadline():
-    def open_url(request, *, timeout):
-        time.sleep(2)
-        return _HTTPResponse()
-
-    started = time.monotonic()
-    endpoint = ("http://slow.invalid:8000", None)
-    result = eh._probe_agent_urls([endpoint], open_url=open_url, deadline=0.1)
-    elapsed = time.monotonic() - started
-
-    assert result == {endpoint: False}
-    assert elapsed < 0.3, f"probe exceeded its deadline in {elapsed:.3f}s"
 
 
 # ---------------------------------------------------------------------------

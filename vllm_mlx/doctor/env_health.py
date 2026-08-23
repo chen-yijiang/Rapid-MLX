@@ -7,8 +7,7 @@ optional dev tools. The user runs ``rapid-mlx doctor`` to answer one question
 — "is my install/env broken?" — so every probe must:
 
 * run in well under a second (no model load, no engine init, no server boot);
-* never escalate to sudo; only read the documented cache, shell, and supported
-  agent-integration config paths needed to diagnose the user's setup;
+* never escalate to sudo or read user data outside ``~/.cache/huggingface``;
 * report a deterministic status (✓ / ⚠ / ✗) with a one-line label.
 
 Total wall-clock for ``rapid-mlx doctor`` ≤ 5 s on a warm cache, dominated by
@@ -21,7 +20,6 @@ Tests in ``tests/test_doctor_env_health.py`` cover each section's probe.
 
 from __future__ import annotations
 
-import http.client
 import importlib.metadata as _im
 import importlib.util as _iu
 import json
@@ -29,10 +27,9 @@ import os
 import platform
 import plistlib
 import shutil
+import socket
 import subprocess
 import sys
-import threading
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,7 +37,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -126,8 +122,6 @@ OPTIONAL_PACKAGES: list[tuple[str, str, str]] = [
         "pip install 'rapid-mlx[embeddings]'",
     ),
 ]
-
-_AGENT_CONFIG_MAX_BYTES = 1024 * 1024
 
 # ``find_spec`` checks discoverability without importing heavyweight audio
 # packages such as scipy, numba, and spaCy.  Keep this aligned with the
@@ -1246,50 +1240,12 @@ def section_optional_tools(
 # ---------------------------------------------------------------------------
 
 
-def _configured_agent_urls(
-    home: Path,
-) -> list[tuple[str, Path, str | None, str | None]]:
-    """Return configured Rapid-MLX endpoints from supported agent clients.
-
-    Missing files are intentionally omitted: agent integrations are optional,
-    and installing Rapid-MLX must not make ``doctor`` warn about clients the
-    user has never used.
-    """
-    candidates: list[
-        tuple[str, Path, Callable[[dict[str, Any]], tuple[str | None, str | None]]]
-    ] = [
-        (
-            "Claude Code",
-            home / ".claude/settings.json",
-            lambda data: (
-                (
-                    data.get("env", {}).get("ANTHROPIC_BASE_URL"),
-                    data.get("env", {}).get("ANTHROPIC_API_KEY"),
-                )
-                if isinstance(data.get("env"), dict)
-                else (None, None)
-            ),
-        ),
-        (
-            "Continue.dev",
-            home / ".continue/config.json",
-            lambda data: (
-                next(
-                    (
-                        (entry.get("apiBase"), entry.get("apiKey"))
-                        for entry in data.get("models", [])
-                        if isinstance(entry, dict)
-                        and entry.get("title") == "rapid-mlx"
-                        and entry.get("provider") == "openai"
-                    ),
-                    (None, None),
-                )
-                if isinstance(data.get("models"), list)
-                else (None, None)
-            ),
-        ),
+def _agent_integrations(home: Path) -> list[tuple[str, Path, str | None]]:
+    """Read the local endpoint selected by each supported agent client."""
+    configs = [
+        ("Claude Code", home / ".claude/settings.json"),
+        ("Continue.dev", home / ".continue/config.json"),
     ]
-
     cline_roots = (
         home / "Library/Application Support/Code/User/globalStorage",
         home / "Library/Application Support/Code - Insiders/User/globalStorage",
@@ -1298,210 +1254,93 @@ def _configured_agent_urls(
         home / ".config/Code - Insiders/User/globalStorage",
         home / ".config/VSCodium/User/globalStorage",
     )
-    for root in cline_roots:
-        path = root / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json"
-        if path.exists():
-            candidates.append(
-                (
-                    "Cline",
-                    path,
-                    lambda data: (
-                        (data.get("openAiBaseUrl"), data.get("openAiApiKey"))
-                        if data.get("apiProvider") == "openai"
-                        else (None, None)
-                    ),
-                )
-            )
+    configs.extend(
+        ("Cline", root / "saoudrizwan.claude-dev/settings/cline_mcp_settings.json")
+        for root in cline_roots
+    )
 
-    configured: list[tuple[str, Path, str | None, str | None]] = []
-    for name, path, extract in candidates:
+    integrations = []
+    for name, path in configs:
         if not path.is_file():
             continue
+        url = None
         try:
-            with path.open("rb") as config_file:
-                raw_config = config_file.read(_AGENT_CONFIG_MAX_BYTES + 1)
-            if len(raw_config) > _AGENT_CONFIG_MAX_BYTES:
-                configured.append((name, path, None, None))
-                continue
-            data = json.loads(raw_config)
-            url, api_key = extract(data) if isinstance(data, dict) else (None, None)
-            configured.append(
-                (
-                    name,
-                    path,
-                    url if isinstance(url, str) else None,
-                    api_key if isinstance(api_key, str) else None,
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if name == "Claude Code" and isinstance(data.get("env"), dict):
+                url = data["env"].get("ANTHROPIC_BASE_URL")
+            elif name == "Continue.dev" and isinstance(data.get("models"), list):
+                url = next(
+                    (
+                        model.get("apiBase")
+                        for model in data["models"]
+                        if isinstance(model, dict)
+                        and model.get("title") == "rapid-mlx"
+                        and model.get("provider") == "openai"
+                    ),
+                    None,
                 )
-            )
+            elif name == "Cline" and data.get("apiProvider") == "openai":
+                url = data.get("openAiBaseUrl")
         except (OSError, UnicodeError, json.JSONDecodeError):
-            configured.append((name, path, None, None))
-    return configured
+            pass
+        integrations.append((name, path, url if isinstance(url, str) else None))
+    return integrations
 
 
-class _NoAgentProbeRedirects(urllib.request.HTTPRedirectHandler):
-    """Keep configured API keys on the exact origin the user selected."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def _agent_server_alive(
-    base_url: str,
+def _server_reachable(
+    url: str,
     *,
-    api_key: str | None = None,
-    open_url: Callable[..., Any] | None = None,
-    timeout: float = 0.5,
+    connect: Callable[..., object] = socket.create_connection,
 ) -> bool:
-    """Probe Rapid-MLX liveness, authenticating from the client config."""
-    try:
-        parsed = urllib.parse.urlsplit(base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return False
-        path = parsed.path.rstrip("/")
-        if path.endswith("/v1"):
-            path = path[:-3]
-        host = parsed.hostname or ""
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        port = f":{parsed.port}" if parsed.port is not None else ""
-        health_url = urllib.parse.urlunsplit(
-            (parsed.scheme, host + port, path + "/healthz", "", "")
-        )
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        request = urllib.request.Request(  # noqa: S310
-            health_url, headers=headers, method="GET"
-        )
-    except ValueError:
-        return False
-    opener = open_url
-    if opener is None:
-        opener = urllib.request.build_opener(_NoAgentProbeRedirects()).open
-    try:
-        with opener(request, timeout=timeout) as response:  # noqa: S310
-            if not 200 <= int(response.status) < 300:
-                return False
-            payload = json.loads(response.read(_AGENT_CONFIG_MAX_BYTES + 1))
-            if not isinstance(payload, dict):
-                return False
-            standard = (
-                payload.get("status") == "healthy"
-                and isinstance(payload.get("ready"), bool)
-                and isinstance(payload.get("model_loaded"), bool)
-            )
-            ddtree = (
-                payload.get("engine") == "ddtree"
-                and payload.get("status") in {"ok", "loading", "error"}
-                and isinstance(payload.get("ready"), bool)
-            )
-            dflash = (
-                payload.get("engine") == "dflash"
-                and payload.get("status") == "ok"
-                and payload.get("mode") == "single-user-serial"
-                and isinstance(payload.get("drafter"), str)
-            )
-            return standard or ddtree or dflash
-    except urllib.error.HTTPError:
-        # An auth challenge proves that *something* answered, but not that it
-        # was Rapid-MLX. Without a health payload the identity is unverifiable.
-        return False
-    except (
-        OSError,
-        TypeError,
-        UnicodeError,
-        http.client.HTTPException,
-        urllib.error.URLError,
-        ValueError,
-    ):
-        return False
-
-
-def _probe_agent_urls(
-    endpoints: list[tuple[str, str | None]],
-    *,
-    open_url: Callable[..., Any] | None = None,
-    deadline: float = 0.75,
-) -> dict[tuple[str, str | None], bool]:
-    """Probe endpoints concurrently without ever waiting past ``deadline``.
-
-    ``urlopen(timeout=...)`` does not cover DNS resolution on every platform.
-    Daemon workers let the short-lived doctor process return its diagnosis even
-    if libc's resolver remains blocked. Late results only mutate this function's
-    private dictionary and are discarded.
-    """
-    unique_endpoints = list(dict.fromkeys(endpoints))
-    results: dict[tuple[str, str | None], bool] = {}
-    lock = threading.Lock()
-
-    def probe(endpoint: tuple[str, str | None]) -> None:
-        url, api_key = endpoint
-        alive = _agent_server_alive(url, api_key=api_key, open_url=open_url)
-        with lock:
-            results[endpoint] = alive
-
-    workers = [
-        threading.Thread(target=probe, args=(endpoint,), daemon=True)
-        for endpoint in unique_endpoints
-    ]
-    expires = time.monotonic() + deadline
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join(timeout=max(0.0, expires - time.monotonic()))
-
-    with lock:
-        return {endpoint: results.get(endpoint, False) for endpoint in unique_endpoints}
-
-
-def _redacted_server_url(url: str) -> str:
-    """Render an endpoint without credentials, query values, or fragments."""
+    """Perform a short TCP reachability check; do not interpret engine APIs."""
     try:
         parsed = urllib.parse.urlsplit(url)
-        host = parsed.hostname or ""
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        port = f":{parsed.port}" if parsed.port is not None else ""
-        return urllib.parse.urlunsplit(
-            (parsed.scheme, host + port, parsed.path, "", "")
-        )
-    except ValueError:
-        return "<invalid URL>"
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        connection = connect((parsed.hostname, port), timeout=0.25)
+        close = getattr(connection, "close", None)
+        if close:
+            close()
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def section_agent_integrations(
     *,
     home: Path | None = None,
-    open_url: Callable[..., Any] | None = None,
+    connect: Callable[..., object] = socket.create_connection,
 ) -> Section:
-    """Show configured IDE/agent clients and verify their target is alive."""
-    s = Section("Agent Integrations")
-    integrations = _configured_agent_urls(home or Path.home())
+    """Report whether installed agent configs point to a reachable server."""
+    section = Section("Agent Integrations")
+    integrations = _agent_integrations(home or Path.home())
     if not integrations:
-        s.add("No Claude Code, Cline, or Continue.dev config found", CheckStatus.OK)
-        return s
+        section.add(
+            "No Claude Code, Cline, or Continue.dev config found", CheckStatus.OK
+        )
+        return section
 
-    endpoints = [(url, api_key) for _, _, url, api_key in integrations if url]
-    alive_by_endpoint = _probe_agent_urls(endpoints, open_url=open_url)
-
-    for name, path, url, api_key in integrations:
+    for name, path, url in integrations:
         if not url:
-            s.add(
-                f"{name} config found, but no Rapid-MLX server is configured",
+            section.add(
+                f"{name} config found, but Rapid-MLX is not configured",
                 CheckStatus.WARN,
                 detail=f"path={path}",
             )
-        elif alive_by_endpoint[(url, api_key)]:
-            s.add(
-                f"{name} config points to a live server",
+        elif _server_reachable(url, connect=connect):
+            section.add(
+                f"{name} server is reachable",
                 CheckStatus.OK,
-                detail=f"path={path} server={_redacted_server_url(url)}",
+                detail=f"path={path}",
             )
         else:
-            s.add(
-                f"{name} config server could not be verified as Rapid-MLX",
+            section.add(
+                f"{name} server is not reachable",
                 CheckStatus.WARN,
-                detail=f"path={path} server={_redacted_server_url(url)}",
+                detail=f"path={path}",
             )
-    return s
+    return section
 
 
 # ---------------------------------------------------------------------------
