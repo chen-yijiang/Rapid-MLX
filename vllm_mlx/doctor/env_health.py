@@ -1336,6 +1336,13 @@ def _configured_agent_urls(
     return configured
 
 
+class _NoAgentProbeRedirects(urllib.request.HTTPRedirectHandler):
+    """Keep configured API keys on the exact origin the user selected."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _agent_server_alive(
     base_url: str,
     *,
@@ -1357,7 +1364,9 @@ def _agent_server_alive(
         )
     except ValueError:
         return False
-    opener = open_url or urllib.request.urlopen
+    opener = open_url
+    if opener is None:
+        opener = urllib.request.build_opener(_NoAgentProbeRedirects()).open
     try:
         with opener(request, timeout=timeout) as response:  # noqa: S310
             if not 200 <= int(response.status) < 300:

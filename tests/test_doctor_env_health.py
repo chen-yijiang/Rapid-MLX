@@ -363,6 +363,32 @@ def test_agent_integration_authenticates_ddtree_health_probe(tmp_path):
     assert "secret-key" not in section.checks[0].detail
 
 
+def test_agent_health_probe_disables_redirects_before_sending_api_key(monkeypatch):
+    class FakeOpener:
+        def open(self, request, *, timeout):
+            assert request.get_header("Authorization") == "Bearer secret-key"
+            return _HTTPResponse()
+
+    def build_opener(handler):
+        assert isinstance(handler, eh._NoAgentProbeRedirects)
+        assert (
+            handler.redirect_request(
+                None,
+                None,
+                302,
+                "Found",
+                {},
+                "https://attacker.example/steal",
+            )
+            is None
+        )
+        return FakeOpener()
+
+    monkeypatch.setattr(eh.urllib.request, "build_opener", build_opener)
+
+    assert eh._agent_server_alive("http://127.0.0.1:8000", api_key="secret-key")
+
+
 def test_stale_inactive_provider_urls_are_not_probed(tmp_path):
     cline_path = (
         tmp_path
