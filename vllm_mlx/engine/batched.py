@@ -1071,7 +1071,22 @@ class BatchedEngine(BaseEngine):
             )
         return scheduler
 
+    def _lifecycle_operation_lock(self) -> asyncio.Lock:
+        lock = getattr(self, "_lifecycle_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._lifecycle_lock = lock
+        return lock
+
     async def pause_generation(
+        self, mode: str = "wait", *, timeout: float | None = None
+    ) -> dict[str, object]:
+        """Serialize lifecycle mutations so timeout rollback cannot reopen a peer."""
+
+        async with self._lifecycle_operation_lock():
+            return await self._pause_generation_locked(mode, timeout=timeout)
+
+    async def _pause_generation_locked(
         self, mode: str = "wait", *, timeout: float | None = None
     ) -> dict[str, object]:
         """Close admission and quiesce generation like vLLM/SGLang.
@@ -1144,7 +1159,7 @@ class BatchedEngine(BaseEngine):
             # permanently closed. Manager callers may resume again during
             # their own rollback; resume is idempotent.
             try:
-                resume_task = asyncio.create_task(self.resume_generation())
+                resume_task = asyncio.create_task(self._resume_generation_unlocked())
                 await asyncio.shield(resume_task)
             except BaseException as cleanup:
                 original.add_note(f"lifecycle pause rollback also failed: {cleanup!r}")
@@ -1152,6 +1167,16 @@ class BatchedEngine(BaseEngine):
 
     async def resume_generation(self) -> dict[str, object]:
         """Reopen request admission after a lifecycle operation."""
+
+        async with self._lifecycle_operation_lock():
+            return await self._resume_generation_unlocked()
+
+    async def _resume_generation_unlocked(self) -> dict[str, object]:
+        self.force_resume_generation()
+        return self.lifecycle_status()
+
+    def force_resume_generation(self) -> None:
+        """Synchronously reopen both gates after a timed-out async resume."""
 
         scheduler = self._lifecycle_scheduler()
         set_paused = getattr(scheduler, "set_generation_paused", None)
@@ -1162,7 +1187,6 @@ class BatchedEngine(BaseEngine):
         with self._admission_lock:
             self._generation_paused = False
             self._generation_pause_mode = None
-        return self.lifecycle_status()
 
     @property
     def tokenizer(self) -> Any:

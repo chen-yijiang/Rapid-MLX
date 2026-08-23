@@ -157,6 +157,22 @@ async def test_pause_timeout_automatically_reopens_both_gates():
     assert scheduler.generation_paused is False
 
 
+@pytest.mark.asyncio
+async def test_concurrent_pause_transactions_are_serialized():
+    engine, _ = _engine(reservations=1)
+
+    first = asyncio.create_task(engine.pause_generation("wait"))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(engine.pause_generation("wait"))
+    await asyncio.sleep(0)
+    assert not second.done()
+
+    engine.release_admission_reservation()
+    await asyncio.wait_for(first, timeout=1)
+    await asyncio.wait_for(second, timeout=1)
+    await engine.resume_generation()
+
+
 def test_text_scheduler_rejects_direct_add_while_paused():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler._generation_paused = True

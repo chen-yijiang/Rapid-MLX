@@ -339,6 +339,7 @@ class ResidentModelManager:
         self._retirement_tasks: set[asyncio.Task] = set()
         self._retirement_task_engines: dict[asyncio.Task, object] = {}
         self._rollback_tasks: set[asyncio.Task] = set()
+        self._rollback_task_engines: dict[asyncio.Task, object] = {}
         self.evictions_total = 0
         self.loads_total = 0
         self.registry.on_engine_access = self.touch
@@ -444,7 +445,9 @@ class ResidentModelManager:
                         retirement_task.cancel()
                     _, still_pending = await asyncio.wait(pending, timeout=1.0)
                     for retirement_task in still_pending:
-                        engine = self._retirement_task_engines.get(retirement_task)
+                        engine = self._retirement_task_engines.get(
+                            retirement_task
+                        ) or self._rollback_task_engines.get(retirement_task)
                         if engine is not None:
                             stuck_engines.append(engine)
                     if still_pending:
@@ -828,7 +831,11 @@ class ResidentModelManager:
                     _, pending = await asyncio.wait({task}, timeout=1.0)
                     if pending:
                         self._rollback_tasks.add(task)
-                        task.add_done_callback(self._rollback_tasks.discard)
+                        self._rollback_task_engines[task] = engine
+                        task.add_done_callback(self._on_rollback_done)
+                        force_resume = getattr(engine, "force_resume_generation", None)
+                        if callable(force_resume):
+                            force_resume()
                     failure = failure or TimeoutError(
                         "timed out resuming a model engine after replacement rollback"
                     )
@@ -855,6 +862,10 @@ class ResidentModelManager:
         except BaseException as cleanup:
             original.add_note(f"rollback resume also failed: {cleanup!r}")
             raise original from cleanup
+
+    def _on_rollback_done(self, task: asyncio.Task) -> None:
+        self._rollback_tasks.discard(task)
+        self._rollback_task_engines.pop(task, None)
 
     async def _commit_group_replacement_locked(
         self,
