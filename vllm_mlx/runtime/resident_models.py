@@ -569,6 +569,22 @@ class ResidentModelManager:
                         record, group, candidates
                     )
             except BaseException:
+                # `_commit_group_replacement_locked` publishes the target and
+                # removes every predecessor before awaiting teardown.  A task
+                # cancellation delivered while one of those stops is awaited
+                # must therefore propagate without rolling back the already
+                # committed target (there may no longer be an old engine that
+                # can be made routable again).
+                committed = (
+                    group is not None
+                    and record.model_id in self._records
+                    and all(
+                        candidate.model_id not in self._records
+                        for candidate in candidates
+                    )
+                )
+                if committed:
+                    raise
                 # Once the loader returns, this manager owns the engine.  A
                 # later admission/replacement failure must not leave a model
                 # resident even though the control-plane request was rejected.
@@ -695,6 +711,10 @@ class ResidentModelManager:
         try:
             await self._commit_group_replacement_locked(target, group, candidates)
         except BaseException:
+            if target.model_id in self._records and all(
+                candidate.model_id not in self._records for candidate in candidates
+            ):
+                raise
             await self._resume_engines(paused_engines)
             raise
 
@@ -783,16 +803,43 @@ class ResidentModelManager:
             if self._on_primary_changed is not None:
                 self._on_primary_changed(target.entry)
 
+        # Establish the commit point completely before the first teardown
+        # await.  This makes cancellation state unambiguous: after this loop
+        # the new target is the only routable member of the group.
+        retired: list[tuple[ResidencyRecord, object | None]] = []
         for record in candidates:
             record.state = "evicting"
             self.registry.remove(record.model_id)
             self._drop_record(record.model_id)
             stop = getattr(record.entry.engine, "stop", None)
+            retired.append((record, stop if callable(stop) else None))
+            self.evictions_total += 1
+
+        cancellation: asyncio.CancelledError | None = None
+        for record, stop in retired:
             if callable(stop):
                 try:
                     result = stop()
                     if asyncio.iscoroutine(result):
-                        await result
+                        task = asyncio.create_task(result)
+                        try:
+                            await asyncio.shield(task)
+                        except asyncio.CancelledError as exc:
+                            # Finish releasing the retired engine even though
+                            # the control-plane caller went away.  Re-propagate
+                            # cancellation only after all retirees have been
+                            # handled; the caller recognizes the committed
+                            # registry state and leaves the target active.
+                            cancellation = cancellation or exc
+                            try:
+                                await task
+                            except Exception:
+                                self._retired_engines.append(record.entry.engine)
+                                logger.exception(
+                                    "Failed to stop retired model %r after cancellation; "
+                                    "cleanup will retry during shutdown",
+                                    record.model_id,
+                                )
                 except Exception:
                     self._retired_engines.append(record.entry.engine)
                     logger.exception(
@@ -802,8 +849,9 @@ class ResidentModelManager:
                         record.model_id,
                         group,
                     )
-            self.evictions_total += 1
         _release_allocator_cache()
+        if cancellation is not None:
+            raise cancellation
 
     async def set_pinned(self, model_name: str, pinned: bool) -> ResidencyRecord:
         async with self._lock:

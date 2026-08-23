@@ -97,6 +97,18 @@ class FailingResumeLifecycleEngine(FakeLifecycleEngine):
         raise RuntimeError("resume failed")
 
 
+class BlockingStopLifecycleEngine(FakeLifecycleEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stop_started = asyncio.Event()
+        self.allow_stop = asyncio.Event()
+
+    async def stop(self) -> None:
+        self.stop_started.set()
+        await self.allow_stop.wait()
+        self.stopped = True
+
+
 class Clock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -535,6 +547,41 @@ async def test_replacement_keeps_new_primary_when_retired_engine_stop_fails(
     assert "chat-secondary" not in registry
     assert "chat-new" in registry
     assert manager.snapshot()["retired_cleanup_pending"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_retired_stop_keeps_committed_new_primary():
+    registry = ModelRegistry()
+    old_engine = BlockingStopLifecycleEngine()
+    old_primary = entry("chat-old", old_engine)
+    registry.add(old_primary, is_default=True)
+
+    async def loader(name: str, path: str | None, performance=None):
+        return entry(name)
+
+    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
+    manager.register_primary(old_primary, estimated_bytes=4 * GIB)
+
+    replacement = asyncio.create_task(
+        manager.load("chat-new", replace_group="assistant", replace_mode="wait")
+    )
+    await old_engine.stop_started.wait()
+    replacement.cancel()
+    await asyncio.sleep(0)
+
+    # Cancellation arrived after the registry commit.  The target must stay
+    # routable while shielded retirement finishes.
+    assert registry.default_name == "chat-new"
+    assert "chat-old" not in registry
+    assert not replacement.done()
+
+    old_engine.allow_stop.set()
+    with pytest.raises(asyncio.CancelledError):
+        await replacement
+
+    assert old_engine.stopped is True
+    assert registry.default_name == "chat-new"
+    assert "chat-new" in registry
 
 
 @pytest.mark.asyncio
