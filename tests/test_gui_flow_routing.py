@@ -68,6 +68,17 @@ def test_new_file_cannot_inherit_ownership_from_mixed_ui_directory():
     )
 
 
+def test_unmapped_top_level_presentation_file_fails_closed():
+    assert select(["apps/rapid-mac/Sources/Rapid/AboutPanel.swift"]) == all_flows()
+
+
+def test_file_prefix_collision_does_not_inherit_explicit_file_ownership():
+    assert (
+        select(["apps/rapid-mac/Sources/Rapid/UI/ChatView.swift.preview"])
+        == all_flows()
+    )
+
+
 @pytest.mark.parametrize(
     "shared_control",
     ["ReadinessBanner.swift", "ModelPickerBar.swift", "InstructionTextEditor.swift"],

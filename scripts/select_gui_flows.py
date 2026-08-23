@@ -93,7 +93,8 @@ def _matches(path: str, declared: str) -> bool:
     # to inherit their journey ownership.
     if declared in UNSAFE_BROAD_PREFIXES:
         return False
-    return path == declared.rstrip("/") or path.startswith(declared)
+    normalized = declared.rstrip("/")
+    return path == normalized or (declared.endswith("/") and path.startswith(declared))
 
 
 def select(paths: Iterable[str]) -> list[str]:
