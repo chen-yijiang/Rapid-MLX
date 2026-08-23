@@ -1323,9 +1323,30 @@ class MLLMScheduler:
             queue = self.output_queues.get(request_id)
             if queue is not None:
                 try:
-                    queue.put_nowait(None)
+                    queue.put_nowait(
+                        RequestOutput(
+                            request_id=request_id,
+                            finished=True,
+                            finish_reason="length",
+                            error="Inference aborted by a cancellation request",
+                            error_kind="lifecycle",
+                        )
+                    )
                 except asyncio.QueueFull:
-                    pass
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                        except asyncio.QueueEmpty:  # pragma: no cover - race
+                            break
+                    queue.put_nowait(
+                        RequestOutput(
+                            request_id=request_id,
+                            finished=True,
+                            finish_reason="length",
+                            error="Inference aborted by a cancellation request",
+                            error_kind="lifecycle",
+                        )
+                    )
 
     def _fail_all_inflight(self, exc: Exception) -> MLLMSchedulerOutput:
         """Fail and detach every request after an unexpected step exception.
@@ -1876,6 +1897,10 @@ class MLLMScheduler:
                     # Mark finished BEFORE raising so the finally block
                     # doesn't double-abort what's already cleaned up.
                     finished_normally = True
+                    if output.error_kind == "lifecycle":
+                        from .request import InferenceAbortedError
+
+                        raise InferenceAbortedError(output.error)
                     if output.error_kind == "invalid_request":
                         raise ClientRequestError(output.error)
                     raise ValueError(output.error)

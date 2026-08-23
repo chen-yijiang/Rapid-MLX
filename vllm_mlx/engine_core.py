@@ -1303,9 +1303,32 @@ class EngineCore:
         return request_id
 
     async def abort_request(self, request_id: str) -> bool:
-        """Abort a request."""
+        """Abort a request and wake its HTTP consumer.
+
+        Scheduler cancellation runs on the MLX worker thread, while the
+        output collector and completion event belong to the asyncio thread.
+        Removing the scheduler request alone leaves both streaming and
+        non-streaming consumers blocked forever.  Publish one terminal error
+        before the worker-side teardown; the consumer owns final cleanup.
+        """
         result = self.scheduler.abort_request(request_id)
-        self._cleanup_request(request_id)
+        if result:
+            event = self._finished_events.get(request_id)
+            if event is not None and not event.is_set():
+                collector = self._output_collectors.get(request_id)
+                if collector is not None:
+                    collector.put(
+                        RequestOutput(
+                            request_id=request_id,
+                            finished=True,
+                            finish_reason="length",
+                            error="Inference aborted by a cancellation request",
+                            error_kind="lifecycle",
+                        )
+                    )
+                event.set()
+            if self._idle_event is not None:
+                self._idle_event.set()
         return result
 
     def _cleanup_request(self, request_id: str) -> None:

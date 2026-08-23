@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from vllm_mlx.engine.batched import BatchedEngine
+from vllm_mlx.engine_core import EngineCore
 from vllm_mlx.mllm_scheduler import MLLMScheduler
+from vllm_mlx.output_collector import RequestOutputCollector
 from vllm_mlx.scheduler import BackpressureError, Scheduler
 
 
@@ -169,3 +171,40 @@ def test_request_id_snapshot_is_safe_during_concurrent_mutation(scheduler_type):
     for _ in range(2_000):
         assert isinstance(scheduler.request_ids_snapshot(), tuple)
     writer.join()
+
+
+@pytest.mark.asyncio
+async def test_text_abort_wakes_non_streaming_consumer_with_terminal_error():
+    engine = EngineCore.__new__(EngineCore)
+    engine.scheduler = SimpleNamespace(abort_request=lambda _request_id: True)
+    engine._output_collectors = {
+        "active": RequestOutputCollector(aggregate=True),
+    }
+    engine._finished_events = {"active": asyncio.Event()}
+    engine._idle_event = asyncio.Event()
+
+    assert await engine.abort_request("active") is True
+    await asyncio.wait_for(engine._finished_events["active"].wait(), timeout=0.1)
+
+    terminal = engine._output_collectors["active"].get_nowait()
+    assert terminal is not None
+    assert terminal.finished is True
+    assert terminal.error_kind == "lifecycle"
+    assert "cancellation" in terminal.error
+    # The waiting stream/generate coroutine owns cleanup after consuming the
+    # terminal signal. Removing these here recreates the hung HTTP request.
+    assert "active" in engine._output_collectors
+    assert "active" in engine._finished_events
+
+
+def test_mllm_abort_delivers_terminal_error_instead_of_empty_success():
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler.output_queues = {"active": asyncio.Queue()}
+    scheduler._aborted_queue_ids = {"active"}
+
+    scheduler._distribute_outputs(SimpleNamespace(outputs=[]))
+
+    terminal = scheduler.output_queues["active"].get_nowait()
+    assert terminal.finished is True
+    assert terminal.error_kind == "lifecycle"
+    assert "cancellation" in terminal.error
