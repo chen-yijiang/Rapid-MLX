@@ -37,33 +37,19 @@ def test_hermes_binary_uses_path_instead_of_one_obsolete_install_layout():
     assert profile.testing.binary == "hermes"
 
 
-def test_hermes_toolsets_match_the_detected_cli_version():
+def test_hermes_profile_uses_cross_version_toolsets():
     load_profiles()
     profile = get_profile("hermes")
     assert profile is not None
 
-    default = yaml.safe_load(
+    rendered = yaml.safe_load(
         profile.render_config(
             "http://127.0.0.1:8153/v1",
             "qwen3.5-9b-4bit",
-        )
-    )
-    legacy = yaml.safe_load(
-        profile.render_config(
-            "http://127.0.0.1:8153/v1",
-            "qwen3.5-9b-4bit",
-            agent_version="0.9.0",
-        )
-    )
-    current = yaml.safe_load(
-        profile.render_config(
-            "http://127.0.0.1:8153/v1",
-            "qwen3.5-9b-4bit",
-            agent_version="0.16.0",
         )
     )
 
-    assert default["platform_toolsets"]["cli"] == [
+    assert rendered["platform_toolsets"]["cli"] == [
         "terminal",
         "file",
         "code_execution",
@@ -71,11 +57,6 @@ def test_hermes_toolsets_match_the_detected_cli_version():
         "browser",
         "skills",
         "image_gen",
-    ]
-    assert legacy["platform_toolsets"]["cli"] == default["platform_toolsets"]["cli"]
-    assert current["platform_toolsets"]["cli"] == [
-        *legacy["platform_toolsets"]["cli"],
-        "computer_use",
     ]
 
 
