@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 from .base import AgentProfile
@@ -20,33 +23,67 @@ class _MergeParseError(Exception):
 
 
 _TOOLSET_ALIASES = {"image": "image_gen"}
-_LEGACY_RAPID_HERMES_TOOLSETS = [
-    "terminal",
-    "file",
-    "code_execution",
-    "web",
-    "browser",
-    "skills",
-    "image",
-    "computer_use",
-]
 
 
 def _merge_toolset_list(existing: list, configured: list) -> list:
     """Merge stable profile defaults with user-enabled Hermes toolsets."""
-    # This exact list was written by older Rapid-MLX releases. Treat it as a
-    # registry-owned baseline, not a user override: `image` was renamed and
-    # `computer_use` is unsupported by older Hermes. Any deviation from this
-    # signature is a user delta and is preserved below.
-    if existing == _LEGACY_RAPID_HERMES_TOOLSETS:
-        return list(configured)
-
     result = list(configured)
     for item in existing:
         normalized = _TOOLSET_ALIASES.get(item, item)
+        if normalized == "computer_use" and normalized not in configured:
+            continue
         if normalized not in result:
             result.append(normalized)
     return result
+
+
+def _hermes_supported_toolsets() -> set[str] | None:
+    """Read the installed Hermes CLI's official built-in toolset registry."""
+    binary = shutil.which("hermes")
+    if binary is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [binary, "tools", "list", "--platform", "cli"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    names = set()
+    for line in proc.stdout.splitlines():
+        match = re.match(r"^\s*[✓✗]\s+\w+\s+([a-z][a-z0-9_-]*)\b", line)
+        if match:
+            names.add(match.group(1))
+    return names or None
+
+
+def _render_hermes_runtime_toolsets(rendered: str) -> str:
+    """Resolve optional Hermes capabilities from its runtime registry."""
+    supported = _hermes_supported_toolsets()
+    if supported is None:
+        return rendered
+    import yaml
+
+    config = yaml.safe_load(rendered)
+    if not isinstance(config, dict):
+        return rendered
+    platform = config.get("platform_toolsets")
+    if not isinstance(platform, dict) or not isinstance(platform.get("cli"), list):
+        return rendered
+    configured = [
+        _TOOLSET_ALIASES.get(item, item)
+        for item in platform["cli"]
+        if _TOOLSET_ALIASES.get(item, item) in supported
+    ]
+    if "computer_use" in supported and "computer_use" not in configured:
+        configured.append("computer_use")
+    platform["cli"] = configured
+    return yaml.safe_dump(config, sort_keys=False)
 
 
 def _deep_merge(base: dict, override: dict, *, _path: tuple[str, ...] = ()) -> dict:
@@ -174,6 +211,9 @@ def setup_agent_config(
         base_url, model_id, agent_version, context_length=context_length
     )
     cfg = profile.get_config_for_version(agent_version)
+
+    if profile.name == "hermes" and isinstance(rendered, str):
+        rendered = _render_hermes_runtime_toolsets(rendered)
 
     if cfg.type == "env":
         lines = []

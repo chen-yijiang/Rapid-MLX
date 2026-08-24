@@ -139,20 +139,34 @@ class TestHermesToolsets:
             "image_gen",
         ]
 
-    def test_hermes_yaml_enables_computer_use_for_explicit_v016(self):
-        from vllm_mlx.agents import get_profile, load_profiles
-
-        load_profiles()
-        profile = get_profile("hermes")
-        assert profile is not None, "hermes profile not found"
-
-        rendered = profile.render_config(
-            "http://localhost:8000/v1",
-            "test-model",
-            agent_version="0.16.0",
-            context_length=32768,
+    def test_setup_uses_the_installed_hermes_toolset_registry(
+        self, tmp_path, monkeypatch
+    ):
+        config_path = tmp_path / "config.yaml"
+        profile = _hermes_profile(
+            config=AgentConfigSpec(
+                type="yaml",
+                path=str(config_path),
+                template=_hermes_profile().config.template,
+            )
         )
-        parsed = yaml.safe_load(rendered)
+        monkeypatch.setattr(
+            "vllm_mlx.agents.adapter._hermes_supported_toolsets",
+            lambda: {
+                "terminal",
+                "file",
+                "code_execution",
+                "web",
+                "browser",
+                "skills",
+                "image_gen",
+                "computer_use",
+            },
+        )
+
+        setup_agent_config(profile, model_id="test-model")
+
+        parsed = yaml.safe_load(config_path.read_text())
         assert parsed["platform_toolsets"]["cli"][-2:] == [
             "image_gen",
             "computer_use",
@@ -211,7 +225,7 @@ class TestMergeOnWrite:
               context_length: 131072
               max_tokens: 4096
             platform_toolsets:
-              cli: [terminal, file, code_execution, web, browser, skills, image_gen]
+              cli: [terminal, file, code_execution, web, browser, skills, image_gen, computer_use]
         """)
 
         result = _merge_file_config(existing, new_template, "yaml")
