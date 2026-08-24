@@ -31,6 +31,10 @@ def _merge_toolset_list(
     """Merge stable profile defaults with user-enabled Hermes toolsets."""
     result = list(configured)
     for item in existing:
+        if not isinstance(item, str):
+            raise _MergeParseError(
+                "platform_toolsets.cli entries must be strings"
+            )
         normalized = _TOOLSET_ALIASES.get(item, item)
         if (
             supported is not None

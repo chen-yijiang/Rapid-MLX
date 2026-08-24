@@ -398,6 +398,33 @@ class TestMergeOnWrite:
         summary = setup_agent_config(profile, "http://x/v1", "m")
         assert summary.startswith("Cannot")
 
+    def test_setup_reports_failure_on_non_string_hermes_toolset(
+        self, tmp_path, monkeypatch
+    ):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "platform_toolsets:\n  cli: [terminal, {custom: true}]\n"
+        )
+        profile = _hermes_profile(
+            config=AgentConfigSpec(
+                type="yaml",
+                path=str(config_path),
+                template=(
+                    "platform_toolsets:\n"
+                    "  cli: [terminal, file, image_gen]\n"
+                ),
+            )
+        )
+        monkeypatch.setattr(
+            "vllm_mlx.agents.adapter._hermes_supported_toolsets",
+            lambda: {"terminal", "file", "image_gen"},
+        )
+
+        summary = setup_agent_config(profile, "http://x/v1", "m")
+
+        assert summary.startswith("Cannot parse existing config")
+        assert "entries must be strings" in summary
+
     def test_dry_run_does_not_touch_an_existing_config(self, tmp_path):
         """``--dry-run`` must preview, never write.
 
