@@ -6,12 +6,19 @@ import pytest
 
 from scripts import check_mypy_error_budget
 from scripts.check_mypy_error_budget import (
+    _mypy_command,
     compare_budget,
     parse_baseline,
     parse_error_counts,
     render_baseline,
     run_mypy,
 )
+
+
+def test_mypy_command_explicitly_scans_every_baselined_package() -> None:
+    command = _mypy_command()
+    assert "vllm_mlx/" in command
+    assert "videox_fun_mlx/" in command
 
 
 def test_error_counts_ignore_message_and_locations() -> None:

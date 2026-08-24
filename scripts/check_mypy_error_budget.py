@@ -108,6 +108,7 @@ def _mypy_command() -> list[str]:
         "-m",
         "mypy",
         "vllm_mlx/",
+        "videox_fun_mlx/",
         "--ignore-missing-imports",
         "--no-error-summary",
         "--show-error-codes",
