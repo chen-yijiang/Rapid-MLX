@@ -116,8 +116,8 @@ class TestContextLengthPlaceholder:
 
 
 class TestHermesToolsets:
-    def test_hermes_yaml_includes_image_and_computer_use(self):
-        """Hermes profile template must include image + computer_use tools."""
+    def test_hermes_yaml_uses_cross_version_toolsets(self):
+        """Hermes setup must only enable toolsets shared by supported versions."""
         from vllm_mlx.agents import get_profile, load_profiles
 
         load_profiles()
@@ -129,10 +129,15 @@ class TestHermesToolsets:
         )
         parsed = yaml.safe_load(rendered)
         toolsets = parsed.get("platform_toolsets", {}).get("cli", [])
-        assert "image" in toolsets, f"'image' missing from cli toolsets: {toolsets}"
-        assert "computer_use" in toolsets, (
-            f"'computer_use' missing from cli toolsets: {toolsets}"
-        )
+        assert toolsets == [
+            "terminal",
+            "file",
+            "code_execution",
+            "web",
+            "browser",
+            "skills",
+            "image_gen",
+        ]
 
 
 # ---------------------------------------------------------------------------

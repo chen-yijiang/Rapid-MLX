@@ -37,29 +37,6 @@ def test_hermes_binary_uses_path_instead_of_one_obsolete_install_layout():
     assert profile.testing.binary == "hermes"
 
 
-def test_hermes_profile_uses_cross_version_toolsets():
-    load_profiles()
-    profile = get_profile("hermes")
-    assert profile is not None
-
-    rendered = yaml.safe_load(
-        profile.render_config(
-            "http://127.0.0.1:8153/v1",
-            "qwen3.5-9b-4bit",
-        )
-    )
-
-    assert rendered["platform_toolsets"]["cli"] == [
-        "terminal",
-        "file",
-        "code_execution",
-        "web",
-        "browser",
-        "skills",
-        "image_gen",
-    ]
-
-
 def test_aider_profile_runs_the_real_cli():
     load_profiles()
     profile = get_profile("aider")
