@@ -37,6 +37,41 @@ def test_hermes_binary_uses_path_instead_of_one_obsolete_install_layout():
     assert profile.testing.binary == "hermes"
 
 
+def test_hermes_toolsets_match_the_detected_cli_version():
+    load_profiles()
+    profile = get_profile("hermes")
+    assert profile is not None
+
+    legacy = yaml.safe_load(
+        profile.render_config(
+            "http://127.0.0.1:8153/v1",
+            "qwen3.5-9b-4bit",
+            agent_version="0.9.0",
+        )
+    )
+    current = yaml.safe_load(
+        profile.render_config(
+            "http://127.0.0.1:8153/v1",
+            "qwen3.5-9b-4bit",
+            agent_version="0.16.0",
+        )
+    )
+
+    assert legacy["platform_toolsets"]["cli"] == [
+        "terminal",
+        "file",
+        "code_execution",
+        "web",
+        "browser",
+        "skills",
+        "image_gen",
+    ]
+    assert current["platform_toolsets"]["cli"] == [
+        *legacy["platform_toolsets"]["cli"],
+        "computer_use",
+    ]
+
+
 def test_aider_profile_runs_the_real_cli():
     load_profiles()
     profile = get_profile("aider")
