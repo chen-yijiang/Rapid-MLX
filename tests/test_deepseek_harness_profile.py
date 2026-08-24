@@ -42,6 +42,12 @@ def test_hermes_toolsets_match_the_detected_cli_version():
     profile = get_profile("hermes")
     assert profile is not None
 
+    default = yaml.safe_load(
+        profile.render_config(
+            "http://127.0.0.1:8153/v1",
+            "qwen3.5-9b-4bit",
+        )
+    )
     legacy = yaml.safe_load(
         profile.render_config(
             "http://127.0.0.1:8153/v1",
@@ -57,7 +63,7 @@ def test_hermes_toolsets_match_the_detected_cli_version():
         )
     )
 
-    assert legacy["platform_toolsets"]["cli"] == [
+    assert default["platform_toolsets"]["cli"] == [
         "terminal",
         "file",
         "code_execution",
@@ -66,6 +72,7 @@ def test_hermes_toolsets_match_the_detected_cli_version():
         "skills",
         "image_gen",
     ]
+    assert legacy["platform_toolsets"]["cli"] == default["platform_toolsets"]["cli"]
     assert current["platform_toolsets"]["cli"] == [
         *legacy["platform_toolsets"]["cli"],
         "computer_use",
