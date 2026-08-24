@@ -160,9 +160,7 @@ def test_python_311_enforces_changed_lines_coverage_without_repository_baseline(
     assert gate["if"] == (
         "github.event_name == 'pull_request' && matrix.python-version == '3.11'"
     )
-    assert gate["env"] == {
-        "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}"
-    }
+    assert gate["env"] == {"PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}"}
     assert "continue-on-error" not in gate
     assert "coverage.xml" in gate["run"]
     assert '--compare-branch "$PR_BASE_SHA"' in gate["run"]
