@@ -32,6 +32,22 @@ matching branch-protection migration. `tests` includes lint, type-check job
 health, the MLX dependency-bound guard on pull requests, and all selected engine
 test lanes; `desktop-tests` includes every selected Desktop lane.
 
+### Type-error ratchet
+
+Engine changes may not introduce new mypy errors. The type-check job runs one
+pinned mypy/Pydantic/FastAPI toolchain against both the candidate and its event
+base SHA, removes unstable line and column numbers, and compares the remaining
+error multiset. Existing errors therefore remain visible but do not block an
+unrelated PR merely because they moved within the same file. An extra copy of
+an existing error, a changed error, or an error in a new file blocks `tests`.
+
+The comparison fails closed when the base commit is unavailable or either mypy
+run exits operationally instead of returning a normal type-check verdict. This
+is deliberately a dynamic base comparison rather than a checked-in snapshot:
+fixed errors disappear immediately and cannot be reintroduced after the base
+advances, while dependency releases cannot create candidate-only drift because
+both commits use the same pinned environment.
+
 ## Merge gate
 
 Adding the `full-ci` label upgrades the lanes selected by the pull request's
@@ -131,3 +147,7 @@ one serial consumer without changing which journeys are selected.
 If GUI artifact reuse is suspect, restore the build step inside
 `gui-golden-flows` and remove `gui-app-build` from its dependencies. This costs
 additional macOS build time but preserves the same release-shaped UI coverage.
+If the type-error ratchet produces false positives, temporarily restore the
+advisory direct mypy command with `continue-on-error: true` while retaining its
+logs, then revert or repair `scripts/check_mypy_new_errors.py`. Do not bypass an
+individual candidate by changing its comparison base.

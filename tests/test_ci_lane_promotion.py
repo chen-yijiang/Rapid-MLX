@@ -103,3 +103,17 @@ def test_engine_jobs_follow_fail_closed_engine_classification():
     condition = str(bound_guard["if"])
     assert "github.event_name == 'pull_request'" in condition
     assert "needs.changes.outputs.engine == 'true'" in condition
+
+
+def test_type_check_blocks_only_new_mypy_errors():
+    type_check = _job(ENGINE_WORKFLOW, "type-check")
+    steps = type_check["steps"]
+    ratchet = next(
+        step for step in steps if step.get("name") == "Reject new mypy errors"
+    )
+
+    assert "continue-on-error" not in ratchet
+    assert "check_mypy_new_errors.py" in ratchet["run"]
+    assert "MYPY_BASE_SHA" in ratchet["env"]
+    install = next(step for step in steps if step.get("name") == "Install dependencies")
+    assert "mypy==" in install["run"]
