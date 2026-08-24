@@ -33,15 +33,9 @@ def _merge_toolset_list(
     result = list(configured)
     for item in existing:
         if not isinstance(item, str):
-            raise _MergeParseError(
-                "platform_toolsets.cli entries must be strings"
-            )
+            raise _MergeParseError("platform_toolsets.cli entries must be strings")
         normalized = item
-        if (
-            item == "image"
-            and supported is not None
-            and "image_gen" in supported
-        ):
+        if item == "image" and supported is not None and "image_gen" in supported:
             normalized = "image_gen"
         if (
             supported is not None
@@ -80,9 +74,7 @@ def _hermes_supported_toolsets() -> set[str] | None:
     return names or None
 
 
-def _render_hermes_runtime_toolsets(
-    rendered: str, supported: set[str] | None
-) -> str:
+def _render_hermes_runtime_toolsets(rendered: str, supported: set[str] | None) -> str:
     """Resolve optional Hermes capabilities from its runtime registry."""
     if supported is None:
         return rendered
@@ -137,9 +129,7 @@ def _deep_merge(
             # Hermes toolsets are capabilities, not an authoritative preset.
             # Keep user-enabled capabilities while normalizing renamed
             # upstream identifiers. Other lists retain replace semantics.
-            merged[key] = _merge_toolset_list(
-                merged[key], val, _supported_toolsets
-            )
+            merged[key] = _merge_toolset_list(merged[key], val, _supported_toolsets)
         else:
             # Lists and scalars: template value wins unconditionally.
             merged[key] = val
@@ -247,9 +237,7 @@ def setup_agent_config(
     hermes_supported_toolsets = None
     if profile.name == "hermes" and isinstance(rendered, str):
         hermes_supported_toolsets = _hermes_supported_toolsets()
-        rendered = _render_hermes_runtime_toolsets(
-            rendered, hermes_supported_toolsets
-        )
+        rendered = _render_hermes_runtime_toolsets(rendered, hermes_supported_toolsets)
 
     if cfg.type == "env":
         lines = []
@@ -445,9 +433,7 @@ def _merge_yaml(
         raise _MergeParseError(f"rendered template is not valid YAML: {exc}") from exc
     if not isinstance(template, dict):
         raise _MergeParseError("rendered template is not a YAML mapping")
-    merged = _deep_merge(
-        existing, template, _supported_toolsets=supported_toolsets
-    )
+    merged = _deep_merge(existing, template, _supported_toolsets=supported_toolsets)
     return yaml.dump(merged, default_flow_style=False, sort_keys=False)
 
 

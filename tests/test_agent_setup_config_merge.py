@@ -193,9 +193,7 @@ class TestHermesToolsets:
         assert _hermes_supported_toolsets() == {"image_gen", "computer_use"}
 
     @pytest.mark.parametrize("failure", ["nonzero", "timeout", "malformed"])
-    def test_registry_discovery_failures_are_unknown(
-        self, monkeypatch, failure
-    ):
+    def test_registry_discovery_failures_are_unknown(self, monkeypatch, failure):
         monkeypatch.setattr("shutil.which", lambda name: "/opt/bin/hermes")
 
         def fake_run(*args, **kwargs):
@@ -362,8 +360,7 @@ class TestMergeOnWrite:
     ):
         existing = tmp_path / "config.yaml"
         existing.write_text(
-            "platform_toolsets:\n"
-            "  cli: [terminal, image, computer_use, spotify]\n"
+            "platform_toolsets:\n  cli: [terminal, image, computer_use, spotify]\n"
         )
         template = "platform_toolsets:\n  cli: [terminal]\n"
 
@@ -460,10 +457,7 @@ class TestMergeOnWrite:
             config=AgentConfigSpec(
                 type="yaml",
                 path=str(config_path),
-                template=(
-                    "platform_toolsets:\n"
-                    "  cli: [terminal, file, image_gen]\n"
-                ),
+                template=("platform_toolsets:\n  cli: [terminal, file, image_gen]\n"),
             )
         )
         monkeypatch.setattr(
