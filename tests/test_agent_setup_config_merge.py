@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import subprocess
 import textwrap
 
 import pytest
@@ -26,6 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover — Python 3.10 only
 
 from vllm_mlx.agents.adapter import (
     _deep_merge,
+    _hermes_supported_toolsets,
     _merge_file_config,
     _MergeParseError,
     _valid_context_window,
@@ -172,6 +174,40 @@ class TestHermesToolsets:
             "computer_use",
         ]
 
+    def test_registry_discovery_parses_real_format_and_ansi(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda name: "/opt/bin/hermes")
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(
+                args[0],
+                0,
+                stdout=(
+                    "Built-in toolsets (cli):\n"
+                    "  ✓ enabled  image_gen  Image Generation\n"
+                    "  \x1b[32m✗ disabled\x1b[0m  computer_use  Computer Use\n"
+                ),
+                stderr="",
+            ),
+        )
+
+        assert _hermes_supported_toolsets() == {"image_gen", "computer_use"}
+
+    @pytest.mark.parametrize("failure", ["nonzero", "timeout", "malformed"])
+    def test_registry_discovery_failures_are_unknown(
+        self, monkeypatch, failure
+    ):
+        monkeypatch.setattr("shutil.which", lambda name: "/opt/bin/hermes")
+
+        def fake_run(*args, **kwargs):
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(args[0], 5)
+            if failure == "nonzero":
+                return subprocess.CompletedProcess(args[0], 2, "", "boom")
+            return subprocess.CompletedProcess(args[0], 0, "unexpected output", "")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        assert _hermes_supported_toolsets() is None
+
 
 # ---------------------------------------------------------------------------
 # 3. merge-on-write
@@ -228,7 +264,21 @@ class TestMergeOnWrite:
               cli: [terminal, file, code_execution, web, browser, skills, image_gen, computer_use]
         """)
 
-        result = _merge_file_config(existing, new_template, "yaml")
+        result = _merge_file_config(
+            existing,
+            new_template,
+            "yaml",
+            hermes_supported_toolsets={
+                "terminal",
+                "file",
+                "code_execution",
+                "web",
+                "browser",
+                "skills",
+                "image_gen",
+                "computer_use",
+            },
+        )
         parsed = yaml.safe_load(result)
 
         # Template values win
@@ -293,7 +343,7 @@ class TestMergeOnWrite:
     ):
         existing = tmp_path / "config.yaml"
         existing.write_text(
-            "platform_toolsets:\n  cli: [terminal, computer_use, spotify]\n"
+            "platform_toolsets:\n  cli: [terminal, image, computer_use, spotify]\n"
         )
         template = "platform_toolsets:\n  cli: [terminal, image_gen]\n"
 
@@ -302,6 +352,7 @@ class TestMergeOnWrite:
         assert parsed["platform_toolsets"]["cli"] == [
             "terminal",
             "image_gen",
+            "image",
             "computer_use",
             "spotify",
         ]

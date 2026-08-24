@@ -23,6 +23,7 @@ class _MergeParseError(Exception):
 
 
 _TOOLSET_ALIASES = {"image": "image_gen"}
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _merge_toolset_list(
@@ -35,10 +36,16 @@ def _merge_toolset_list(
             raise _MergeParseError(
                 "platform_toolsets.cli entries must be strings"
             )
-        normalized = _TOOLSET_ALIASES.get(item, item)
+        normalized = item
+        if (
+            item == "image"
+            and supported is not None
+            and "image_gen" in supported
+        ):
+            normalized = "image_gen"
         if (
             supported is not None
-            and normalized in {"image_gen", "computer_use"}
+            and normalized in {"image", "image_gen", "computer_use"}
             and normalized not in supported
         ):
             continue
@@ -65,7 +72,8 @@ def _hermes_supported_toolsets() -> set[str] | None:
     if proc.returncode != 0:
         return None
     names = set()
-    for line in proc.stdout.splitlines():
+    output = _ANSI_ESCAPE_RE.sub("", proc.stdout)
+    for line in output.splitlines():
         match = re.match(r"^\s*[✓✗]\s+\w+\s+([a-z][a-z0-9_-]*)\b", line)
         if match:
             names.add(match.group(1))
