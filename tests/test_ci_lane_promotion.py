@@ -117,7 +117,19 @@ def test_type_check_enforces_shrink_only_error_budget():
     assert "continue-on-error" not in ratchet
     assert ratchet["run"] == "python scripts/check_mypy_error_budget.py"
     install = next(step for step in steps if step.get("name") == "Install dependencies")
-    assert "mypy==2.3.1" in install["run"]
+    assert "pip install --requirement config/mypy-requirements.txt" in install["run"]
+    requirements = (ROOT / "config/mypy-requirements.txt").read_text().splitlines()
+    pins = [line for line in requirements if line and not line.startswith("#")]
+    assert pins
+    assert all("==" in pin for pin in pins)
+    assert {pin.split("==", maxsplit=1)[0] for pin in pins} >= {
+        "mypy",
+        "pydantic",
+        "pydantic_core",
+        "fastapi",
+        "starlette",
+        "typing_extensions",
+    }
     unit_roster = _step_run(
         ENGINE_WORKFLOW, "test-matrix", "Run unit tests (no MLX required)"
     )

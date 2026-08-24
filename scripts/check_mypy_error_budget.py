@@ -75,7 +75,7 @@ def render_baseline(counts: Mapping[str, int]) -> str:
         "# Grandfathered mypy error counts by file.",
         "# This is a shrink-only ratchet: new files/count growth fail CI.",
         "# Tighten after fixes: python scripts/check_mypy_error_budget.py --update",
-        "# Toolchain: mypy 2.3.1, pydantic 2.13.4, fastapi 0.141.1",
+        "# Environment: Python 3.11 + config/mypy-requirements.txt",
         "",
     ]
     lines.extend(

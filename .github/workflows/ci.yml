@@ -231,8 +231,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # The checked-in budget belongs to this exact type surface.
-          pip install mypy==2.3.1 pydantic==2.13.4 fastapi==0.141.1
+          # The checked-in budget belongs to this fully pinned type surface.
+          pip install --requirement config/mypy-requirements.txt
 
       - name: Enforce shrink-only mypy error budget
         run: python scripts/check_mypy_error_budget.py

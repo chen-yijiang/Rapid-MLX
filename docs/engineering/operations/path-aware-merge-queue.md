@@ -36,9 +36,10 @@ test lanes; `desktop-tests` includes every selected Desktop lane.
 
 Engine changes run a shrink-only mypy debt ratchet. The checked-in
 `config/mypy-error-baseline.txt` records the current error count for each dirty
-file under a pinned mypy/Pydantic/FastAPI toolchain. A new dirty file or an
-increase in any file's count blocks `tests`. When fixes reduce a count or clean
-a file completely, CI also blocks until the baseline is tightened with:
+file under the fully pinned Python 3.11 environment in
+`config/mypy-requirements.txt`. A new dirty file or an increase in any file's
+count blocks `tests`. When fixes reduce a count or clean a file completely, CI
+also blocks until the baseline is tightened with:
 
 ```bash
 python scripts/check_mypy_error_budget.py --update
