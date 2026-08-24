@@ -199,7 +199,7 @@ class TestMergeOnWrite:
                   max_tokens: 4096
                 my_custom_setting: true
                 platform_toolsets:
-                  cli: [terminal, file, image, my_custom_tool]
+                  cli: [terminal, file, image, computer_use, my_custom_tool]
             """)
         )
 
@@ -211,7 +211,7 @@ class TestMergeOnWrite:
               context_length: 131072
               max_tokens: 4096
             platform_toolsets:
-              cli: [terminal, file, code_execution, web, browser, skills, image, computer_use]
+              cli: [terminal, file, code_execution, web, browser, skills, image_gen]
         """)
 
         result = _merge_file_config(existing, new_template, "yaml")
@@ -222,10 +222,20 @@ class TestMergeOnWrite:
         assert parsed["model"]["context_length"] == 131072
         # User's custom key is preserved
         assert parsed["my_custom_setting"] is True
-        # platform_toolsets.cli is replaced by template (authoritative)
+        # Stable defaults come first; user-enabled capabilities survive.
         cli = parsed["platform_toolsets"]["cli"]
-        assert "code_execution" in cli  # from template
-        assert "my_custom_tool" not in cli  # template list wins
+        assert cli == [
+            "terminal",
+            "file",
+            "code_execution",
+            "web",
+            "browser",
+            "skills",
+            "image_gen",
+            "computer_use",
+            "my_custom_tool",
+        ]
+        assert "image" not in cli
 
     def test_json_merge_preserves_user_keys(self, tmp_path):
         existing = tmp_path / "config.json"

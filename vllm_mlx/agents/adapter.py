@@ -19,7 +19,20 @@ class _MergeParseError(Exception):
     """Raised when an existing config file cannot be parsed for merging."""
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
+_TOOLSET_ALIASES = {"image": "image_gen"}
+
+
+def _merge_toolset_list(existing: list, configured: list) -> list:
+    """Merge stable profile defaults with user-enabled Hermes toolsets."""
+    result = list(configured)
+    for item in existing:
+        normalized = _TOOLSET_ALIASES.get(item, item)
+        if normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def _deep_merge(base: dict, override: dict, *, _path: tuple[str, ...] = ()) -> dict:
     """Recursively merge *override* into *base*.
 
     - Dict values are merged recursively (existing keys in *base* that
@@ -31,12 +44,18 @@ def _deep_merge(base: dict, override: dict) -> dict:
     merged = dict(base)
     for key, val in override.items():
         if key in merged and isinstance(merged[key], dict) and isinstance(val, dict):
-            merged[key] = _deep_merge(merged[key], val)
+            merged[key] = _deep_merge(merged[key], val, _path=(*_path, key))
+        elif (
+            (*_path, key) == ("platform_toolsets", "cli")
+            and isinstance(merged.get(key), list)
+            and isinstance(val, list)
+        ):
+            # Hermes toolsets are capabilities, not an authoritative preset.
+            # Keep user-enabled capabilities while normalizing renamed
+            # upstream identifiers. Other lists retain replace semantics.
+            merged[key] = _merge_toolset_list(merged[key], val)
         else:
             # Lists and scalars: template value wins unconditionally.
-            # This ensures template-defined toolsets are authoritative
-            # (user customizations at the dict-key level are preserved,
-            # but list contents come from the template).
             merged[key] = val
     return merged
 
