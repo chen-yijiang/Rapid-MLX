@@ -2,7 +2,7 @@
 
 Covers:
   1. context_length placeholder is resolved from server-reported context_window
-  2. hermes template includes image + computer_use in platform_toolsets
+  2. hermes template uses valid cross-version platform toolsets by default
   3. merge-on-write preserves existing user config keys
   4. fresh write works when no config file exists
 """
@@ -137,6 +137,25 @@ class TestHermesToolsets:
             "browser",
             "skills",
             "image_gen",
+        ]
+
+    def test_hermes_yaml_enables_computer_use_for_explicit_v016(self):
+        from vllm_mlx.agents import get_profile, load_profiles
+
+        load_profiles()
+        profile = get_profile("hermes")
+        assert profile is not None, "hermes profile not found"
+
+        rendered = profile.render_config(
+            "http://localhost:8000/v1",
+            "test-model",
+            agent_version="0.16.0",
+            context_length=32768,
+        )
+        parsed = yaml.safe_load(rendered)
+        assert parsed["platform_toolsets"]["cli"][-2:] == [
+            "image_gen",
+            "computer_use",
         ]
 
 

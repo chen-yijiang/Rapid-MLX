@@ -53,6 +53,20 @@ known_issues:
 # Hermes has dual-model routing (smart_model_routing.py)
 # When using with Rapid-MLX multi-model, set the cheap model as secondary
 versions:
+  - range: ">=0.16"
+    notes: "v0.16+ adds the optional computer_use toolset"
+    config:
+      type: yaml
+      path: "~/.hermes/config.yaml"
+      template: |
+        model:
+          provider: "custom"
+          default: "{model_id}"
+          base_url: "{base_url}"
+          context_length: {context_length}
+          max_tokens: 4096
+        platform_toolsets:
+          cli: [terminal, file, code_execution, web, browser, skills, image_gen, computer_use]
   - range: ">=0.9"
     notes: "v0.9+ added MCP support and new tool formats"
   - range: ">=0.8,<0.9"
