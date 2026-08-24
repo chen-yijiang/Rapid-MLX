@@ -20,10 +20,27 @@ class _MergeParseError(Exception):
 
 
 _TOOLSET_ALIASES = {"image": "image_gen"}
+_LEGACY_RAPID_HERMES_TOOLSETS = [
+    "terminal",
+    "file",
+    "code_execution",
+    "web",
+    "browser",
+    "skills",
+    "image",
+    "computer_use",
+]
 
 
 def _merge_toolset_list(existing: list, configured: list) -> list:
     """Merge stable profile defaults with user-enabled Hermes toolsets."""
+    # This exact list was written by older Rapid-MLX releases. Treat it as a
+    # registry-owned baseline, not a user override: `image` was renamed and
+    # `computer_use` is unsupported by older Hermes. Any deviation from this
+    # signature is a user delta and is preserved below.
+    if existing == _LEGACY_RAPID_HERMES_TOOLSETS:
+        return list(configured)
+
     result = list(configured)
     for item in existing:
         normalized = _TOOLSET_ALIASES.get(item, item)

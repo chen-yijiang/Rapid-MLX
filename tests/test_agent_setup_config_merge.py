@@ -237,6 +237,28 @@ class TestMergeOnWrite:
         ]
         assert "image" not in cli
 
+    def test_yaml_merge_migrates_the_exact_legacy_rapid_toolset_list(self, tmp_path):
+        existing = tmp_path / "config.yaml"
+        existing.write_text(
+            "platform_toolsets:\n"
+            "  cli: [terminal, file, code_execution, web, browser, skills, image, computer_use]\n"
+        )
+        template = (
+            "platform_toolsets:\n"
+            "  cli: [terminal, file, code_execution, web, browser, skills, image_gen]\n"
+        )
+
+        parsed = yaml.safe_load(_merge_file_config(existing, template, "yaml"))
+        assert parsed["platform_toolsets"]["cli"] == [
+            "terminal",
+            "file",
+            "code_execution",
+            "web",
+            "browser",
+            "skills",
+            "image_gen",
+        ]
+
     def test_json_merge_preserves_user_keys(self, tmp_path):
         existing = tmp_path / "config.json"
         existing.write_text(json.dumps({"base_url": "old", "custom": 42}))
