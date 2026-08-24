@@ -262,7 +262,22 @@ class TestMergeOnWrite:
             "  cli: [terminal, file, code_execution, web, browser, skills, image_gen]\n"
         )
 
-        parsed = yaml.safe_load(_merge_file_config(existing, template, "yaml"))
+        parsed = yaml.safe_load(
+            _merge_file_config(
+                existing,
+                template,
+                "yaml",
+                hermes_supported_toolsets={
+                    "terminal",
+                    "file",
+                    "code_execution",
+                    "web",
+                    "browser",
+                    "skills",
+                    "image_gen",
+                },
+            )
+        )
         assert parsed["platform_toolsets"]["cli"] == [
             "terminal",
             "file",
@@ -272,6 +287,45 @@ class TestMergeOnWrite:
             "skills",
             "image_gen",
         ]
+
+    def test_yaml_merge_preserves_capabilities_when_detection_is_unavailable(
+        self, tmp_path
+    ):
+        existing = tmp_path / "config.yaml"
+        existing.write_text(
+            "platform_toolsets:\n  cli: [terminal, computer_use, spotify]\n"
+        )
+        template = "platform_toolsets:\n  cli: [terminal, image_gen]\n"
+
+        parsed = yaml.safe_load(_merge_file_config(existing, template, "yaml"))
+
+        assert parsed["platform_toolsets"]["cli"] == [
+            "terminal",
+            "image_gen",
+            "computer_use",
+            "spotify",
+        ]
+
+    def test_yaml_merge_registry_filters_managed_tools_but_keeps_user_delta(
+        self, tmp_path
+    ):
+        existing = tmp_path / "config.yaml"
+        existing.write_text(
+            "platform_toolsets:\n"
+            "  cli: [terminal, image, computer_use, spotify]\n"
+        )
+        template = "platform_toolsets:\n  cli: [terminal]\n"
+
+        parsed = yaml.safe_load(
+            _merge_file_config(
+                existing,
+                template,
+                "yaml",
+                hermes_supported_toolsets={"terminal"},
+            )
+        )
+
+        assert parsed["platform_toolsets"]["cli"] == ["terminal", "spotify"]
 
     def test_json_merge_preserves_user_keys(self, tmp_path):
         existing = tmp_path / "config.json"

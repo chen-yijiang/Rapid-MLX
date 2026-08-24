@@ -25,12 +25,18 @@ class _MergeParseError(Exception):
 _TOOLSET_ALIASES = {"image": "image_gen"}
 
 
-def _merge_toolset_list(existing: list, configured: list) -> list:
+def _merge_toolset_list(
+    existing: list, configured: list, supported: set[str] | None = None
+) -> list:
     """Merge stable profile defaults with user-enabled Hermes toolsets."""
     result = list(configured)
     for item in existing:
         normalized = _TOOLSET_ALIASES.get(item, item)
-        if normalized == "computer_use" and normalized not in configured:
+        if (
+            supported is not None
+            and normalized in {"image_gen", "computer_use"}
+            and normalized not in supported
+        ):
             continue
         if normalized not in result:
             result.append(normalized)
@@ -62,9 +68,10 @@ def _hermes_supported_toolsets() -> set[str] | None:
     return names or None
 
 
-def _render_hermes_runtime_toolsets(rendered: str) -> str:
+def _render_hermes_runtime_toolsets(
+    rendered: str, supported: set[str] | None
+) -> str:
     """Resolve optional Hermes capabilities from its runtime registry."""
-    supported = _hermes_supported_toolsets()
     if supported is None:
         return rendered
     import yaml
@@ -86,7 +93,13 @@ def _render_hermes_runtime_toolsets(rendered: str) -> str:
     return yaml.safe_dump(config, sort_keys=False)
 
 
-def _deep_merge(base: dict, override: dict, *, _path: tuple[str, ...] = ()) -> dict:
+def _deep_merge(
+    base: dict,
+    override: dict,
+    *,
+    _path: tuple[str, ...] = (),
+    _supported_toolsets: set[str] | None = None,
+) -> dict:
     """Recursively merge *override* into *base*.
 
     - Dict values are merged recursively (existing keys in *base* that
@@ -98,7 +111,12 @@ def _deep_merge(base: dict, override: dict, *, _path: tuple[str, ...] = ()) -> d
     merged = dict(base)
     for key, val in override.items():
         if key in merged and isinstance(merged[key], dict) and isinstance(val, dict):
-            merged[key] = _deep_merge(merged[key], val, _path=(*_path, key))
+            merged[key] = _deep_merge(
+                merged[key],
+                val,
+                _path=(*_path, key),
+                _supported_toolsets=_supported_toolsets,
+            )
         elif (
             (*_path, key) == ("platform_toolsets", "cli")
             and isinstance(merged.get(key), list)
@@ -107,7 +125,9 @@ def _deep_merge(base: dict, override: dict, *, _path: tuple[str, ...] = ()) -> d
             # Hermes toolsets are capabilities, not an authoritative preset.
             # Keep user-enabled capabilities while normalizing renamed
             # upstream identifiers. Other lists retain replace semantics.
-            merged[key] = _merge_toolset_list(merged[key], val)
+            merged[key] = _merge_toolset_list(
+                merged[key], val, _supported_toolsets
+            )
         else:
             # Lists and scalars: template value wins unconditionally.
             merged[key] = val
@@ -212,8 +232,12 @@ def setup_agent_config(
     )
     cfg = profile.get_config_for_version(agent_version)
 
+    hermes_supported_toolsets = None
     if profile.name == "hermes" and isinstance(rendered, str):
-        rendered = _render_hermes_runtime_toolsets(rendered)
+        hermes_supported_toolsets = _hermes_supported_toolsets()
+        rendered = _render_hermes_runtime_toolsets(
+            rendered, hermes_supported_toolsets
+        )
 
     if cfg.type == "env":
         lines = []
@@ -254,7 +278,12 @@ def setup_agent_config(
                     )
 
         try:
-            merged_text = _merge_file_config(config_path, rendered, cfg.type)
+            merged_text = _merge_file_config(
+                config_path,
+                rendered,
+                cfg.type,
+                hermes_supported_toolsets=hermes_supported_toolsets,
+            )
         except OSError as exc:
             return (
                 f"Cannot read existing config at {config_path} ({exc}). "
@@ -296,7 +325,13 @@ def setup_agent_config(
     return "No config to write (template not specified)"
 
 
-def _merge_file_config(existing_path: Path, rendered: str, config_type: str) -> str:
+def _merge_file_config(
+    existing_path: Path,
+    rendered: str,
+    config_type: str,
+    *,
+    hermes_supported_toolsets: set[str] | None = None,
+) -> str:
     """Merge *rendered* template into an existing config file.
 
     Returns *rendered* unchanged when the file does not exist (fresh
@@ -315,7 +350,11 @@ def _merge_file_config(existing_path: Path, rendered: str, config_type: str) -> 
     existing_text = existing_path.read_text(encoding="utf-8")
 
     if config_type == "yaml":
-        return _merge_yaml(existing_text, rendered)
+        return _merge_yaml(
+            existing_text,
+            rendered,
+            supported_toolsets=hermes_supported_toolsets,
+        )
     if config_type == "toml":
         return _merge_toml(existing_text, rendered)
     return _merge_json(existing_text, rendered)
@@ -364,7 +403,12 @@ def _merge_toml(existing_text: str, rendered: str) -> str:
     return tomli_w.dumps(merged)
 
 
-def _merge_yaml(existing_text: str, rendered: str) -> str:
+def _merge_yaml(
+    existing_text: str,
+    rendered: str,
+    *,
+    supported_toolsets: set[str] | None = None,
+) -> str:
     """Parse both YAML strings, deep-merge, and re-serialize.
 
     Raises ``_MergeParseError`` when the existing content is malformed
@@ -389,7 +433,9 @@ def _merge_yaml(existing_text: str, rendered: str) -> str:
         raise _MergeParseError(f"rendered template is not valid YAML: {exc}") from exc
     if not isinstance(template, dict):
         raise _MergeParseError("rendered template is not a YAML mapping")
-    merged = _deep_merge(existing, template)
+    merged = _deep_merge(
+        existing, template, _supported_toolsets=supported_toolsets
+    )
     return yaml.dump(merged, default_flow_style=False, sort_keys=False)
 
 
