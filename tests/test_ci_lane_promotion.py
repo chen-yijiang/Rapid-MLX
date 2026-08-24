@@ -117,3 +117,7 @@ def test_type_check_blocks_only_new_mypy_errors():
     assert "MYPY_BASE_SHA" in ratchet["env"]
     install = next(step for step in steps if step.get("name") == "Install dependencies")
     assert "mypy==" in install["run"]
+    unit_roster = _step_run(
+        ENGINE_WORKFLOW, "test-matrix", "Run unit tests (no MLX required)"
+    )
+    assert "tests/test_check_mypy_new_errors.py" in unit_roster
