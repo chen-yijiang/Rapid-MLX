@@ -98,11 +98,16 @@ struct ServerRuntimeCapabilities: Equatable, Sendable {
               child.terminationStatus == 0 else {
             return .conservative
         }
-        let output = stdoutReader.data + stderrReader.data
-        guard let help = String(data: output, encoding: .utf8) else {
-            return .conservative
-        }
-        return parse(serveHelp: help)
+        let stdoutCapabilities = stdoutReader.capabilities
+        let stderrCapabilities = stderrReader.capabilities
+        return ServerRuntimeCapabilities(
+            supportsResidentMemoryLimitGB:
+                stdoutCapabilities.supportsResidentMemoryLimitGB
+                || stderrCapabilities.supportsResidentMemoryLimitGB,
+            supportsResidentModelIdleTTL:
+                stdoutCapabilities.supportsResidentModelIdleTTL
+                || stderrCapabilities.supportsResidentModelIdleTTL
+        )
     }
 
     /// The probe binary is user-selectable, so treat its entire descendant
@@ -124,11 +129,15 @@ struct ServerRuntimeCapabilities: Equatable, Sendable {
 }
 
 private final class RuntimeProbeOutputReader: @unchecked Sendable {
+    private static let memoryLimitMarker = Data("--resident-memory-limit-gb".utf8)
+    private static let idleTTLMarker = Data("--resident-model-idle-ttl".utf8)
+    private static let maximumMarkerLength = max(memoryLimitMarker.count, idleTTLMarker.count)
+
     private let handle: FileHandle
     private let fileDescriptor: Int32
     private let finished = DispatchSemaphore(value: 0)
     private let lock = NSLock()
-    private var captured = Data()
+    private var detectedCapabilities = ServerRuntimeCapabilities.conservative
 
     init(_ handle: FileHandle) {
         self.handle = handle
@@ -137,9 +146,9 @@ private final class RuntimeProbeOutputReader: @unchecked Sendable {
 
     func start(deadline: DispatchTime) {
         DispatchQueue.global(qos: .utility).async { [self] in
-            let bytes = readUntilClosedOrDeadline(deadline)
+            let capabilities = readUntilClosedOrDeadline(deadline)
             lock.lock()
-            captured = bytes
+            detectedCapabilities = capabilities
             lock.unlock()
             finished.signal()
         }
@@ -149,14 +158,21 @@ private final class RuntimeProbeOutputReader: @unchecked Sendable {
         finished.wait(timeout: timeout)
     }
 
-    var data: Data {
+    var capabilities: ServerRuntimeCapabilities {
         lock.lock()
         defer { lock.unlock() }
-        return captured
+        return detectedCapabilities
     }
 
-    private func readUntilClosedOrDeadline(_ deadline: DispatchTime) -> Data {
-        var captured = Data()
+    private func readUntilClosedOrDeadline(
+        _ deadline: DispatchTime
+    ) -> ServerRuntimeCapabilities {
+        var supportsMemoryLimit = false
+        var supportsIdleTTL = false
+        // Keep only enough trailing bytes to recognize a marker split across
+        // two reads. The pipe is always fully drained, but a noisy runtime can
+        // no longer grow Desktop memory in proportion to its output.
+        var markerTail = Data()
 
         while true {
             // Capture the clock once. Re-reading it after the comparison can
@@ -188,12 +204,27 @@ private final class RuntimeProbeOutputReader: @unchecked Sendable {
             var chunk = [UInt8](repeating: 0, count: 4_096)
             let byteCount = read(fileDescriptor, &chunk, chunk.count)
             if byteCount > 0 {
-                captured.append(contentsOf: chunk[0..<byteCount])
+                if !supportsMemoryLimit || !supportsIdleTTL {
+                    let bytes = markerTail + Data(chunk[0..<byteCount])
+                    if !supportsMemoryLimit,
+                       bytes.range(of: Self.memoryLimitMarker) != nil {
+                        supportsMemoryLimit = true
+                    }
+                    if !supportsIdleTTL,
+                       bytes.range(of: Self.idleTTLMarker) != nil {
+                        supportsIdleTTL = true
+                    }
+                    let tailCount = min(Self.maximumMarkerLength - 1, bytes.count)
+                    markerTail = Data(bytes.suffix(tailCount))
+                }
             } else if byteCount == 0 || errno != EINTR {
                 break
             }
         }
 
-        return Data(captured)
+        return ServerRuntimeCapabilities(
+            supportsResidentMemoryLimitGB: supportsMemoryLimit,
+            supportsResidentModelIdleTTL: supportsIdleTTL
+        )
     }
 }

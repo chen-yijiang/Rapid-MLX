@@ -117,7 +117,7 @@ struct ServerRuntimeCapabilitiesTests {
 
         let capabilities = await ServerRuntimeCapabilities.probe(
             binary: runtime,
-            timeoutSeconds: 0.25
+            timeoutSeconds: 1
         )
 
         #expect(capabilities == .conservative)
