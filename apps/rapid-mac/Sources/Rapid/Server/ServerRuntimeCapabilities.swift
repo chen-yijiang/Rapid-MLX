@@ -29,77 +29,97 @@ struct ServerRuntimeCapabilities: Equatable, Sendable {
 
     static func probe(
         binary: URL,
-        timeoutSeconds: TimeInterval = 5
+        timeoutSeconds: TimeInterval = 5,
+        ambientEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) async -> ServerRuntimeCapabilities {
         await Task.detached(priority: .utility) {
-            probeBlocking(binary: binary, timeoutSeconds: timeoutSeconds)
+            probeBlocking(
+                binary: binary,
+                timeoutSeconds: timeoutSeconds,
+                ambientEnvironment: ambientEnvironment
+            )
         }.value
     }
 
     private static func probeBlocking(
         binary: URL,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        ambientEnvironment: [String: String]
     ) -> ServerRuntimeCapabilities {
         let deadline = DispatchTime.now() + .milliseconds(
             max(1, Int(timeoutSeconds * 1000))
         )
-        let process = Process()
-        process.executableURL = binary
-        process.arguments = ["serve", "--help"]
-
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = output
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        let finished = DispatchSemaphore(value: 0)
+        let child: ProcessGroupChild
 
         do {
-            try process.run()
+            child = try ProcessGroupChild.spawn(
+                executableURL: binary,
+                arguments: ["serve", "--help"],
+                standardInput: .nullDevice,
+                standardOutput: standardOutput,
+                standardError: standardError,
+                environmentAdditions: ServerManager.serveEnvironmentAdditions(
+                    bearer: "",
+                    ambient: ambientEnvironment
+                ),
+                replaceEnvironment: true
+            ) { _ in
+                finished.signal()
+            }
         } catch {
             return .conservative
         }
-        output.fileHandleForWriting.closeFile()
 
         // Drain help output while the process is running. Waiting for exit
         // before reading can fill the pipe and block the child indefinitely.
-        let outputReader = RuntimeProbeOutputReader(output.fileHandleForReading)
-        outputReader.start(deadline: deadline)
-
-        let finished = DispatchSemaphore(value: 0)
-        let processHandle = RuntimeProbeProcess(process)
-        DispatchQueue.global(qos: .utility).async {
-            processHandle.process.waitUntilExit()
-            finished.signal()
-        }
+        let stdoutReader = RuntimeProbeOutputReader(standardOutput.fileHandleForReading)
+        let stderrReader = RuntimeProbeOutputReader(standardError.fileHandleForReading)
+        stdoutReader.start(deadline: deadline)
+        stderrReader.start(deadline: deadline)
 
         if finished.wait(timeout: deadline) == .timedOut {
-            process.terminate()
-            if finished.wait(timeout: .now() + .milliseconds(250)) == .timedOut {
-                kill(process.processIdentifier, SIGKILL)
-                _ = finished.wait(timeout: .now() + .milliseconds(500))
-            }
-            _ = outputReader.wait(timeout: deadline)
+            terminateProbeGroup(child)
+            _ = stdoutReader.wait(timeout: deadline)
+            _ = stderrReader.wait(timeout: deadline)
             return .conservative
         }
 
-        guard outputReader.wait(timeout: deadline) == .success,
-              DispatchTime.now() < deadline else {
+        guard stdoutReader.wait(timeout: deadline) == .success,
+              stderrReader.wait(timeout: deadline) == .success,
+              DispatchTime.now() < deadline,
+              !child.isProcessGroupAlive else {
+            terminateProbeGroup(child)
             return .conservative
         }
-        guard process.terminationReason == .exit,
-              process.terminationStatus == 0 else {
+        guard child.terminationReason == .exit,
+              child.terminationStatus == 0 else {
             return .conservative
         }
-        guard let help = String(data: outputReader.data, encoding: .utf8) else {
+        let output = stdoutReader.data + stderrReader.data
+        guard let help = String(data: output, encoding: .utf8) else {
             return .conservative
         }
         return parse(serveHelp: help)
     }
-}
 
-private final class RuntimeProbeProcess: @unchecked Sendable {
-    let process: Process
-
-    init(_ process: Process) {
-        self.process = process
+    /// The probe binary is user-selectable, so treat its entire descendant
+    /// tree as one bounded child. A helper must not survive a timed-out or
+    /// malformed `serve --help` invocation.
+    private static func terminateProbeGroup(_ child: ProcessGroupChild) {
+        child.signalProcessGroup(SIGTERM)
+        let termDeadline = Date().addingTimeInterval(0.25)
+        while child.isProcessGroupAlive, Date() < termDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        guard child.isProcessGroupAlive else { return }
+        child.signalProcessGroup(SIGKILL)
+        let killDeadline = Date().addingTimeInterval(0.5)
+        while child.isProcessGroupAlive, Date() < killDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
     }
 }
 

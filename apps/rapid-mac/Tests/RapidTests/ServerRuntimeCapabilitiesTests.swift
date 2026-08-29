@@ -85,6 +85,52 @@ struct ServerRuntimeCapabilitiesTests {
         #expect(capabilities == .conservative)
     }
 
+    @Test("probe uses the server spawn allowlist instead of ambient secrets")
+    func probeSanitizesEnvironment() async throws {
+        let environmentCapture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-runtime-probe-env-\(UUID().uuidString)")
+        let runtime = try makeRuntimeScript(environmentCapture: environmentCapture)
+
+        let capabilities = await ServerRuntimeCapabilities.probe(
+            binary: runtime,
+            timeoutSeconds: 2,
+            ambientEnvironment: [
+                "ANTHROPIC_API_KEY": "must-not-reach-probe",
+                "PATH": "/usr/bin:/bin",
+                "HOME": "/Users/test",
+            ]
+        )
+
+        #expect(capabilities == .allKnown)
+        let captured = try String(contentsOf: environmentCapture, encoding: .utf8)
+        #expect(captured.contains("secret=unset"))
+        #expect(captured.contains("path=/usr/bin:/bin"))
+    }
+
+    @Test("timed-out probe terminates its descendant process group")
+    func probeTimeoutTerminatesDescendant() async throws {
+        let descendantPIDFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-runtime-probe-child-\(UUID().uuidString)")
+        let runtime = try makeRuntimeScript(
+            hangingDescendantPIDFile: descendantPIDFile
+        )
+
+        let capabilities = await ServerRuntimeCapabilities.probe(
+            binary: runtime,
+            timeoutSeconds: 0.25
+        )
+
+        #expect(capabilities == .conservative)
+        let pidText = try String(contentsOf: descendantPIDFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let descendantPID = try #require(Int32(pidText))
+        let deadline = Date().addingTimeInterval(2)
+        while processExists(descendantPID), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(!processExists(descendantPID), "the probe helper must not outlive its process group")
+    }
+
     @Test("probe bounds a descendant that retains the output pipe")
     func probeBoundsRetainedOutputPipe() async throws {
         let runtime = try makeRuntimeScript(retainedOutputPipe: true)
@@ -117,7 +163,9 @@ struct ServerRuntimeCapabilitiesTests {
     private func makeRuntimeScript(
         helpPaddingLines: Int = 0,
         helpExitStatus: Int = 0,
-        retainedOutputPipe: Bool = false
+        retainedOutputPipe: Bool = false,
+        environmentCapture: URL? = nil,
+        hangingDescendantPIDFile: URL? = nil
     ) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("rapid-runtime-capabilities-\(UUID().uuidString)")
@@ -126,9 +174,17 @@ struct ServerRuntimeCapabilitiesTests {
             withIntermediateDirectories: true
         )
         let script = directory.appendingPathComponent("rapid-mlx")
+        let environmentCaptureCommand = environmentCapture.map {
+            "printf 'secret=%s\\npath=%s\\n' \"${ANTHROPIC_API_KEY-unset}\" \"${PATH-unset}\" > '\($0.path)'"
+        } ?? ":"
+        let hangingDescendantCommand = hangingDescendantPIDFile.map {
+            "( sleep 30 ) & echo $! > '\($0.path)'; sleep 30"
+        } ?? ":"
         try """
         #!/bin/sh
         if [ "$1" = "serve" ] && [ "$2" = "--help" ]; then
+          \(environmentCaptureCommand)
+          \(hangingDescendantCommand)
           if \(retainedOutputPipe); then
             ( sleep 2 ) &
           fi
@@ -145,5 +201,10 @@ struct ServerRuntimeCapabilitiesTests {
         """.write(to: script, atomically: true, encoding: .utf8)
         chmod(script.path, 0o755)
         return script
+    }
+
+    private func processExists(_ pid: Int32) -> Bool {
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
     }
 }
