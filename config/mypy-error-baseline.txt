@@ -89,7 +89,7 @@ vllm_mlx/reasoning/think_parser.py 2
 vllm_mlx/repetition_guard.py 2
 vllm_mlx/routes/anthropic.py 7
 vllm_mlx/routes/audio.py 6
-vllm_mlx/routes/chat.py 49
+vllm_mlx/routes/chat.py 39
 vllm_mlx/routes/completions.py 1
 vllm_mlx/routes/embeddings.py 4
 vllm_mlx/routes/images.py 4
@@ -100,7 +100,7 @@ vllm_mlx/runtime/disk_kv_checkpoint.py 1
 vllm_mlx/runtime/radix_index.py 2
 vllm_mlx/runtime/ubc_evict.py 1
 vllm_mlx/runtime/video_lane.py 4
-vllm_mlx/scheduler.py 37
+vllm_mlx/scheduler.py 35
 vllm_mlx/server.py 21
 vllm_mlx/service/helpers.py 4
 vllm_mlx/service/postprocessor.py 6

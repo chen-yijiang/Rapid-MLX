@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -29,6 +30,7 @@ from ..api.models import (
     TokenLogProb,
     Usage,
 )
+from ..api.protocol_mapping import is_cancellation_finish_reason
 from ..api.response_format_metrics import (
     incr_strict_repair_attempt,
     incr_strict_repair_skipped_context_overflow,
@@ -81,6 +83,7 @@ from ..service.helpers import (
     SSE_RESPONSE_HEADERS,
     _append_tool_use_suffix,
     _apply_reasoning_cutoff_notice,
+    _build_prompt_with_thinking_compat,
     _build_usage,
     _check_admission_or_503,
     _disconnect_guard,
@@ -4260,7 +4263,7 @@ async def _create_chat_completion_impl(
     resolved_thinking = _resolve_enable_thinking(request)
 
     # Prepare kwargs
-    chat_kwargs = {
+    chat_kwargs: dict[str, Any] = {
         "max_tokens": _resolve_max_tokens(request.max_tokens, resolved_thinking),
         "temperature": _resolve_temperature(request.temperature),
         "top_p": _resolve_top_p(request.top_p),
@@ -4415,6 +4418,15 @@ async def _create_chat_completion_impl(
     if resolved_thinking is not None:
         chat_kwargs["enable_thinking"] = resolved_thinking
 
+    # Thread client-supplied ``chat_template_kwargs`` through to the engine
+    # so model-specific template variables (e.g. Qwen3.8 ``reasoning_effort``)
+    # reach ``apply_chat_template`` (#2474). ``enable_thinking`` is already
+    # resolved above; the engine-side merge never overwrites server-resolved
+    # keys.
+    ctk = getattr(request, "chat_template_kwargs", None)
+    if isinstance(ctk, dict) and ctk:
+        chat_kwargs["chat_template_kwargs"] = ctk
+
     # Context-length pre-check (DoS defense + UX, rapid-desktop#273 / #463).
     # See ``service/helpers.py::enforce_context_length_for_messages`` for
     # the rationale (8 MiB body still holds ~2M tokens → context window
@@ -4439,6 +4451,7 @@ async def _create_chat_completion_impl(
         tools=request.tools,
         max_tokens=chat_kwargs.get("max_tokens"),
         enable_thinking=resolved_thinking,
+        chat_template_kwargs=chat_kwargs.get("chat_template_kwargs"),
     )
 
     # LINE① (#558, codex r4 #1) — HARD context-window allowance check. With
@@ -4971,10 +4984,12 @@ async def _create_chat_completion_impl(
         # Validate chat template eagerly so template errors return 400
         if not engine.is_mllm:
             try:
-                engine.build_prompt(
+                _build_prompt_with_thinking_compat(
+                    engine.build_prompt,
                     messages,
                     tools=chat_kwargs.get("tools"),
                     enable_thinking=chat_kwargs.get("enable_thinking"),
+                    chat_template_kwargs=chat_kwargs.get("chat_template_kwargs"),
                 )
             except Exception as e:
                 err_msg = str(e)
@@ -5853,9 +5868,23 @@ async def _create_chat_completion_impl(
                     if _repair_err:
                         raise HTTPException(status_code=422, detail=_repair_err)
 
+    # Required and named tool choices are executable contracts, not best-effort
+    # extraction. Decoder constraints normally make these calls schema-valid;
+    # fail closed if a future template/parser mismatch still reaches this
+    # boundary instead of returning malformed arguments as a successful call.
+    _normalized_tool_choice = _normalize_tool_choice_for_grammar(request.tool_choice)
+    _is_forced_choice = bool(
+        _normalized_tool_choice
+        and _normalized_tool_choice.get("mode") in ("required", "named")
+    )
+
     # Validate tool call parameter values against schemas
     if tool_calls and request.tools:
-        _validate_tool_call_params(tool_calls, request.tools)
+        _validate_tool_call_params(
+            tool_calls,
+            request.tools,
+            enforce_required=_is_forced_choice,
+        )
 
     # D-TOOLCHOICE-R1 T3: scrub wire-marker leftovers from the
     # response text. Two trigger conditions:
@@ -5898,11 +5927,6 @@ async def _create_chat_completion_impl(
     # model ignores ``tool_choice="required"`` and emits ordinary
     # prose. Scrub only when the visible text contains STRUCTURAL
     # parser-wire residue, not merely a literal token mention.
-    _normalized_tool_choice = _normalize_tool_choice_for_grammar(request.tool_choice)
-    _is_forced_choice = bool(
-        _normalized_tool_choice
-        and _normalized_tool_choice.get("mode") in ("required", "named")
-    )
     _raw_text_for_reasoning = output.raw_text or output.text
     _raw_has_structural_wire = _contains_structural_tool_wire_leak(
         _raw_text_for_reasoning
@@ -6023,6 +6047,8 @@ async def _create_chat_completion_impl(
 
     # Determine finish reason
     finish_reason = "tool_calls" if tool_calls else output.finish_reason
+    if is_cancellation_finish_reason(finish_reason):
+        return Response(status_code=499)
 
     # Clean and strip thinking tags from content
     final_content = None
@@ -6835,6 +6861,11 @@ async def stream_chat_completion(
         # it here as ordinary exhaustion, so cancellation alone is not enough
         # to distinguish this path.
         if _client_disconnect_state and _client_disconnect_state[0]:
+            return
+
+        if buffered_finish is not None and is_cancellation_finish_reason(
+            buffered_finish[1].finish_reason
+        ):
             return
 
         # Fallback tool call detection (post-stream). Collect ALL fallback

@@ -30,6 +30,9 @@ class RequestStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = enum.auto()
     # Request was aborted by user
     FINISHED_ABORTED = enum.auto()
+    # Request was cancelled before or during inference. This is distinct
+    # from a genuine max-token truncation and must not leak as "length".
+    FINISHED_CANCELLED = enum.auto()
 
     @staticmethod
     def is_finished(status: "RequestStatus") -> bool:
@@ -45,6 +48,8 @@ class RequestStatus(enum.IntEnum):
             return "length"
         elif status == RequestStatus.FINISHED_ABORTED:
             return "abort"
+        elif status == RequestStatus.FINISHED_CANCELLED:
+            return "cancelled"
         return None
 
 
@@ -190,6 +195,15 @@ class Request:
     # Structural-token suppression for requests that must not re-enter a
     # parser state after the prompt has explicitly closed it.
     suppressed_tokens_logits_processor: Any | None = None
+
+    # Exact standard-penalty processors installed for this request. The MTP
+    # handoff accepts a processor row only when every live object is identical
+    # to this tuple; grammar, tool, reasoning, and arbitrary custom processors
+    # therefore fail closed instead of entering speculative execution without
+    # a rollback contract. Populated by Scheduler at batch admission.
+    _mtp_safe_logits_processors: tuple[Any, ...] = field(
+        default_factory=tuple, init=False, repr=False
+    )
 
     # PFlash prompt compression state. When pflash_metadata["compressed"]
     # is True, prompt_token_ids is the compressed list and

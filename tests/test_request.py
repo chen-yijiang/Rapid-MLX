@@ -54,6 +54,12 @@ class TestRequestStatus:
             RequestStatus.get_finish_reason(RequestStatus.FINISHED_ABORTED) == "abort"
         )
 
+    def test_get_finish_reason_cancelled(self):
+        assert (
+            RequestStatus.get_finish_reason(RequestStatus.FINISHED_CANCELLED)
+            == "cancelled"
+        )
+
     def test_get_finish_reason_waiting(self):
         assert RequestStatus.get_finish_reason(RequestStatus.WAITING) is None
 
@@ -119,6 +125,7 @@ class TestRequest:
         assert req.num_computed_tokens == 0
         assert req.output_token_ids == []
         assert req.output_text == ""
+        assert req._mtp_safe_logits_processors == ()
 
     def test_arrival_time_set(self):
         before = time.time()

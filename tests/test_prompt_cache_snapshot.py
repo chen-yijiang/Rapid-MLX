@@ -12,10 +12,14 @@ These tests exercise that scheduler-level glue without needing a real
 mlx-lm runtime.
 """
 
+import pytest
+
+pytest.importorskip("mlx")
+pytestmark = pytest.mark.requires_mlx
+
+
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-
-import pytest
 
 from vllm_mlx.request import Request, SamplingParams
 from vllm_mlx.scheduler import Scheduler, SchedulerConfig
@@ -57,6 +61,40 @@ class TestPromptCacheSnapshot:
             SchedulerConfig(enable_prefix_cache=False),
         )
         assert scheduler._prompt_cache_save_cb is None
+
+    @pytest.mark.parametrize("invalid_boundary", [4, 9])
+    def test_out_of_range_boundary_arms_internal_n_minus_one(self, invalid_boundary):
+        scheduler = _make_scheduler_with_cache()
+        scheduler.config.hybrid_cache_entries = 8
+        scheduler.config.non_trimmable_exact_prefix_reuse = True
+        request = Request(
+            request_id="req-invalid-boundary",
+            prompt="ignored",
+            prompt_token_ids=[10, 20, 30, 40],
+            sampling_params=SamplingParams(max_tokens=4),
+        )
+        request.prefix_boundary = invalid_boundary
+
+        boundary = scheduler._resolve_snapshot_boundary(request)
+
+        assert boundary == 3
+        assert request._cache_snapshot_boundary == 3
+        assert request._cache_snapshot_is_internal is True
+
+    def test_valid_semantic_boundary_is_preserved(self):
+        scheduler = _make_scheduler_with_cache()
+        scheduler.config.hybrid_cache_entries = 8
+        scheduler.config.non_trimmable_exact_prefix_reuse = True
+        request = Request(
+            request_id="req-valid-boundary",
+            prompt="ignored",
+            prompt_token_ids=[10, 20, 30, 40],
+            sampling_params=SamplingParams(max_tokens=4),
+        )
+        request.prefix_boundary = 2
+
+        assert scheduler._resolve_snapshot_boundary(request) == 2
+        assert not hasattr(request, "_cache_snapshot_is_internal")
 
     def test_snapshot_stores_promoted_prompt_only(self):
         scheduler = _make_scheduler_with_cache()
@@ -642,6 +680,78 @@ class TestScheduleWaitingInsertDispatch:
     exercise the dispatch contract by stubbing the BatchGenerator and
     invoking the same boundary-split branch.
     """
+
+    def test_real_schedule_uses_n_minus_one_for_impossible_boundary(self):
+        """An impossible semantic boundary must not suppress safe exact reuse."""
+        scheduler = _make_scheduler_with_cache()
+        scheduler.config.hybrid_cache_entries = 8
+        scheduler.config.non_trimmable_exact_prefix_reuse = True
+        request = Request(
+            request_id="req-real-dispatch",
+            prompt="ignored",
+            prompt_token_ids=[10, 20, 30, 40],
+            sampling_params=SamplingParams(max_tokens=4),
+        )
+        request.prefix_boundary = 99
+        scheduler.waiting.append(request)
+
+        batch_generator = MagicMock()
+        batch_generator.insert_segments.return_value = [101]
+        scheduler.batch_generator = batch_generator
+        scheduler._ensure_batch_generator = MagicMock(return_value=True)
+        scheduler._get_request_sampler = MagicMock(return_value=MagicMock())
+        scheduler._register_uid_processors = MagicMock()
+
+        scheduled = scheduler._schedule_waiting()
+
+        assert scheduled == [request]
+        assert request._cache_snapshot_boundary == 3
+        segments = batch_generator.insert_segments.call_args.args[0]
+        assert segments == [[[10, 20, 30], [40]]]
+        batch_generator.insert.assert_not_called()
+
+    def test_real_schedule_registers_standard_penalties_for_mtp_handoff(self):
+        """Admission keeps one exact penalty list for mlx-lm and MTP."""
+        scheduler = _make_scheduler_with_cache()
+        scheduler.config.hybrid_cache_entries = 8
+        scheduler.config.non_trimmable_exact_prefix_reuse = True
+        request = Request(
+            request_id="req-penalty-admission",
+            prompt="ignored",
+            prompt_token_ids=[10, 20, 30, 40],
+            sampling_params=SamplingParams(
+                max_tokens=4,
+                repetition_penalty=1.1,
+                presence_penalty=0.2,
+                frequency_penalty=0.3,
+            ),
+        )
+        request.prefix_boundary = 99
+        scheduler.waiting.append(request)
+
+        batch_generator = MagicMock()
+        batch_generator.insert_segments.return_value = [102]
+        scheduler.batch_generator = batch_generator
+        scheduler._ensure_batch_generator = MagicMock(return_value=True)
+        scheduler._get_request_sampler = MagicMock(return_value=MagicMock())
+        scheduler._register_uid_processors = MagicMock()
+
+        assert scheduler._schedule_waiting() == [request]
+
+        admitted = batch_generator.insert_segments.call_args.kwargs[
+            "logits_processors"
+        ][0]
+        assert admitted
+        assert tuple(admitted) == request._mtp_safe_logits_processors
+        scheduler._register_uid_processors.assert_called_once()
+        registered = scheduler._register_uid_processors.call_args.args[2]
+        assert registered == admitted
+        assert all(
+            actual is safe
+            for actual, safe in zip(
+                registered, request._mtp_safe_logits_processors, strict=True
+            )
+        )
 
     def _build_dispatch_args(
         self,

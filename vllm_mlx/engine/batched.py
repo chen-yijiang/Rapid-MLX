@@ -35,6 +35,8 @@ from ..output_router import Channel, OutputRouter
 from ..utils.chat_template import apply_chat_template as shared_apply_chat_template
 from .base import BaseEngine, GenerationOutput
 
+ADMISSION_ORPHAN_GRACE_SECONDS = 2.0
+
 logger = logging.getLogger(__name__)
 
 # Tokenization can change across a message boundary once the following turn is
@@ -925,6 +927,7 @@ class BatchedEngine(BaseEngine):
         self._admission_reservations = 0
         self._admission_tokens: set[str] = set()
         self._admission_tasks: dict[str, asyncio.Task] = {}
+        self._admission_owner_done_at: dict[str, float] = {}
         self._lifecycle_aborted_tasks: weakref.WeakSet[asyncio.Task] = weakref.WeakSet()
         self._generation_paused = False
         self._generation_pause_mode: str | None = None
@@ -1021,6 +1024,7 @@ class BatchedEngine(BaseEngine):
                 cap = getattr(scheduler.config, "max_concurrent_requests", None)
 
         with self._admission_lock:
+            self._reconcile_orphaned_reservations_locked()
             if getattr(self, "_generation_paused", False):
                 raise BackpressureError(
                     "generation is paused for a model lifecycle operation"
@@ -1054,6 +1058,11 @@ class BatchedEngine(BaseEngine):
                     tasks = {}
                     self._admission_tasks = tasks
                 tasks[token] = owner
+
+                def on_owner_done(_task: asyncio.Task) -> None:
+                    self._mark_owner_done(token, owner)
+
+                owner.add_done_callback(on_owner_done)
             context = _admission_token_context.get()
             stack = context[1] if context is not None and context[0] == id(self) else ()
             _admission_token_context.set((id(self), (*stack, token)))
@@ -1098,6 +1107,7 @@ class BatchedEngine(BaseEngine):
             self._admission_reservations -= 1
         if consumed_token is not None:
             getattr(self, "_admission_tasks", {}).pop(consumed_token, None)
+            getattr(self, "_admission_owner_done_at", {}).pop(consumed_token, None)
         if clear_context and token is not None and token in context_stack:
             remaining = tuple(value for value in context_stack if value != token)
             _admission_token_context.set((id(self), remaining) if remaining else None)
@@ -1132,6 +1142,31 @@ class BatchedEngine(BaseEngine):
         with self._admission_lock:
             if token in getattr(self, "_admission_tokens", set()):
                 self._admission_tasks[token] = task
+                getattr(self, "_admission_owner_done_at", {}).pop(token, None)
+
+    def _mark_owner_done(self, token: str, owner: asyncio.Task) -> None:
+        """Record when an unbound route-task reservation lost its owner."""
+
+        with self._admission_lock:
+            if getattr(self, "_admission_tasks", {}).get(token) is owner:
+                done_at = getattr(self, "_admission_owner_done_at", None)
+                if done_at is None:
+                    done_at = {}
+                    self._admission_owner_done_at = done_at
+                done_at[token] = time.monotonic()
+
+    def _reconcile_orphaned_reservations_locked(self) -> None:
+        """Release route reservations orphaned after the ownership handoff."""
+
+        now = time.monotonic()
+        done_at = getattr(self, "_admission_owner_done_at", {})
+        for token in list(getattr(self, "_admission_tokens", set())):
+            orphaned_since = done_at.get(token)
+            if (
+                orphaned_since is not None
+                and now - orphaned_since >= ADMISSION_ORPHAN_GRACE_SECONDS
+            ):
+                self._consume_admission_token_locked(token, ())
 
     def consume_lifecycle_task_abort(self, task: asyncio.Task) -> bool:
         """Return whether ``task`` was cancelled by lifecycle replacement."""
@@ -1212,6 +1247,7 @@ class BatchedEngine(BaseEngine):
         scheduler = self._lifecycle_scheduler()
         admitted_tasks: tuple[asyncio.Task, ...] = ()
         with self._admission_lock:
+            self._reconcile_orphaned_reservations_locked()
             self._generation_paused = True
             self._generation_pause_mode = mode
             admitted_tokens = set(getattr(self, "_admission_tokens", set()))
@@ -1945,6 +1981,7 @@ class BatchedEngine(BaseEngine):
         tools: list[dict] | None = None,
         enable_thinking: bool | None = None,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: dict | None = None,
     ) -> str:
         """Render the chat prompt for ``messages`` + ``tools`` without starting
         generation.
@@ -1966,6 +2003,7 @@ class BatchedEngine(BaseEngine):
             tools=template_tools,
             enable_thinking=enable_thinking,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
         )
         prepared, _ = self._prepare_harmony_no_thinking_prompt(
             prompt,
@@ -1982,6 +2020,7 @@ class BatchedEngine(BaseEngine):
         num_images: int = 0,
         enable_thinking: bool | None = None,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: dict | None = None,
     ) -> str:
         """Apply chat template to messages.
 
@@ -2039,6 +2078,7 @@ class BatchedEngine(BaseEngine):
             enable_thinking=enable_thinking,
             model_name=self._model_name,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
         )
 
     @staticmethod
@@ -2667,6 +2707,7 @@ class BatchedEngine(BaseEngine):
 
         # Extract enable_thinking before passing kwargs downstream
         enable_thinking = kwargs.pop("enable_thinking", None)
+        chat_template_kwargs = kwargs.pop("chat_template_kwargs", None)
         # PFlash routing hints (#287). ``requires_prompt_integrity`` is
         # set by the route layer for response_format / structured-output
         # requests — those are hard-protected (no opt-out flag exists).
@@ -2690,6 +2731,7 @@ class BatchedEngine(BaseEngine):
             template_tools,
             num_images=len(all_images),
             enable_thinking=enable_thinking,
+            chat_template_kwargs=chat_template_kwargs,
         )
         prompt, output_router_seed = self._prepare_harmony_no_thinking_prompt(
             prompt,
@@ -2739,12 +2781,21 @@ class BatchedEngine(BaseEngine):
         # active where it's needed and inert where it broke things.
         if self._needs_prefix_boundary_snapshot():
             if transient_message_start is None:
-                prefix_boundary = self._compute_prefix_boundary(messages, tools)
+                prefix_boundary = self._compute_prefix_boundary(
+                    messages,
+                    tools,
+                    generation_prompt=prompt,
+                    enable_thinking=enable_thinking,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
             else:
                 prefix_boundary = self._compute_prefix_boundary(
                     messages,
                     tools,
                     transient_message_start=transient_message_start,
+                    generation_prompt=prompt,
+                    enable_thinking=enable_thinking,
+                    chat_template_kwargs=chat_template_kwargs,
                 )
             if prefix_boundary > 0:
                 kwargs["prefix_boundary"] = prefix_boundary
@@ -2818,6 +2869,9 @@ class BatchedEngine(BaseEngine):
         tools: list[dict] | None = None,
         *,
         transient_message_start: int | None = None,
+        generation_prompt: str | list[int] | None = None,
+        enable_thinking: bool | None = None,
+        chat_template_kwargs: dict | None = None,
     ) -> int:
         """Compute the latest prefix that is stable across the next turn.
 
@@ -2842,16 +2896,28 @@ class BatchedEngine(BaseEngine):
         try:
             template_tools = convert_tools_for_template(tools) if tools else None
 
-            # Tokenize the real generation prompt and the same conversation
-            # before its transient assistant-generation marker is appended.
-            real_prompt = self._apply_chat_template(
-                messages, template_tools, add_generation_prompt=True
-            )
+            # The submitted generation prompt is the source of truth. Re-
+            # rendering it here can change tokenization when request-scoped
+            # template options (for example ``enable_thinking=False``) are in
+            # effect, producing a boundary beyond the actual scheduler prompt.
+            real_prompt = generation_prompt
+            if real_prompt is None:
+                real_prompt = self._apply_chat_template(
+                    messages,
+                    template_tools,
+                    add_generation_prompt=True,
+                    enable_thinking=enable_thinking,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
             tokenizer = self.tokenizer
             if hasattr(tokenizer, "tokenizer"):
                 tokenizer = tokenizer.tokenizer
 
-            real_tokens = tokenizer.encode(real_prompt)
+            real_tokens = (
+                list(real_prompt)
+                if isinstance(real_prompt, list)
+                else tokenizer.encode(real_prompt)
+            )
 
             if transient_message_start is not None:
                 future_prompt = self._apply_chat_template(
@@ -2864,6 +2930,8 @@ class BatchedEngine(BaseEngine):
                     ],
                     template_tools,
                     add_generation_prompt=False,
+                    enable_thinking=enable_thinking,
+                    chat_template_kwargs=chat_template_kwargs,
                 )
                 future_tokens = tokenizer.encode(future_prompt)
                 transient_lcp = 0
@@ -2874,7 +2942,11 @@ class BatchedEngine(BaseEngine):
                 return max(0, transient_lcp - _PREFIX_BOUNDARY_REPLAY_TOKENS)
 
             stable_prompt = self._apply_chat_template(
-                messages, template_tools, add_generation_prompt=False
+                messages,
+                template_tools,
+                add_generation_prompt=False,
+                enable_thinking=enable_thinking,
+                chat_template_kwargs=chat_template_kwargs,
             )
             next_turn_prompt = self._apply_chat_template(
                 [
@@ -2886,6 +2958,8 @@ class BatchedEngine(BaseEngine):
                 ],
                 template_tools,
                 add_generation_prompt=False,
+                enable_thinking=enable_thinking,
+                chat_template_kwargs=chat_template_kwargs,
             )
 
             stable_tokens = tokenizer.encode(stable_prompt)
@@ -2917,7 +2991,12 @@ class BatchedEngine(BaseEngine):
                 **messages[last_user_idx],
                 "content": "XXXXXXXXXX",
             }
-            dummy_prompt = self._apply_chat_template(dummy_messages, template_tools)
+            dummy_prompt = self._apply_chat_template(
+                dummy_messages,
+                template_tools,
+                enable_thinking=enable_thinking,
+                chat_template_kwargs=chat_template_kwargs,
+            )
 
             dummy_tokens = tokenizer.encode(dummy_prompt)
 
@@ -3413,6 +3492,7 @@ class BatchedEngine(BaseEngine):
 
         # Extract enable_thinking before passing kwargs downstream
         enable_thinking = kwargs.pop("enable_thinking", None)
+        chat_template_kwargs = kwargs.pop("chat_template_kwargs", None)
         # PFlash routing hints (#287) — parity with chat(). Tools are
         # NOT auto-folded into ``requires_prompt_integrity``; the
         # ``has_tools`` flag plus ``skip_when_tools`` is the user-
@@ -3429,6 +3509,7 @@ class BatchedEngine(BaseEngine):
             template_tools,
             num_images=len(all_images),
             enable_thinking=enable_thinking,
+            chat_template_kwargs=chat_template_kwargs,
         )
         prompt, output_router_seed = self._prepare_harmony_no_thinking_prompt(
             prompt,
@@ -3454,12 +3535,21 @@ class BatchedEngine(BaseEngine):
         # silently regress one path while keeping the other green.
         if self._needs_prefix_boundary_snapshot():
             if transient_message_start is None:
-                prefix_boundary = self._compute_prefix_boundary(messages, tools)
+                prefix_boundary = self._compute_prefix_boundary(
+                    messages,
+                    tools,
+                    generation_prompt=prompt,
+                    enable_thinking=enable_thinking,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
             else:
                 prefix_boundary = self._compute_prefix_boundary(
                     messages,
                     tools,
                     transient_message_start=transient_message_start,
+                    generation_prompt=prompt,
+                    enable_thinking=enable_thinking,
+                    chat_template_kwargs=chat_template_kwargs,
                 )
             if prefix_boundary > 0:
                 kwargs["prefix_boundary"] = prefix_boundary
@@ -3744,6 +3834,7 @@ class BatchedEngine(BaseEngine):
         # into ``shared_apply_chat_template`` identically to the
         # non-guided ``chat()`` path.
         enable_thinking = kwargs.pop("enable_thinking", None)
+        chat_template_kwargs = kwargs.pop("chat_template_kwargs", None)
         # Build prompt from messages. Route through the central
         # ``shared_apply_chat_template`` wrapper so the role-marker
         # sanitisation runs on user/tool message content here too —
@@ -3757,6 +3848,7 @@ class BatchedEngine(BaseEngine):
             tools=None,
             enable_thinking=enable_thinking,
             model_name=getattr(self, "_model_name", "") or "",
+            chat_template_kwargs=chat_template_kwargs,
         )
 
         # Run guided generation on the mlx-step worker. The model was

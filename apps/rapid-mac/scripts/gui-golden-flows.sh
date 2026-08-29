@@ -6,6 +6,8 @@
 # fake sidecar keeps the suite deterministic and prevents model-related OOMs.
 set -euo pipefail
 
+ORIGINAL_ARGS=("$@")
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_SOURCE="${RAPID_GUI_SOURCE_APP:-$ROOT/build/Rapid-MLX Desktop.app}"
 OUT_ROOT="${RAPID_GUI_GOLDEN_OUT:-/tmp/rapid-gui-golden-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -108,6 +110,15 @@ if [[ -n "${GUI_FLOWS:-}" && "$FLOW" != all ]]; then
     fi
 fi
 
+# The helper-contract tests source this file to exercise the shell guards. Host
+# admission belongs to the executable entry point, not to library-style use.
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${RAPID_HOST_PRECHECK_HELD:-0}" != "1" && "${CI:-}" != "true" ]]; then
+    export RAPID_HOST_PRECHECK_HELD=1
+    # macOS Bash 3.2 treats an empty array expansion as unbound under `set -u`.
+    exec "$ROOT/scripts/dogfood-host-precheck.sh" -- "$0" \
+        ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
+fi
+
 log() { printf '[gui-golden] %s\n' "$*"; }
 die() { printf '[gui-golden] FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -143,14 +154,159 @@ require_observed_phase() {
     [[ "$observed" == 1 ]] || die "required $phase phase was not observed"
 }
 
-# When sourced, expose only the executable contract helpers above. Return
-# before cleanup traps, app launch, filesystem mutation, or tool preflight.
-# Direct execution cannot be bypassed with an environment variable.
-if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
-    return 0
-fi
+recorded_process_has_argv_pair() {
+    local fake_pid="$1" first="$2" second="$3" command
+    command="$(ps -ww -p "$fake_pid" -o command= 2>/dev/null || true)"
+    [[ -n "$command" ]] || return 1
 
-pb() { peekaboo "$@" --bridge-socket "$BRIDGE"; }
+    # `ps` has no structured argv output on macOS. Split its untruncated
+    # rendering with glob expansion disabled and require two adjacent exact
+    # tokens rather than a substring.
+    (
+        set -f
+        local previous="" token
+        for token in $command; do
+            if [[ "$previous" == "$first" && "$token" == "$second" ]]; then
+                return 0
+            fi
+            previous="$token"
+        done
+        return 1
+    )
+}
+
+recorded_fake_sidecar_is_live() {
+    recorded_process_has_argv_pair "$1" serve "$2"
+}
+
+stop_recorded_fake_sidecar() {
+    local fake_pid="$1" fake_alias="$2"
+    recorded_fake_sidecar_is_live "$fake_pid" "$fake_alias" || return 0
+
+    # Follow the server lifecycle used by the engine: request a graceful stop,
+    # wait for it to finish releasing its resources, then force only the exact
+    # recorded process if it ignores the deadline. Merely sending SIGTERM and
+    # immediately deleting the persona races Python's final cache writes.
+    kill "$fake_pid" 2>/dev/null || true
+    local attempt
+    for attempt in {1..40}; do
+        recorded_fake_sidecar_is_live "$fake_pid" "$fake_alias" || return 0
+        sleep 0.05
+    done
+
+    # Re-check the command immediately before SIGKILL. A recycled pid or a
+    # process whose argv no longer names the recorded alias is not ours.
+    recorded_fake_sidecar_is_live "$fake_pid" "$fake_alias" || return 0
+    kill -KILL "$fake_pid" 2>/dev/null || true
+    for attempt in {1..40}; do
+        recorded_fake_sidecar_is_live "$fake_pid" "$fake_alias" || return 0
+        sleep 0.05
+    done
+
+    printf '[gui-golden] owned fake sidecar pid=%s alias=%s did not exit\n' \
+        "$fake_pid" "$fake_alias" >&2
+    return 1
+}
+
+cleanup_fake_sidecars() {
+    local status=0 fake_pid fake_alias records
+    if [[ -n "$OUT" && -f "$OUT/fake-events.jsonl" ]]; then
+        if ! records="$(jq -r 'select(.event == "server_started")
+                                | "\(.pid)\t\(.alias // "-")"' \
+                             "$OUT/fake-events.jsonl")"; then
+            printf '[gui-golden] could not parse fake sidecar ownership log: %s\n' \
+                "$OUT/fake-events.jsonl" >&2
+            return 1
+        fi
+        # Long-lived serves that intentionally detach from the app's process
+        # group are stopped through their exact PID+alias argv identity.
+        while IFS=$'\t' read -r fake_pid fake_alias; do
+            [[ "$fake_pid" =~ ^[0-9]+$ ]] || continue
+            [[ "$fake_alias" != "-" ]] || { status=1; continue; }
+            stop_recorded_fake_sidecar "$fake_pid" "$fake_alias" || status=1
+        done < <(printf '%s\n' "$records" | sort -u)
+    fi
+    return "$status"
+}
+
+process_is_running() {
+    local state
+    state="$(ps -p "$1" -o stat= 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ -n "$state" && "$state" != Z* ]]
+}
+
+process_group_has_live_members() {
+    local expected_group="$1" group state
+    while read -r group state; do
+        if [[ "$group" == "$expected_group" && "$state" != Z* ]]; then
+            return 0
+        fi
+    done < <(ps -axo pgid=,stat= 2>/dev/null || true)
+    return 1
+}
+
+stop_app() {
+    [[ -n "$APP_PID" ]] || return 0
+    local app_pid="$APP_PID" app_group="" attempt
+    if ! process_is_running "$app_pid"; then
+        wait "$app_pid" 2>/dev/null || true
+        APP_PID=""
+        return 0
+    fi
+
+    app_group="$(ps -p "$app_pid" -o pgid= 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$app_group" != "$app_pid" ]]; then
+        # Never signal a shared or unknown process group. The launcher below
+        # establishes a session whose pgid equals the app pid; a mismatch is a
+        # broken ownership boundary, so stop only the known pid and preserve
+        # the persona for diagnosis.
+        kill "$app_pid" 2>/dev/null || true
+        for attempt in {1..20}; do
+            process_is_running "$app_pid" || break
+            sleep 0.1
+        done
+        kill -KILL "$app_pid" 2>/dev/null || true
+        wait "$app_pid" 2>/dev/null || true
+        printf '[gui-golden] app pid=%s did not own its process group (pgid=%s)\n' \
+            "$app_pid" "${app_group:-unknown}" >&2
+        return 1
+    fi
+
+    # The isolated app is the leader of a harness-owned session. Signal the
+    # whole group so catalogue probes that have not written lifecycle events
+    # yet cannot outlive their profile and recreate Python cache files during
+    # deletion.
+    kill -TERM -- "-$app_group" 2>/dev/null || true
+    for attempt in {1..20}; do
+        process_is_running "$app_pid" || break
+        sleep 0.1
+    done
+    if process_is_running "$app_pid"; then
+        kill -KILL -- "-$app_group" 2>/dev/null || true
+    fi
+    wait "$app_pid" 2>/dev/null || true
+
+    # Reaping the leader does not prove its descendants are gone. Give the
+    # remaining group a second bounded drain, then force only that owned group.
+    for attempt in {1..20}; do
+        process_group_has_live_members "$app_group" || break
+        sleep 0.1
+    done
+    if process_group_has_live_members "$app_group"; then
+        kill -KILL -- "-$app_group" 2>/dev/null || true
+        for attempt in {1..20}; do
+            process_group_has_live_members "$app_group" || break
+            sleep 0.1
+        done
+    fi
+    if process_group_has_live_members "$app_group"; then
+        printf '[gui-golden] owned app process group %s did not exit\n' \
+            "$app_group" >&2
+        return 1
+    fi
+    APP_PID=""
+}
+
 write_result() {
     local status="$1" exit_code="$2" finished_epoch duration_seconds
     finished_epoch="$(date +%s)"
@@ -163,6 +319,37 @@ write_result() {
           duration_seconds: $duration_seconds, artifact_path: $artifact_path,
           exit_code: $exit_code}' > "$OUT_ROOT/result.json"
 }
+
+finish() {
+    local status=$? cleanup_failed=0
+    set +e
+    cleanup_persona || cleanup_failed=1
+    cleanup_operator_server || cleanup_failed=1
+    cleanup_telemetry_sink || cleanup_failed=1
+    if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
+        status=1
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        mkdir -p "$OUT_ROOT" 2>/dev/null || true
+        if [[ -d "$OUT_ROOT" ]]; then
+            # Cleanup failure overrides an earlier PASS result. A retained
+            # process/profile is a failed journey, never green evidence.
+            write_result fail "$status" 2>/dev/null || true
+            RESULT_WRITTEN=1
+        fi
+    fi
+    trap - EXIT
+    exit "$status"
+}
+
+# When sourced, expose only the executable contract helpers above. Return
+# before cleanup traps, app launch, filesystem mutation, or tool preflight.
+# Direct execution cannot be bypassed with an environment variable.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+
+pb() { peekaboo "$@" --bridge-socket "$BRIDGE"; }
 flow_requires_screen_recording() {
     case "$FLOW" in
         all) return 0 ;;
@@ -206,58 +393,64 @@ pb_click_coords() {
 }
 
 cleanup_persona() {
-    if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
-        kill "$APP_PID" 2>/dev/null || true
-        wait "$APP_PID" 2>/dev/null || true
-    fi
-    APP_PID=""
-    cleanup_fake_sidecars
+    local app_stopped=1 sidecars_stopped=1
+    stop_app || app_stopped=0
+    cleanup_fake_sidecars || sidecars_stopped=0
     if [[ "$KEEP" == 0 && -n "$BUNDLE_ID" ]]; then
         defaults delete "$BUNDLE_ID" >/dev/null 2>&1 || true
     fi
+    if [[ "$app_stopped" == 0 || "$sidecars_stopped" == 0 ]]; then
+        printf '[gui-golden] preserving persona because an owned process is still live: %s\n' \
+            "$PERSONA" >&2
+        return 1
+    fi
     if [[ "$KEEP" == 0 && -n "$PERSONA" && -d "$PERSONA" ]]; then
-        rm -rf "$PERSONA"
+        if ! rm -rf "$PERSONA"; then
+            # Keep the surviving tree available for ownership diagnosis and
+            # prevent the EXIT trap from turning a failed cleanup into a
+            # second, unobserved delete attempt.
+            KEEP=1
+            printf '[gui-golden] persona cleanup failed; preserving evidence: %s\n' \
+                "$PERSONA" >&2
+            return 1
+        fi
     fi
     PERSONA=""
     BUNDLE_ID=""
     PERSONA_ENV=()
 }
 
-cleanup_fake_sidecars() {
-    if [[ -n "$OUT" && -f "$OUT/fake-events.jsonl" ]]; then
-        # Pair each pid with the alias it was started for, and require the
-        # live command to still name THAT alias. A bare `serve fake-alias`
-        # match missed `serve fake-image-alias` entirely and left the image
-        # flow's sidecar listening after the run — an orphan that then
-        # contaminates the next local run. Matching the recorded alias keeps
-        # the recycled-pid guard the substring test was there for, without
-        # having to remember to extend it for every new fixture alias.
-        while IFS=$'\t' read -r fake_pid fake_alias; do
-            [[ "$fake_pid" =~ ^[0-9]+$ ]] || continue
-            [[ -n "$fake_alias" && "$fake_alias" != "null" ]] || continue
-            local command
-            command="$(ps -p "$fake_pid" -o command= 2>/dev/null || true)"
-            if [[ "$command" == *"serve $fake_alias"* ]]; then
-                kill "$fake_pid" 2>/dev/null || true
-            fi
-        done < <(jq -r 'select(.event == "server_started")
-                        | "\(.pid)\t\(.alias // "")"' \
-                     "$OUT/fake-events.jsonl" 2>/dev/null | sort -u)
+stop_tracked_child() {
+    local label="$1" child_pid="$2" attempt
+    if ! process_is_running "$child_pid"; then
+        wait "$child_pid" 2>/dev/null || true
+        return 0
+    fi
+    kill "$child_pid" 2>/dev/null || true
+    for attempt in {1..20}; do
+        process_is_running "$child_pid" || break
+        sleep 0.1
+    done
+    if process_is_running "$child_pid"; then
+        kill -KILL "$child_pid" 2>/dev/null || true
+    fi
+    wait "$child_pid" 2>/dev/null || true
+    if process_is_running "$child_pid"; then
+        printf '[gui-golden] owned %s pid=%s did not exit\n' \
+            "$label" "$child_pid" >&2
+        return 1
     fi
 }
 
 cleanup_operator_server() {
-    if [[ -n "$OPERATOR_SERVER_PID" ]] && kill -0 "$OPERATOR_SERVER_PID" 2>/dev/null; then
-        kill "$OPERATOR_SERVER_PID" 2>/dev/null || true
-        wait "$OPERATOR_SERVER_PID" 2>/dev/null || true
-    fi
+    [[ -n "$OPERATOR_SERVER_PID" ]] || return 0
+    stop_tracked_child operator-server "$OPERATOR_SERVER_PID" || return 1
     OPERATOR_SERVER_PID=""
 }
 
 cleanup_telemetry_sink() {
-    if [[ -n "$TELEMETRY_SINK_PID" ]] && kill -0 "$TELEMETRY_SINK_PID" 2>/dev/null; then
-        kill "$TELEMETRY_SINK_PID" 2>/dev/null || true
-        wait "$TELEMETRY_SINK_PID" 2>/dev/null || true
+    if [[ -n "$TELEMETRY_SINK_PID" ]]; then
+        stop_tracked_child telemetry-sink "$TELEMETRY_SINK_PID" || return 1
     fi
     TELEMETRY_SINK_PID=""
     TELEMETRY_SINK_PORT=""
@@ -470,19 +663,6 @@ assert_share_activation_requests() {
         || die "Share did not produce exactly one valid $expected_kind Desktop activation"
 }
 
-finish() {
-    local status=$?
-    set +e
-    cleanup_persona
-    cleanup_operator_server
-    cleanup_telemetry_sink
-    if [[ "$status" -ne 0 && "$RESULT_WRITTEN" == 0 ]]; then
-        mkdir -p "$OUT_ROOT" 2>/dev/null || true
-        if [[ -d "$OUT_ROOT" ]]; then
-            write_result fail "$status" 2>/dev/null || true
-        fi
-    fi
-}
 trap finish EXIT
 # Signal handlers only select the conventional exit code. The EXIT handler is
 # the single owner of cleanup and final evidence, avoiding double-cleanup and
@@ -536,6 +716,42 @@ require_tools() {
     fi
 }
 
+launch_persona_app() {
+    local log_mode="$1"
+    shift
+    if [[ "$log_mode" == "append" ]]; then
+        env RAPID_BIN="$ROOT/scripts/fake-rapid-mlx.sh" \
+            DOGFOOD_WORKING_SET_GB=0.1 \
+            FAKE_EVENT_LOG="$OUT/fake-events.jsonl" \
+            "${PERSONA_ENV[@]+"${PERSONA_ENV[@]}"}" \
+            /usr/bin/python3 -c \
+            'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+            "$PERSONA/launch.sh" "$@" >> "$OUT/app.log" 2>&1 &
+    else
+        env RAPID_BIN="$ROOT/scripts/fake-rapid-mlx.sh" \
+            DOGFOOD_WORKING_SET_GB=0.1 \
+            FAKE_EVENT_LOG="$OUT/fake-events.jsonl" \
+            "${PERSONA_ENV[@]+"${PERSONA_ENV[@]}"}" \
+            /usr/bin/python3 -c \
+            'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+            "$PERSONA/launch.sh" "$@" > "$OUT/app.log" 2>&1 &
+    fi
+    APP_PID=$!
+
+    local app_group="" attempt
+    for attempt in {1..40}; do
+        app_group="$(ps -p "$APP_PID" -o pgid= 2>/dev/null | tr -d '[:space:]')"
+        [[ "$app_group" == "$APP_PID" ]] && return 0
+        kill -0 "$APP_PID" 2>/dev/null || break
+        sleep 0.05
+    done
+    kill "$APP_PID" 2>/dev/null || true
+    wait "$APP_PID" 2>/dev/null || true
+    printf '[gui-golden] isolated app failed to establish its owned process group\n' >&2
+    APP_PID=""
+    return 1
+}
+
 start_persona() {
     local name="$1"
     shift
@@ -563,22 +779,25 @@ start_persona() {
         --arg event_log "$OUT/fake-events.jsonl" \
         --arg pull_state "$OUT/pulled-models" \
         '{FAKE_EVENT_LOG: $event_log, FAKE_PULL_STATE: $pull_state}' > "$config"
-    local assignment key value updated
+    local assignment key value updated app_language=""
     # macOS ships Bash 3.2, where expanding a declared-but-empty array under
     # `set -u` raises "unbound variable". The `+` form expands to nothing
     # when the array has no elements and preserves argv boundaries otherwise.
     for assignment in "${PERSONA_ENV[@]+"${PERSONA_ENV[@]}"}"; do
         key="${assignment%%=*}"
         value="${assignment#*=}"
+        if [[ "$key" == "RAPID_GUI_APP_LANGUAGE" ]]; then
+            app_language="$value"
+        fi
         updated="$config.next"
         jq --arg key "$key" --arg value "$value" '.[$key] = $value' "$config" > "$updated"
         mv "$updated" "$config"
     done
-    env RAPID_BIN="$ROOT/scripts/fake-rapid-mlx.sh" \
-        FAKE_EVENT_LOG="$OUT/fake-events.jsonl" \
-        "${PERSONA_ENV[@]+"${PERSONA_ENV[@]}"}" \
-        "$PERSONA/launch.sh" > "$OUT/app.log" 2>&1 &
-    APP_PID=$!
+    if [[ -n "$app_language" ]]; then
+        launch_persona_app truncate -AppleLanguages "($app_language)"
+    else
+        launch_persona_app truncate
+    fi
     wait_for_window
 }
 
@@ -589,25 +808,8 @@ relaunch_persona() {
     # #1618 the app's unsafe global port sweep hid this ownership leak by
     # killing the old fake (and potentially an operator's real server too).
     cleanup_fake_sidecars
-    env RAPID_BIN="$ROOT/scripts/fake-rapid-mlx.sh" \
-        FAKE_EVENT_LOG="$OUT/fake-events.jsonl" \
-        "${PERSONA_ENV[@]+"${PERSONA_ENV[@]}"}" \
-        "$PERSONA/launch.sh" >> "$OUT/app.log" 2>&1 &
-    APP_PID=$!
+    launch_persona_app append
     wait_for_window
-}
-
-stop_app() {
-    if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
-        kill "$APP_PID" 2>/dev/null || true
-        for _ in {1..20}; do
-            kill -0 "$APP_PID" 2>/dev/null || break
-            sleep 0.1
-        done
-        kill -9 "$APP_PID" 2>/dev/null || true
-        wait "$APP_PID" 2>/dev/null || true
-    fi
-    APP_PID=""
 }
 
 refresh_main_window_id() {
@@ -3847,6 +4049,42 @@ PY
         || die "the document request retained historical images or omitted extracted text"
 
     cleanup_persona
+    flow_localized_photo_hint
+}
+
+flow_localized_photo_hint() {
+    start_persona localized-photo-hint \
+        RAPID_GUI_APP_LANGUAGE=zh-Hans \
+        FAKE_SERVING_LANE_REASON=vision_memory_insufficient
+    dismiss_first_run
+    start_model
+
+    local expected="此模型的视觉模式需要的内存超过这台 Mac 的容量。要添加照片，请选择另一个支持视觉的模型。"
+    local localized=0
+    for _ in {1..40}; do
+        see_main "$OUT/zh-main.json"
+        press "$OUT/zh-main.json" ChatView.AddAttachments "$OUT/zh-menu-press.json"
+        wait_identifier ChatView.Attachments.UploadPhoto "$OUT/zh-menu.json"
+        if jq -e --arg expected "$expected" '
+            .data.ui_elements[]?
+            | select(.identifier == "ChatView.Attachments.UploadPhoto"
+                     and .enabled == false
+                     and .help == $expected)
+        ' "$OUT/zh-menu.json" >/dev/null; then
+            localized=1
+            break
+        fi
+        press "$OUT/zh-menu.json" ChatView.AddAttachments "$OUT/zh-menu-close.json"
+        sleep 0.25
+    done
+    [[ "$localized" == 1 ]] \
+        || die "the disabled photo action never exposed its zh-Hans memory remedy"
+    jq -e '.data.ui_elements[]?
+           | select(.identifier == "ContentView.Settings" and .description == "设置")' \
+        "$OUT/zh-menu.json" >/dev/null \
+        || die "the release-shaped app did not load its compiled zh-Hans resources"
+
+    cleanup_persona
 }
 
 # Wait until the fake has recorded an event matching a jq predicate.
@@ -4667,6 +4905,25 @@ flow_launch_integrations() {
     press "$OUT/main.json" Sidebar.Launch "$OUT/launch.json"
     wait_tree_text "Connect your agents" "$OUT/launch.json" 40
 
+    # ``ConnectToolsView`` renders the three-entry compatibility fallback
+    # first, then replaces it with the sidecar's authoritative integration
+    # registry. The heading appears before that asynchronous load completes,
+    # so capturing immediately makes the baseline race between two valid UI
+    # states. Settle on the fake sidecar's complete 14-entry registry before
+    # asserting or recording the stopped-state structure.
+    local i count=0
+    for ((i=0; i<80; i++)); do
+        see_main "$OUT/launch.json"
+        count="$(jq '[.data.ui_elements[]?
+                      | (.identifier // "")
+                      | select(startswith("Launch.Integration.Copy."))]
+                     | unique | length' "$OUT/launch.json")"
+        [[ "$count" == 14 ]] && break
+        sleep 0.1
+    done
+    [[ "$count" == 14 ]] \
+        || die "Cold Launch did not settle on the 14-entry integration registry (got $count)"
+
     # Cold Launch is a beginner path, not a wall of live (copyable) commands.
     # The stopped state now stays a useful setup destination (#2297): the
     # endpoint shape and integration rows are shown as documentation, the
@@ -4676,8 +4933,6 @@ flow_launch_integrations() {
     # `Launch.Integration.Copy.*` button must be present but `.enabled == false`
     # until the endpoint/key actually exist (Copy on a placeholder is the
     # silent-failure defect the disabled-Copy gate exists to prevent).
-    count="$(jq '[.data.ui_elements[]? | (.identifier // "") | select(startswith("Launch.Integration.Copy."))] | unique | length' "$OUT/launch.json")"
-    [[ "$count" -gt 0 ]] || die "Cold Launch hid the integration setup rows entirely"
     enabled_count="$(jq '[.data.ui_elements[]? | select(((.identifier // "") | startswith("Launch.Integration.Copy.")) and .enabled == true)] | length' "$OUT/launch.json")"
     [[ "$enabled_count" == 0 ]] || die "Cold Launch offered $enabled_count copyable commands before the endpoint/key existed"
     jq -e '.data.ui_elements[]? | select(.identifier == "Readiness.Action")' "$OUT/launch.json" >/dev/null \
@@ -4710,7 +4965,6 @@ flow_launch_integrations() {
     press "$OUT/launch-ready.json" ConnectTools.MoreIntegrations \
         "$OUT/launch-more-press.json" \
         || die "More integrations disclosure is not pressable"
-    local i
     for ((i=0; i<80; i++)); do
         see_main "$OUT/launch-ready.json"
         ready_copies="$(jq '[.data.ui_elements[]?
@@ -5211,23 +5465,25 @@ flow_model_switch_active_request() {
     [[ "$busy" == 1 ]] || die "fake residency never reported the active stream"
 
     see_main "$OUT/busy.json"
-    # SwiftUI bridges these rows into a transient native NSMenu, outside the
-    # window-only AX tree used for evidence dumps. Exercise the standard macOS
-    # type-to-select interaction, then let the switch guard prove it resolved
-    # the requested alternate alias.
-    "$AX_DRIVER" select-menu-title "$APP_PID" ModelPickerBar.ModelMenu \
-        fake-external-alias > "$OUT/switch-requested.json" \
+    # SwiftUI creates these rows only after the native menu opens. Resolve the
+    # requested row from that fresh AX tree and press its stable identifier;
+    # the driver fails closed if opening the menu did not expose the row.
+    "$AX_DRIVER" select-menu-item "$APP_PID" ModelPickerBar.ModelMenu \
+        ModelPickerBar.Alias.fake-external-alias > "$OUT/switch-requested.json" \
         || die "alternate cached model could not be selected during an active stream"
     wait_identifier ModelSwitchGuard.Cancel "$OUT/switch-guard.json"
     jq -e '.data.ui_elements[]?
            | select(.identifier == "ModelSwitchGuard.Cancel")' \
         "$OUT/switch-guard.json" >/dev/null \
         || die "active stream did not present the native switch guard"
-    # This is a native confirmation dialog, whose cancel role maps to Escape.
-    # Hosted SwiftUI exposes the enabled Cancel button in AX but may reject
-    # AXPress for that transient element. Exercise the platform cancel action
-    # and let the state assertions below prove that it took effect.
-    "$AX_DRIVER" key "$APP_PID" escape > "$OUT/switch-cancelled.json" \
+    # Click the semantic Cancel button's bounds directly. Posting Escape can
+    # succeed at the CoreGraphics boundary while the hosted confirmation
+    # dialog ignores it, and hosted macOS can expose a native dialog button
+    # while returning kAXErrorActionUnsupported for AXPress. A bounds click is
+    # the same explicit user action and still fails closed unless the stable
+    # product-owned identifier resolves to a visible control.
+    "$AX_DRIVER" click-center "$APP_PID" ModelSwitchGuard.Cancel \
+        > "$OUT/switch-cancelled.json" \
         || die "switch guard did not honor the native Cancel action"
 
     # Cancellation occurs before /v1/models/load or process teardown. The
