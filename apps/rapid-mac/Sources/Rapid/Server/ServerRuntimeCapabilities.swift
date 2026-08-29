@@ -40,6 +40,9 @@ struct ServerRuntimeCapabilities: Equatable, Sendable {
         binary: URL,
         timeoutSeconds: TimeInterval
     ) -> ServerRuntimeCapabilities {
+        let deadline = DispatchTime.now() + .milliseconds(
+            max(1, Int(timeoutSeconds * 1000))
+        )
         let process = Process()
         process.executableURL = binary
         process.arguments = ["serve", "--help"]
@@ -58,7 +61,7 @@ struct ServerRuntimeCapabilities: Equatable, Sendable {
         // Drain help output while the process is running. Waiting for exit
         // before reading can fill the pipe and block the child indefinitely.
         let outputReader = RuntimeProbeOutputReader(output.fileHandleForReading)
-        outputReader.start()
+        outputReader.start(deadline: deadline)
 
         let finished = DispatchSemaphore(value: 0)
         let processHandle = RuntimeProbeProcess(process)
@@ -67,20 +70,20 @@ struct ServerRuntimeCapabilities: Equatable, Sendable {
             finished.signal()
         }
 
-        let timeout = DispatchTime.now() + .milliseconds(
-            max(1, Int(timeoutSeconds * 1000))
-        )
-        if finished.wait(timeout: timeout) == .timedOut {
+        if finished.wait(timeout: deadline) == .timedOut {
             process.terminate()
             if finished.wait(timeout: .now() + .milliseconds(250)) == .timedOut {
                 kill(process.processIdentifier, SIGKILL)
                 _ = finished.wait(timeout: .now() + .milliseconds(500))
             }
-            _ = outputReader.wait(timeout: .now() + .milliseconds(500))
+            _ = outputReader.wait(timeout: deadline)
             return .conservative
         }
 
-        outputReader.wait()
+        guard outputReader.wait(timeout: deadline) == .success,
+              DispatchTime.now() < deadline else {
+            return .conservative
+        }
         guard process.terminationReason == .exit,
               process.terminationStatus == 0 else {
             return .conservative
@@ -102,26 +105,24 @@ private final class RuntimeProbeProcess: @unchecked Sendable {
 
 private final class RuntimeProbeOutputReader: @unchecked Sendable {
     private let handle: FileHandle
+    private let fileDescriptor: Int32
     private let finished = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var captured = Data()
 
     init(_ handle: FileHandle) {
         self.handle = handle
+        self.fileDescriptor = handle.fileDescriptor
     }
 
-    func start() {
+    func start(deadline: DispatchTime) {
         DispatchQueue.global(qos: .utility).async { [self] in
-            let bytes = handle.readToEndSafely()
+            let bytes = readUntilClosedOrDeadline(deadline)
             lock.lock()
             captured = bytes
             lock.unlock()
             finished.signal()
         }
-    }
-
-    func wait() {
-        finished.wait()
     }
 
     func wait(timeout: DispatchTime) -> DispatchTimeoutResult {
@@ -132,5 +133,44 @@ private final class RuntimeProbeOutputReader: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return captured
+    }
+
+    private func readUntilClosedOrDeadline(_ deadline: DispatchTime) -> Data {
+        var captured = Data()
+
+        while deadline.uptimeNanoseconds > DispatchTime.now().uptimeNanoseconds {
+            let remainingNanoseconds = deadline.uptimeNanoseconds
+                - DispatchTime.now().uptimeNanoseconds
+            if remainingNanoseconds < 1_000_000 {
+                break
+            }
+
+            var fileDescriptorSet = pollfd(
+                fd: fileDescriptor,
+                events: Int16(POLLIN),
+                revents: 0
+            )
+            let pollResult = poll(
+                &fileDescriptorSet,
+                1,
+                Int32(min(
+                    remainingNanoseconds / 1_000_000,
+                    UInt64(Int32.max)
+                ))
+            )
+            if pollResult <= 0 {
+                break
+            }
+
+            var chunk = [UInt8](repeating: 0, count: 4_096)
+            let byteCount = read(fileDescriptor, &chunk, chunk.count)
+            if byteCount > 0 {
+                captured.append(contentsOf: chunk[0..<byteCount])
+            } else if byteCount == 0 || errno != EINTR {
+                break
+            }
+        }
+
+        return Data(captured)
     }
 }

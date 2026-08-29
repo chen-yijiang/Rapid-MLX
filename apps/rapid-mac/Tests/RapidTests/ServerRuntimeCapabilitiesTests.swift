@@ -85,6 +85,23 @@ struct ServerRuntimeCapabilitiesTests {
         #expect(capabilities == .conservative)
     }
 
+    @Test("probe bounds a descendant that retains the output pipe")
+    func probeBoundsRetainedOutputPipe() async throws {
+        let runtime = try makeRuntimeScript(retainedOutputPipe: true)
+        let clock = ContinuousClock()
+
+        let elapsed = await clock.measure {
+            let capabilities = await ServerRuntimeCapabilities.probe(
+                binary: runtime,
+                timeoutSeconds: 1
+            )
+
+            #expect(capabilities == .conservative)
+        }
+
+        #expect(elapsed < .seconds(1.5))
+    }
+
     @Test("probe falls back conservatively when the runtime does not run")
     func probeFailureIsConservative() async {
         let missing = URL(fileURLWithPath: "/tmp/rapid-mlx-missing-\(UUID().uuidString)")
@@ -99,7 +116,8 @@ struct ServerRuntimeCapabilitiesTests {
 
     private func makeRuntimeScript(
         helpPaddingLines: Int = 0,
-        helpExitStatus: Int = 0
+        helpExitStatus: Int = 0,
+        retainedOutputPipe: Bool = false
     ) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("rapid-runtime-capabilities-\(UUID().uuidString)")
@@ -111,6 +129,9 @@ struct ServerRuntimeCapabilitiesTests {
         try """
         #!/bin/sh
         if [ "$1" = "serve" ] && [ "$2" = "--help" ]; then
+          if \(retainedOutputPipe); then
+            ( sleep 2 ) &
+          fi
           i=0
           while [ "$i" -lt \(helpPaddingLines) ]; do
             echo '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
