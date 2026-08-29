@@ -158,9 +158,12 @@ private final class RuntimeProbeOutputReader: @unchecked Sendable {
     private func readUntilClosedOrDeadline(_ deadline: DispatchTime) -> Data {
         var captured = Data()
 
-        while deadline.uptimeNanoseconds > DispatchTime.now().uptimeNanoseconds {
-            let remainingNanoseconds = deadline.uptimeNanoseconds
-                - DispatchTime.now().uptimeNanoseconds
+        while true {
+            // Capture the clock once. Re-reading it after the comparison can
+            // cross the deadline and underflow this UInt64 subtraction.
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline.uptimeNanoseconds else { break }
+            let remainingNanoseconds = deadline.uptimeNanoseconds - now
             if remainingNanoseconds < 1_000_000 {
                 break
             }
@@ -170,14 +173,14 @@ private final class RuntimeProbeOutputReader: @unchecked Sendable {
                 events: Int16(POLLIN),
                 revents: 0
             )
-            let pollResult = poll(
-                &fileDescriptorSet,
-                1,
-                Int32(min(
-                    remainingNanoseconds / 1_000_000,
-                    UInt64(Int32.max)
-                ))
-            )
+            let timeoutMilliseconds = Int32(min(
+                remainingNanoseconds / 1_000_000,
+                UInt64(Int32.max)
+            ))
+            var pollResult: Int32
+            repeat {
+                pollResult = poll(&fileDescriptorSet, 1, timeoutMilliseconds)
+            } while pollResult == -1 && errno == EINTR
             if pollResult <= 0 {
                 break
             }
