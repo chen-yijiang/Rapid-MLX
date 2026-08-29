@@ -32,19 +32,30 @@ struct ServerRuntimeCapabilities: Equatable, Sendable {
         timeoutSeconds: TimeInterval = 5,
         ambientEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) async -> ServerRuntimeCapabilities {
-        await Task.detached(priority: .utility) {
-            probeBlocking(
-                binary: binary,
-                timeoutSeconds: timeoutSeconds,
-                ambientEnvironment: ambientEnvironment
-            )
-        }.value
+        let cancellation = RuntimeProbeCancellation()
+        return await withTaskCancellationHandler {
+            await Task.detached(priority: .utility) {
+                probeBlocking(
+                    binary: binary,
+                    timeoutSeconds: timeoutSeconds,
+                    ambientEnvironment: ambientEnvironment,
+                    cancellation: cancellation
+                )
+            }.value
+        } onCancel: {
+            // Cancellation means the owning start/quit lifecycle is gone. A
+            // graceful TERM window has no value here: synchronously kill the
+            // isolated probe group so neither its leader nor a helper can be
+            // orphaned while the app exits.
+            cancellation.cancel()
+        }
     }
 
     private static func probeBlocking(
         binary: URL,
         timeoutSeconds: TimeInterval,
-        ambientEnvironment: [String: String]
+        ambientEnvironment: [String: String],
+        cancellation: RuntimeProbeCancellation
     ) -> ServerRuntimeCapabilities {
         let deadline = DispatchTime.now() + .milliseconds(
             max(1, Int(timeoutSeconds * 1000))
@@ -72,6 +83,10 @@ struct ServerRuntimeCapabilities: Equatable, Sendable {
         } catch {
             return .conservative
         }
+        guard cancellation.register(child) else {
+            return .conservative
+        }
+        defer { cancellation.clear(child) }
 
         // Drain help output while the process is running. Waiting for exit
         // before reading can fill the pipe and block the child indefinitely.
@@ -90,6 +105,7 @@ struct ServerRuntimeCapabilities: Equatable, Sendable {
         guard stdoutReader.wait(timeout: deadline) == .success,
               stderrReader.wait(timeout: deadline) == .success,
               DispatchTime.now() < deadline,
+              !cancellation.isCancelled,
               !child.isProcessGroupAlive else {
             terminateProbeGroup(child)
             return .conservative
@@ -125,6 +141,50 @@ struct ServerRuntimeCapabilities: Equatable, Sendable {
         while child.isProcessGroupAlive, Date() < killDeadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
+    }
+}
+
+/// Thread-safe bridge between Swift task cancellation and the blocking POSIX
+/// probe. Registration closes the spawn/cancel race: cancellation before the
+/// child is published kills it as soon as it registers; cancellation after
+/// publication kills the already-owned process group synchronously.
+private final class RuntimeProbeCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var child: ProcessGroupChild?
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func register(_ child: ProcessGroupChild) -> Bool {
+        lock.lock()
+        if cancelled {
+            lock.unlock()
+            child.signalProcessGroup(SIGKILL)
+            return false
+        }
+        self.child = child
+        lock.unlock()
+        return true
+    }
+
+    func clear(_ child: ProcessGroupChild) {
+        lock.lock()
+        if self.child === child {
+            self.child = nil
+        }
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let child = self.child
+        lock.unlock()
+        child?.signalProcessGroup(SIGKILL)
     }
 }
 

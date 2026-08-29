@@ -131,6 +131,91 @@ struct ServerRuntimeCapabilitiesTests {
         #expect(!processExists(descendantPID), "the probe helper must not outlive its process group")
     }
 
+    @Test("cancelling a probe terminates its descendant process group")
+    func probeCancellationTerminatesDescendant() async throws {
+        let descendantPIDFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-runtime-probe-cancel-child-\(UUID().uuidString)")
+        let runtime = try makeRuntimeScript(
+            hangingDescendantPIDFile: descendantPIDFile
+        )
+        let probe = Task {
+            await ServerRuntimeCapabilities.probe(
+                binary: runtime,
+                timeoutSeconds: 30
+            )
+        }
+
+        let fileDeadline = Date().addingTimeInterval(2)
+        while !FileManager.default.fileExists(atPath: descendantPIDFile.path),
+              Date() < fileDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let pidText = try String(contentsOf: descendantPIDFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let descendantPID = try #require(Int32(pidText))
+
+        probe.cancel()
+        #expect(await probe.value == .conservative)
+        let exitDeadline = Date().addingTimeInterval(2)
+        while processExists(descendantPID), Date() < exitDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(!processExists(descendantPID), "cancel must kill the probe helper before returning")
+    }
+
+    @Test("only one start capability probe can own the pre-spawn window")
+    @MainActor
+    func startProbeReservationRejectsConcurrentCaller() async {
+        let gate = RuntimeProbeGate()
+        let manager = ServerManager(
+            testingState: .idle,
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true")
+        )
+        manager.runtimeCapabilitiesProvider = { _ in
+            await gate.wait()
+            return .allKnown
+        }
+
+        let first = Task { @MainActor in
+            await manager._testProbeRuntimeCapabilitiesForStart(
+                binary: URL(fileURLWithPath: "/usr/bin/true")
+            )
+        }
+        await gate.waitUntilEntered()
+        let second = await manager._testProbeRuntimeCapabilitiesForStart(
+            binary: URL(fileURLWithPath: "/usr/bin/true")
+        )
+        #expect(second == nil)
+        #expect(await gate.entryCount == 1)
+
+        await gate.release()
+        #expect(await first.value == .allKnown)
+    }
+
+    @Test("app shutdown cancels an owned pre-spawn capability probe")
+    @MainActor
+    func shutdownCancelsStartProbe() async {
+        let witness = RuntimeProbeCancellationWitness()
+        let manager = ServerManager(
+            testingState: .idle,
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true")
+        )
+        manager.runtimeCapabilitiesProvider = { _ in
+            await witness.run()
+        }
+        let probe = Task { @MainActor in
+            await manager._testProbeRuntimeCapabilitiesForStart(
+                binary: URL(fileURLWithPath: "/usr/bin/true")
+            )
+        }
+
+        await witness.waitUntilEntered()
+        manager.beginShutdown()
+
+        #expect(await probe.value == nil)
+        #expect(await witness.wasCancelled)
+    }
+
     @Test("probe bounds a descendant that retains the output pipe")
     func probeBoundsRetainedOutputPipe() async throws {
         let runtime = try makeRuntimeScript(retainedOutputPipe: true)
@@ -206,5 +291,52 @@ struct ServerRuntimeCapabilitiesTests {
     private func processExists(_ pid: Int32) -> Bool {
         if kill(pid, 0) == 0 { return true }
         return errno == EPERM
+    }
+}
+
+private actor RuntimeProbeGate {
+    private var entered = 0
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    var entryCount: Int { entered }
+
+    func wait() async {
+        entered += 1
+        guard !released else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilEntered() async {
+        while entered == 0 {
+            await Task.yield()
+        }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor RuntimeProbeCancellationWitness {
+    private var entered = false
+    private(set) var wasCancelled = false
+
+    func run() async -> ServerRuntimeCapabilities {
+        entered = true
+        do {
+            try await Task.sleep(for: .seconds(30))
+        } catch is CancellationError {
+            wasCancelled = true
+        } catch {}
+        return .conservative
+    }
+
+    func waitUntilEntered() async {
+        while !entered {
+            await Task.yield()
+        }
     }
 }
