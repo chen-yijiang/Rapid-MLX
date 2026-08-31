@@ -129,6 +129,26 @@ struct StreamingMarkdownDocumentTests {
         #expect(document.stableBlocks.first?.source.contains("[the docs]") == true)
     }
 
+    @Test("A multiline reference label remains mutable until its definition")
+    func multilineReferenceLabelKeepsParity() {
+        let source = """
+            [foo
+            bar]
+
+            Next paragraph
+
+            [foo bar]: /target
+            """
+        var document = StreamingMarkdownDocument()
+
+        for character in source {
+            document.append(String(character))
+        }
+        document.finish()
+
+        #expect(document.result.items == MarkdownCompiler().compile(source).items)
+    }
+
     @Test("A complete inline link does not block stable prefix commitment")
     func inlineLinkCanCommit() {
         var document = StreamingMarkdownDocument()

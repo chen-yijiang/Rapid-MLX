@@ -159,7 +159,10 @@ struct MarkdownCompiler: Sendable {
         var searchStart = scanRange.lowerBound
         while searchStart < scanRange.upperBound,
               let match = source.range(
-                of: #"(?<!\\)\[[^\]\n]+\](?!\()"#,
+                // CommonMark reference labels may contain a soft line
+                // ending. The scan is already bounded to one parsed block,
+                // so allowing newlines here cannot consume later blocks.
+                of: #"(?<!\\)\[[^\]]+\](?!\()"#,
                 options: .regularExpression,
                 range: searchStart..<scanRange.upperBound
               ) {
