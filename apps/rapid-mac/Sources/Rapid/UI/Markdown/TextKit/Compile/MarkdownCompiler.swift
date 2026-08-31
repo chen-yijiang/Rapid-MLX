@@ -166,22 +166,39 @@ struct MarkdownCompiler: Sendable {
     private static func index(at location: SourceLocation, in source: String) -> String.Index? {
         guard location.line >= 1, location.column >= 1 else { return nil }
 
+        let utf8 = source.utf8
         var line = 1
-        var lineStart = source.startIndex
+        var lineStart = utf8.startIndex
         while line < location.line {
-            guard let newline = source[lineStart...].firstIndex(where: \.isNewline) else {
-                return nil
+            guard lineStart < utf8.endIndex else { return nil }
+            var cursor = lineStart
+            while cursor < utf8.endIndex, utf8[cursor] != 0x0A, utf8[cursor] != 0x0D {
+                cursor = utf8.index(after: cursor)
             }
-            lineStart = source.index(after: newline)
+            guard cursor < utf8.endIndex else { return nil }
+
+            // SourceLocation counts CRLF as one line ending. Consume the pair
+            // explicitly instead of relying on String's grapheme clustering.
+            if utf8[cursor] == 0x0D {
+                cursor = utf8.index(after: cursor)
+                if cursor < utf8.endIndex, utf8[cursor] == 0x0A {
+                    cursor = utf8.index(after: cursor)
+                }
+            } else {
+                cursor = utf8.index(after: cursor)
+            }
+            lineStart = cursor
             line += 1
         }
 
-        let utf8 = source.utf8
-        guard let utf8LineStart = lineStart.samePosition(in: utf8),
-              let utf8Target = utf8.index(
-                utf8LineStart,
+        var lineEnd = lineStart
+        while lineEnd < utf8.endIndex, utf8[lineEnd] != 0x0A, utf8[lineEnd] != 0x0D {
+            lineEnd = utf8.index(after: lineEnd)
+        }
+        guard let utf8Target = utf8.index(
+                lineStart,
                 offsetBy: location.column - 1,
-                limitedBy: utf8.endIndex
+                limitedBy: lineEnd
               ) else {
             return nil
         }
