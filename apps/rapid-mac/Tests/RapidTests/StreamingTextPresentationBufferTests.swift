@@ -41,6 +41,31 @@ struct StreamingTextPresentationBufferTests {
         #expect(deltas.allSatisfy { $0.count == 1 })
     }
 
+    @Test("Transport chunks may complete the final pending grapheme")
+    func chunkBoundaryCanExtendPendingGrapheme() {
+        var buffer = StreamingTextPresentationBuffer(
+            configuration: .init(targetLatency: 1, completionDrainDuration: 1)
+        )
+
+        #expect(buffer.receive("e") == .appended)
+        #expect(buffer.receive("e\u{301}") == .appended)
+        #expect(buffer.pendingGraphemeCount == 1)
+        #expect(buffer.presentFrame(duration: frameDuration) == "e\u{301}")
+        #expect(!buffer.hasPendingText)
+    }
+
+    @Test("A growing correction resets instead of appending to stale text")
+    func growingCorrectionResets() {
+        var buffer = StreamingTextPresentationBuffer()
+        buffer.receive("teh")
+        _ = buffer.presentFrame(duration: frameDuration)
+
+        #expect(buffer.receive("the answer") == .reset)
+        #expect(buffer.receivedText == "the answer")
+        #expect(buffer.presentedText.isEmpty)
+        #expect(buffer.pendingText == "the answer")
+    }
+
     @Test("Adaptive rate bounds a large backlog")
     func adaptiveRateBoundsBacklog() {
         var buffer = StreamingTextPresentationBuffer()

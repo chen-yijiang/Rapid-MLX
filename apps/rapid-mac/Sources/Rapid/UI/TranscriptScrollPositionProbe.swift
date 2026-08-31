@@ -8,6 +8,10 @@ import SwiftUI
 struct TranscriptScrollPositionProbe: NSViewRepresentable {
     @Binding var isPinnedToBottom: Bool
     let bottomResumeSlack: CGFloat
+    /// Whether an answer is currently being written. A followed transcript
+    /// releases once the new answer grows beyond one viewport, so the reader
+    /// can start at its beginning without fighting continuous auto-scroll.
+    var isStreaming: Bool = false
     /// Bumped by anything outside that wants the transcript moved to the
     /// bottom right now, ``JumpToBottomButton`` being the only caller today.
     ///
@@ -41,6 +45,7 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
             isPinnedToBottom: $isPinnedToBottom,
             bottomResumeSlack: bottomResumeSlack
         )
+        context.coordinator.setStreaming(isStreaming)
         context.coordinator.attach(to: probe)
         // After ``attach``: a first render arrives with the token already at
         // its initial value, and attaching is what anchors that one.
@@ -97,6 +102,9 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
                 attachmentChanged = true
             }
             attachmentChanged = observeDocumentViewIfNeeded() || attachmentChanged
+            if isStreaming, documentHeightAtStreamStart == nil {
+                documentHeightAtStreamStart = documentView?.bounds.height
+            }
             // updateNSView runs for every streamed mutation. Document-frame
             // notifications own steady-state following; only a new attachment
             // needs an explicit initial anchor (#1877).
@@ -129,6 +137,7 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
             bottomScrollScheduled = false
             pendingBottomTargetIsAnimated = true
             lastDocumentHeight = nil
+            documentHeightAtStreamStart = nil
             cancelScrollTarget()
         }
 
@@ -184,7 +193,50 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
                 from: previousHeight, to: height
             ) else { return }
             guard isPinnedToBottom.wrappedValue else { return }
+            if releaseIfAnswerOutgrewViewport() { return }
             requestScrollToBottom()
+        }
+
+        private var didReleaseForCurrentStream = false
+        private var isStreaming = false
+        private var documentHeightAtStreamStart: CGFloat?
+
+        func setStreaming(_ streaming: Bool) {
+            guard streaming != isStreaming else { return }
+            isStreaming = streaming
+            if streaming {
+                didReleaseForCurrentStream = false
+                documentHeightAtStreamStart = documentView?.bounds.height
+            } else {
+                documentHeightAtStreamStart = nil
+            }
+        }
+
+        private func releaseIfAnswerOutgrewViewport() -> Bool {
+            guard isStreaming, !didReleaseForCurrentStream else { return false }
+            guard let scrollView, let documentView,
+                  let startingHeight = documentHeightAtStreamStart else { return false }
+            let viewportHeight = scrollView.contentView.bounds.height
+            guard Self.answerOutgrewViewport(
+                documentHeight: documentView.bounds.height,
+                documentHeightAtStreamStart: startingHeight,
+                viewportHeight: viewportHeight
+            ) else { return false }
+            didReleaseForCurrentStream = true
+            cancelScrollTarget()
+            if isPinnedToBottom.wrappedValue {
+                isPinnedToBottom.wrappedValue = false
+            }
+            return true
+        }
+
+        nonisolated static func answerOutgrewViewport(
+            documentHeight: CGFloat,
+            documentHeightAtStreamStart: CGFloat,
+            viewportHeight: CGFloat
+        ) -> Bool {
+            viewportHeight > 0
+                && documentHeight - documentHeightAtStreamStart > viewportHeight
         }
 
         /// Frame notifications also cover unchanged-size layout passes. Only

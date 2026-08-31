@@ -189,13 +189,14 @@ struct JumpToBottomScrollTests {
         #expect(scrollView.contentView.bounds.origin == originBeforeFrame)
     }
 
-    @Test("A long streaming answer stays pinned without user input")
-    func longAnswerKeepsFollowing() async {
+    @Test("A long streaming answer releases after one viewport")
+    func longAnswerReleasesFollowing() async {
         var pinned = true
         let binding = Binding(get: { pinned }, set: { pinned = $0 })
         let (scrollView, document, probe) = makeScrollView()
         let coordinator = makeCoordinator(pinned: binding)
 
+        coordinator.setStreaming(true)
         coordinator.attach(to: probe)
         await settle()
         #expect(abs(scrollView.contentView.bounds.minY - 1_800) < 1)
@@ -204,8 +205,22 @@ struct JumpToBottomScrollTests {
         await settle()
         coordinator.advanceScrollFrame(duration: 1.0 / 60.0)
 
-        #expect(pinned)
-        #expect(scrollView.contentView.bounds.minY > 1_800)
+        #expect(!pinned)
+        #expect(abs(scrollView.contentView.bounds.minY - 1_800) < 1)
+    }
+
+    @Test("Answer growth threshold is one viewport")
+    func answerGrowthThreshold() {
+        #expect(!TranscriptScrollPositionProbe.Coordinator.answerOutgrewViewport(
+            documentHeight: 2_200,
+            documentHeightAtStreamStart: 2_000,
+            viewportHeight: 200
+        ))
+        #expect(TranscriptScrollPositionProbe.Coordinator.answerOutgrewViewport(
+            documentHeight: 2_201,
+            documentHeightAtStreamStart: 2_000,
+            viewportHeight: 200
+        ))
     }
 }
 

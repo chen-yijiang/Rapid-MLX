@@ -39,33 +39,25 @@ struct StreamingTextPresentationBuffer: Equatable {
         let previousByteCount = receivedText.utf8.count
         let nextByteCount = text.utf8.count
 
-        if nextByteCount < previousByteCount
-            || (nextByteCount == previousByteCount && text != receivedText) {
-            receivedText = text
-            presentedText = ""
-            pendingText = text
-            pendingGraphemeCount = text.count
-            graphemesPerSecond = 0
-            updateReleaseRate(targetDuration: configuration.targetLatency)
-            return .reset
-        }
+        guard text != receivedText else { return .unchanged }
+        guard nextByteCount >= previousByteCount,
+              text.utf8.prefix(previousByteCount).elementsEqual(receivedText.utf8)
+        else { return reset(to: text) }
         guard nextByteCount > previousByteCount else { return .unchanged }
 
         let utf8 = text.utf8
         let suffixStart = utf8.index(utf8.startIndex, offsetBy: previousByteCount)
         guard let suffix = String(utf8[suffixStart...]) else {
-            receivedText = text
-            presentedText = ""
-            pendingText = text
-            pendingGraphemeCount = text.count
-            graphemesPerSecond = 0
-            updateReleaseRate(targetDuration: configuration.targetLatency)
-            return .reset
+            return reset(to: text)
         }
 
         receivedText = text
         pendingText.append(suffix)
-        pendingGraphemeCount += suffix.count
+        // A newly appended scalar can extend the final pending grapheme
+        // (combining marks, emoji modifiers and ZWJ sequences). Recount the
+        // short visual backlog after concatenation instead of adding two
+        // counts whose boundary may have merged.
+        pendingGraphemeCount = pendingText.count
         updateReleaseRate(targetDuration: configuration.targetLatency)
         return .appended
     }
@@ -121,5 +113,15 @@ struct StreamingTextPresentationBuffer: Equatable {
             graphemesPerSecond,
             Double(pendingGraphemeCount) / safeTarget
         )
+    }
+
+    private mutating func reset(to text: String) -> ReceiveResult {
+        receivedText = text
+        presentedText = ""
+        pendingText = text
+        pendingGraphemeCount = text.count
+        graphemesPerSecond = 0
+        updateReleaseRate(targetDuration: configuration.targetLatency)
+        return .reset
     }
 }
