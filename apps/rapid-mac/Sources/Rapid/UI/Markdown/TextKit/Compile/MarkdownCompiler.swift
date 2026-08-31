@@ -64,6 +64,46 @@ struct MarkdownCompiler: Sendable {
             parsing: String(stablePrefix),
             options: [.parseBlockDirectives]
         )
+        if let definitionOffset = Self.firstReferenceDefinitionUTF8Offset(
+            in: stableDocument,
+            source: String(stablePrefix)
+        ),
+           let definitionUTF8 = source.utf8.index(
+            source.utf8.startIndex,
+            offsetBy: definitionOffset,
+            limitedBy: source.utf8.endIndex
+           ),
+           let definitionStart = definitionUTF8.samePosition(in: source) {
+            let safePrefix = source[..<definitionStart]
+            let safeSource = String(safePrefix)
+            let safeDocument = Document(
+                parsing: safeSource,
+                options: [.parseBlockDirectives]
+            )
+            if let blockedLocation = Self.firstPotentialReferenceBlock(
+                in: safeDocument,
+                source: safeSource
+            ),
+               let blockedStart = Self.index(at: blockedLocation, in: source) {
+                let prefixBeforeReference = source[..<blockedStart]
+                guard blockedStart > source.startIndex,
+                      Self.hasBlankLineBoundary(in: prefixBeforeReference) else {
+                    return nil
+                }
+                return TopLevelStreamingSplit(
+                    stablePrefix: String(prefixBeforeReference),
+                    mutableTail: String(source[blockedStart...])
+                )
+            }
+            guard definitionStart > source.startIndex,
+                  Self.hasBlankLineBoundary(in: safePrefix) else {
+                return nil
+            }
+            return TopLevelStreamingSplit(
+                stablePrefix: String(safePrefix),
+                mutableTail: String(source[definitionStart...])
+            )
+        }
         if let blockedLocation = Self.firstPotentialReferenceBlock(
             in: stableDocument,
             source: String(stablePrefix)
@@ -84,6 +124,37 @@ struct MarkdownCompiler: Sendable {
             stablePrefix: String(stablePrefix),
             mutableTail: String(source[tailStart...])
         )
+    }
+
+    /// Keep a definition and everything after it in one compiler document.
+    /// A later independently-compiled segment may reference it, while the
+    /// parser intentionally emits definitions as no visible AST node. Code
+    /// and HTML ranges are excluded so a literal `[name]: value` does not
+    /// disable incremental splitting for the rest of a code-heavy answer.
+    private static func firstReferenceDefinitionUTF8Offset(
+        in document: Document,
+        source: String
+    ) -> Int? {
+        var opaqueRanges: [Range<String.Index>] = []
+        collectReferenceOpaqueRanges(in: document, source: source, into: &opaqueRanges)
+
+        var searchStart = source.startIndex
+        while searchStart < source.endIndex,
+              let match = source.range(
+                of: #"(?m)^[ ]{0,3}\[[^\]\r\n]+\]:"#,
+                options: .regularExpression,
+                range: searchStart..<source.endIndex
+            ) {
+            if !opaqueRanges.contains(where: { $0.overlaps(match) }),
+               let utf8Index = match.lowerBound.samePosition(in: source.utf8) {
+                return source.utf8.distance(
+                    from: source.utf8.startIndex,
+                    to: utf8Index
+                )
+            }
+            searchStart = match.upperBound
+        }
+        return nil
     }
 
     /// Convert swift-markdown's one-based UTF-8 line/column location into a

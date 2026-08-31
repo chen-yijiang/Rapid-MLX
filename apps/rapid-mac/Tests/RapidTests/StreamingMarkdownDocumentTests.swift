@@ -149,6 +149,28 @@ struct StreamingMarkdownDocumentTests {
         #expect(document.result.items == MarkdownCompiler().compile(source).items)
     }
 
+    @Test("A definition remains available to references in later blocks")
+    func earlierDefinitionKeepsLaterReferenceParity() {
+        let first = "Intro.\n\n[docs]: /guide\n\nMiddle."
+        let source = first + "\n\nRead [docs]."
+        var document = StreamingMarkdownDocument()
+
+        document.append(first)
+        document.append("\n\nRead [docs].")
+        document.finish()
+
+        #expect(document.result.items == MarkdownCompiler().compile(source).items)
+    }
+
+    @Test("A definition-shaped code line does not pin the mutable tail")
+    func definitionInsideCodeRemainsOpaque() {
+        var document = StreamingMarkdownDocument()
+        document.append("```text\n[docs]: /literal\n```\n\nNext paragraph")
+
+        #expect(document.stableBlocks.count == 1)
+        #expect(document.mutableSource == "Next paragraph")
+    }
+
     @Test("A complete inline link does not block stable prefix commitment")
     func inlineLinkCanCommit() {
         var document = StreamingMarkdownDocument()
@@ -198,8 +220,10 @@ struct StreamingMarkdownDocumentTests {
             "\n\n[**the docs**]: https://rapidmlx.ai/docs\n\nAfter the definition"
         )
 
-        #expect(document.stableBlocks.contains { $0.source.contains("[**the docs**]:") })
-        #expect(document.mutableSource == "After the definition")
+        #expect(document.stableBlocks.count == 1)
+        #expect(document.mutableSource.hasPrefix("Read [**the docs**]."))
+        #expect(document.mutableSource.contains("[**the docs**]: https://rapidmlx.ai/docs"))
+        #expect(document.mutableSource.hasSuffix("After the definition"))
         document.finish()
         let source = document.receivedSource
         #expect(document.result.items == MarkdownCompiler().compile(source).items)
