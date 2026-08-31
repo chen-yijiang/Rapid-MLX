@@ -79,15 +79,51 @@ struct StreamingMarkdownDocument: Sendable {
     }
 
     var segments: [Segment] {
-        var output = stableBlocks.map {
+        var raw = stableBlocks.map {
             Segment(id: $0.id, result: $0.result, isMutable: false)
         }
         if !mutableResult.items.isEmpty {
-            output.append(Segment(
+            raw.append(Segment(
                 id: mutableID,
                 result: mutableResult,
                 isMutable: true
             ))
+        }
+        var output: [Segment] = []
+        for segment in raw {
+            guard var previous = output.last,
+                  case let .images(previousImages)? = previous.result.items.last,
+                  case let .images(nextImages)? = segment.result.items.first
+            else {
+                output.append(segment)
+                continue
+            }
+
+            var previousItems = previous.result.items
+            previousItems[previousItems.count - 1] = .images(.init(
+                urls: previousImages.urls + nextImages.urls,
+                altTexts: previousImages.altTexts + nextImages.altTexts
+            ))
+            previous = Segment(
+                id: previous.id,
+                result: MarkdownResult(
+                    items: previousItems,
+                    revision: max(previous.result.revision, segment.result.revision)
+                ),
+                isMutable: previous.isMutable || segment.isMutable
+            )
+            output[output.count - 1] = previous
+
+            let remaining = Array(segment.result.items.dropFirst())
+            if !remaining.isEmpty {
+                output.append(Segment(
+                    id: segment.id,
+                    result: MarkdownResult(
+                        items: remaining, revision: segment.result.revision
+                    ),
+                    isMutable: segment.isMutable
+                ))
+            }
         }
         return output
     }

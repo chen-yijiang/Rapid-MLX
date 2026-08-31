@@ -16,6 +16,11 @@ struct StreamingTextPresentationBufferTests {
         while let delta = buffer.presentFrame(duration: frameDuration) {
             deltas.append(delta)
         }
+        while let delta = buffer.presentFrame(
+            duration: frameDuration, isFinishing: true
+        ) {
+            deltas.append(delta)
+        }
 
         #expect(deltas.count > 1)
         #expect(deltas.count <= 8)
@@ -36,6 +41,11 @@ struct StreamingTextPresentationBufferTests {
         while let delta = buffer.presentFrame(duration: frameDuration) {
             deltas.append(delta)
         }
+        while let delta = buffer.presentFrame(
+            duration: frameDuration, isFinishing: true
+        ) {
+            deltas.append(delta)
+        }
 
         #expect(deltas == graphemes)
         #expect(deltas.allSatisfy { $0.count == 1 })
@@ -50,8 +60,30 @@ struct StreamingTextPresentationBufferTests {
         #expect(buffer.receive("e") == .appended)
         #expect(buffer.receive("e\u{301}") == .appended)
         #expect(buffer.pendingGraphemeCount == 1)
-        #expect(buffer.presentFrame(duration: frameDuration) == "e\u{301}")
+        #expect(buffer.presentFrame(duration: frameDuration) == nil)
+        #expect(buffer.presentFrame(
+            duration: frameDuration, isFinishing: true
+        ) == "e\u{301}")
         #expect(!buffer.hasPendingText)
+    }
+
+    @Test("A displayed frame never exposes an extensible grapheme tail")
+    func holdsExtensibleTailAcrossFrames() {
+        var buffer = StreamingTextPresentationBuffer(
+            configuration: .init(targetLatency: 1, completionDrainDuration: 1)
+        )
+
+        buffer.receive("👨")
+        #expect(buffer.presentFrame(duration: frameDuration) == nil)
+        buffer.receive("👨‍👩")
+        #expect(buffer.presentFrame(duration: frameDuration) == nil)
+        buffer.receive("👨‍👩x")
+        #expect(buffer.presentFrame(duration: frameDuration) == "👨‍👩")
+        #expect(buffer.presentFrame(duration: frameDuration) == nil)
+        #expect(buffer.presentFrame(
+            duration: frameDuration, isFinishing: true
+        ) == "x")
+        #expect(buffer.presentedText == "👨‍👩x")
     }
 
     @Test("A growing correction resets instead of appending to stale text")
@@ -74,7 +106,7 @@ struct StreamingTextPresentationBufferTests {
 
         buffer.receive(source)
         while buffer.hasPendingText {
-            _ = buffer.presentFrame(duration: frameDuration)
+            _ = buffer.presentFrame(duration: frameDuration, isFinishing: true)
             frames += 1
         }
 

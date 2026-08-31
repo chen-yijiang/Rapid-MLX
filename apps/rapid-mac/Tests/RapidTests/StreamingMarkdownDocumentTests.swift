@@ -88,6 +88,27 @@ struct StreamingMarkdownDocumentTests {
         #expect(document.result.items == MarkdownCompiler().compile(source).items)
     }
 
+    @Test("Rendered segments coalesce images across stable boundaries")
+    func renderedSegmentsCoalesceAdjacentImages() {
+        let source = """
+            ![one](https://example.com/one.png)
+
+            ![two](https://example.com/two.png)
+            """
+        var document = StreamingMarkdownDocument()
+        document.append("![one](https://example.com/one.png)\n\n")
+        document.append("![two](https://example.com/two.png)")
+
+        let renderedItems = document.segments.flatMap(\.result.items)
+        #expect(renderedItems == MarkdownCompiler().compile(source).items)
+        #expect(renderedItems.count == 1)
+        guard case let .images(images)? = renderedItems.first else {
+            Issue.record("adjacent images did not render as one grid")
+            return
+        }
+        #expect(images.urls.count == 2)
+    }
+
     @Test("A later reference definition can still style an earlier paragraph")
     func referenceDefinitionsKeepEarlierSourceMutable() {
         let source = """

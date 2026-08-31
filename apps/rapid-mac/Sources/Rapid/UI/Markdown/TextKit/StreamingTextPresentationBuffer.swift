@@ -31,6 +31,9 @@ struct StreamingTextPresentationBuffer: Equatable {
     }
 
     var hasPendingText: Bool { pendingGraphemeCount > 0 }
+    /// The final grapheme stays buffered until another grapheme proves its
+    /// boundary, or completion makes the tail authoritative.
+    var hasPresentableText: Bool { pendingGraphemeCount > 1 }
 
     /// Accept the transport's full accumulated text without scanning its
     /// growing prefix. A non-monotonic update is treated as a replacement.
@@ -67,7 +70,10 @@ struct StreamingTextPresentationBuffer: Equatable {
         duration: TimeInterval,
         isFinishing: Bool = false
     ) -> String? {
-        guard pendingGraphemeCount > 0 else { return nil }
+        let releasableCount = isFinishing
+            ? pendingGraphemeCount
+            : max(0, pendingGraphemeCount - 1)
+        guard releasableCount > 0 else { return nil }
 
         let targetDuration = isFinishing
             ? configuration.completionDrainDuration
@@ -76,7 +82,7 @@ struct StreamingTextPresentationBuffer: Equatable {
 
         let safeDuration = duration.isFinite && duration > 0 ? duration : 1.0 / 60.0
         let releaseCount = min(
-            pendingGraphemeCount,
+            releasableCount,
             max(1, Int(ceil(graphemesPerSecond * safeDuration)))
         )
         let end = pendingText.index(

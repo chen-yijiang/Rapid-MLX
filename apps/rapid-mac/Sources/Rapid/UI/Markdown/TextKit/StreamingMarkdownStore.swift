@@ -56,7 +56,11 @@ final class StreamingMarkdownStore {
 
     var receivedText: String { presentationBuffer.receivedText }
     var pendingGraphemeCount: Int { presentationBuffer.pendingGraphemeCount }
-    var isPresentationActive: Bool { presentationBuffer.hasPendingText }
+    var isPresentationActive: Bool {
+        isFinishing
+            ? presentationBuffer.hasPendingText
+            : presentationBuffer.hasPresentableText
+    }
 
     /// Note new streamed text. It becomes visible on display frames rather
     /// than at the transport's uneven delivery cadence.

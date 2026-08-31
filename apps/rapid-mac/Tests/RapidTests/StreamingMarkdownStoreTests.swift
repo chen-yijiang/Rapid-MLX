@@ -19,13 +19,14 @@ struct StreamingMarkdownStoreTests {
         store.enqueue(id: id, text: "First paragraph.\n\nSecond paragraph grows.")
         presentAll(store)
 
-        #expect(store.document.receivedSource == "First paragraph.\n\nSecond paragraph grows.")
+        #expect(store.receivedText == "First paragraph.\n\nSecond paragraph grows.")
+        #expect(store.document.receivedSource == "First paragraph.\n\nSecond paragraph grows")
         #expect(store.document.stableBlocks == [stable])
         #expect(
             store.document.compilationStats.stableFragmentCompilations
                 == stableCompilations
         )
-        #expect(store.document.mutableSource == "Second paragraph grows.")
+        #expect(store.document.mutableSource == "Second paragraph grows")
     }
 
     @Test("Finishing preserves the final segments for row handoff")
@@ -91,7 +92,8 @@ struct StreamingMarkdownStoreTests {
 
         #expect(store.messageID == secondID)
         #expect(store.documentMessageID == secondID)
-        #expect(store.document.receivedSource == "New answer")
+        #expect(store.receivedText == "New answer")
+        #expect(store.document.receivedSource == "New answe")
         #expect(store.document.stableBlocks.isEmpty)
         #expect(store.segments.map(\.id) == [0])
         #expect(!store.hasDocument(for: firstID))
@@ -108,9 +110,10 @@ struct StreamingMarkdownStoreTests {
         store.enqueue(id: id, text: "Replacement")
         presentAll(store)
 
-        #expect(store.document.receivedSource == "Replacement")
+        #expect(store.receivedText == "Replacement")
+        #expect(store.document.receivedSource == "Replacemen")
         #expect(store.document.stableBlocks.isEmpty)
-        #expect(store.document.mutableSource == "Replacement")
+        #expect(store.document.mutableSource == "Replacemen")
     }
 
     @Test("Transport input stays buffered until a presentation frame")
