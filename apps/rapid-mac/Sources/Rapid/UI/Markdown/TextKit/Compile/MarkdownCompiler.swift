@@ -141,7 +141,11 @@ struct MarkdownCompiler: Sendable {
         var searchStart = source.startIndex
         while searchStart < source.endIndex,
               let match = source.range(
-                of: #"(?m)^[ ]{0,3}\[[^\]\r\n]+\]:"#,
+                // Labels may contain escaped closing brackets and one or
+                // more soft line endings. This deliberately follows the
+                // parser's broad label surface; opaque AST ranges still keep
+                // definition-shaped code and HTML out of the result.
+                of: #"(?m)^[ ]{0,3}\[(?:\\.|[^\]])+\]:"#,
                 options: .regularExpression,
                 range: searchStart..<source.endIndex
             ) {

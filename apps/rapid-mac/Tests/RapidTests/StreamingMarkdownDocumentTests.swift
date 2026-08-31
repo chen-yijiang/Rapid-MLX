@@ -171,6 +171,26 @@ struct StreamingMarkdownDocumentTests {
         #expect(document.mutableSource == "Next paragraph")
     }
 
+    @Test("Escaped and multiline definition labels keep streaming parity")
+    func complexDefinitionLabelsKeepParity() {
+        let sources = [
+            "[foo\\]]: /target\n\nMiddle.\n\nUse [foo\\]].",
+            "[foo\nbar]: /target\n\nMiddle.\n\nUse [foo bar].",
+        ]
+
+        for source in sources {
+            var document = StreamingMarkdownDocument()
+            for character in source {
+                document.append(String(character))
+            }
+            document.finish()
+            #expect(
+                document.result.items == MarkdownCompiler().compile(source).items,
+                "streaming diverged for \(source)"
+            )
+        }
+    }
+
     @Test("A complete inline link does not block stable prefix commitment")
     func inlineLinkCanCommit() {
         var document = StreamingMarkdownDocument()
