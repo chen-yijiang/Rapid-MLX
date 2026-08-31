@@ -70,7 +70,7 @@ struct TextFadeBacklogTests {
         renderer.setBlocks([
             .init(runs: [InlineRun(text: "一二三四五六七八九十")], kind: .paragraph)
         ])
-        renderer.measureHeight(width: 400)
+        _ = renderer.measureHeight(width: 400)
         animator.contentDidGrow()
 
         let start = CACurrentMediaTime()
@@ -180,12 +180,12 @@ struct TextFadeRateTests {
         // compiler produces against a fast model.
         let first = (1...40).map { "word\($0)" }.joined(separator: " ")
         renderer.setBlocks([.init(runs: [InlineRun(text: first)], kind: .paragraph)])
-        renderer.measureHeight(width: 600)
+        _ = renderer.measureHeight(width: 600)
         animator.contentDidGrow()
 
         let second = first + " " + (41...80).map { "word\($0)" }.joined(separator: " ")
         renderer.setBlocks([.init(runs: [InlineRun(text: second)], kind: .paragraph)])
-        renderer.measureHeight(width: 600)
+        _ = renderer.measureHeight(width: 600)
         animator.contentDidGrow()
 
         let rate = animator.animationState.smoothedWordsPerSecond
